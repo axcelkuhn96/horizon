@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 mod input;
 
-pub use input::InputConfig;
+pub use input::{InputConfig, scroll_should_pan_canvas};
 
 use crate::config_migration::{self, CURRENT_CONFIG_VERSION};
 use crate::error::{Error, Result};

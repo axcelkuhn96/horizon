@@ -8,7 +8,7 @@ use egui::{Color32, Context, Margin, Stroke, Vec2};
 use horizon_core::Config;
 
 use super::util::{self, atomic_write};
-use super::{HorizonApp, resolve_shortcuts};
+use super::{HorizonApp, resolve_pan_modifier, resolve_shortcuts};
 use crate::theme;
 
 pub(super) const SETTINGS_BAR_ID: &str = "settings_bar";
@@ -219,6 +219,8 @@ impl HorizonApp {
     pub(super) fn apply_runtime_config(&mut self, config: &Config) {
         self.template_config = config.clone();
         self.shortcuts = resolve_shortcuts(config);
+        self.resolved_pan_modifier = resolve_pan_modifier(config);
+        self.scroll_pans_over_panels = config.input.scroll_pans_over_panels;
         self.action_commands_cache =
             crate::command_registry::action_commands(&self.shortcuts, util::primary_shortcut_label());
         self.presets = config.resolved_presets();

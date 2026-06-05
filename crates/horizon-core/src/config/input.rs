@@ -68,6 +68,25 @@ impl InputConfig {
     }
 }
 
+/// Pure decision: should a wheel/2-finger scroll over a terminal panel pan the
+/// board instead of being forwarded to the panel?
+///
+/// Returns `true` when either the configured `pan_modifier` is currently held
+/// (`held_modifiers` contains it) or `scroll_pans_over_panels` is enabled. With
+/// neither condition met the scroll is left for the terminal (upstream
+/// behaviour: scrollback / PTY), so the result is `false`.
+///
+/// This is intentionally allocation-free and branch-light: it is evaluated on
+/// the input hot path, but only when a scroll event is actually present.
+#[must_use]
+pub fn scroll_should_pan_canvas(
+    held_modifiers: ShortcutModifiers,
+    pan_modifier: ShortcutModifiers,
+    scroll_pans_over_panels: bool,
+) -> bool {
+    scroll_pans_over_panels || held_modifiers.contains(pan_modifier)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -114,6 +133,42 @@ auto_fit_on_focus: false
             input.resolve_pan_modifier().expect("Alt should resolve"),
             ShortcutModifiers::ALT
         );
+    }
+
+    #[test]
+    fn scroll_pans_when_pan_modifier_held() {
+        assert!(scroll_should_pan_canvas(
+            ShortcutModifiers::ALT,
+            ShortcutModifiers::ALT,
+            false
+        ));
+    }
+
+    #[test]
+    fn scroll_pans_when_toggle_enabled_without_modifier() {
+        assert!(scroll_should_pan_canvas(
+            ShortcutModifiers::NONE,
+            ShortcutModifiers::ALT,
+            true
+        ));
+    }
+
+    #[test]
+    fn scroll_does_not_pan_without_modifier_or_toggle() {
+        assert!(!scroll_should_pan_canvas(
+            ShortcutModifiers::NONE,
+            ShortcutModifiers::ALT,
+            false
+        ));
+    }
+
+    #[test]
+    fn scroll_does_not_pan_when_only_other_modifier_held() {
+        assert!(!scroll_should_pan_canvas(
+            ShortcutModifiers::SHIFT,
+            ShortcutModifiers::ALT,
+            false
+        ));
     }
 
     #[test]

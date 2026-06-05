@@ -1,7 +1,7 @@
 use std::mem;
 
 use egui::{Context, Event, Key, Modifiers, Rect, Vec2};
-use horizon_core::WorkspaceId;
+use horizon_core::{ShortcutModifiers, WorkspaceId};
 
 use super::super::super::input::{TerminalInputEvent, terminal_input_events};
 use super::super::shortcuts::shortcut_pressed;
@@ -117,6 +117,37 @@ fn is_space_key_release(event: &Event) -> bool {
 
 fn space_drag_modifier_active(modifiers: Modifiers) -> bool {
     !modifiers.ctrl && !modifiers.command && !modifiers.alt
+}
+
+/// Convert the currently held egui [`Modifiers`] into the
+/// [`ShortcutModifiers`] bitset used by the pan-modifier config so that
+/// [`horizon_core::scroll_should_pan_canvas`] can test membership. `command`
+/// is the platform-primary modifier and is mapped to both `PRIMARY` and the
+/// concrete `CTRL`/`MAC_CMD` bits so a `pan_modifier` of `Ctrl` (which resolves
+/// to `PRIMARY`) or `Control`/`Cmd` all match what the user actually pressed.
+fn held_shortcut_modifiers(modifiers: Modifiers) -> ShortcutModifiers {
+    let mut held = ShortcutModifiers::NONE;
+    if modifiers.alt {
+        held.insert(ShortcutModifiers::ALT);
+    }
+    if modifiers.shift {
+        held.insert(ShortcutModifiers::SHIFT);
+    }
+    if modifiers.ctrl {
+        held.insert(ShortcutModifiers::CTRL);
+    }
+    if modifiers.mac_cmd {
+        held.insert(ShortcutModifiers::MAC_CMD);
+    }
+    if modifiers.command {
+        held.insert(ShortcutModifiers::PRIMARY);
+        held.insert(if cfg!(target_os = "macos") {
+            ShortcutModifiers::MAC_CMD
+        } else {
+            ShortcutModifiers::CTRL
+        });
+    }
+    held
 }
 
 impl HorizonApp {
@@ -237,6 +268,22 @@ impl HorizonApp {
                     .iter()
                     .any(|(_, geometry)| geometry.screen_rect.contains(position))
         });
+        // Story 4: when a scroll lands on a panel and the configured pan
+        // modifier is held (or the toggle is on), pan the board instead of
+        // letting the panel consume the scroll. Only evaluated when a scroll is
+        // actually over a panel, so the input hot path stays cheap.
+        let scroll_pans_over_panel = pointer_over_panel
+            && horizon_core::scroll_should_pan_canvas(
+                held_shortcut_modifiers(modifiers),
+                self.resolved_pan_modifier,
+                self.scroll_pans_over_panels,
+            );
+        if scroll_pans_over_panel {
+            // Drop the wheel events so the terminal widget (rendered later this
+            // frame) does not also scroll the same gesture.
+            ctx.input_mut(|input| input.events.retain(|event| !matches!(event, Event::MouseWheel { .. })));
+        }
+        let pointer_over_panel = pointer_over_panel && !scroll_pans_over_panel;
         let pan_delta = if drag_panning {
             pointer_delta
         } else if pointer_in_canvas && !pointer_over_panel && !ctrl_or_cmd {

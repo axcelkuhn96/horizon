@@ -35,7 +35,7 @@ use egui::{Color32, Context, Pos2, Rect, Vec2, ViewportId};
 use horizon_core::{
     AgentSessionCatalog, AppShortcuts, AppearanceTheme, Board, CanvasViewState, Config, GitWatcher, ManagedInstall,
     PanelId, PresetConfig, RemoteHostCatalog, ResolvedSession, RuntimeState, SessionLease, SessionStore,
-    ShutdownProgress, StartupChooser, StartupDecision, WindowConfig, WorkspaceId,
+    ShortcutModifiers, ShutdownProgress, StartupChooser, StartupDecision, WindowConfig, WorkspaceId,
 };
 
 use self::canvas::CanvasGridCache;
@@ -189,6 +189,12 @@ pub struct HorizonApp {
     transcript_root: Option<PathBuf>,
     template_config: Config,
     shortcuts: AppShortcuts,
+    /// Modifier that switches a scroll-over-panel into a canvas pan. Resolved
+    /// once from [`InputConfig::pan_modifier`] at config load/reload time so the
+    /// scroll hot path never parses the string. See [`resolve_pan_modifier`].
+    resolved_pan_modifier: ShortcutModifiers,
+    /// Cached copy of [`InputConfig::scroll_pans_over_panels`].
+    scroll_pans_over_panels: bool,
     presets: Vec<PresetConfig>,
     window_config: WindowConfig,
     detached_workspaces: BTreeMap<String, DetachedWorkspaceViewportState>,
@@ -335,6 +341,8 @@ impl HorizonApp {
             transcript_root: None,
             template_config: config.clone(),
             shortcuts,
+            resolved_pan_modifier: resolve_pan_modifier(config),
+            scroll_pans_over_panels: config.input.scroll_pans_over_panels,
             presets: config.resolved_presets(),
             window_config: config.window.clone(),
             detached_workspaces: BTreeMap::new(),
@@ -449,6 +457,19 @@ fn resolve_shortcuts(config: &Config) -> AppShortcuts {
         Err(error) => {
             tracing::error!("invalid shortcut config loaded at runtime: {error}");
             AppShortcuts::default()
+        }
+    }
+}
+
+/// Resolve the configured scroll-to-pan modifier once at config load/reload
+/// time. Falls back to the default (`Alt`) if the string is invalid so the
+/// scroll hot path always has a usable value without parsing per event.
+fn resolve_pan_modifier(config: &Config) -> ShortcutModifiers {
+    match config.input.resolve_pan_modifier() {
+        Ok(modifier) => modifier,
+        Err(error) => {
+            tracing::error!("invalid pan_modifier config loaded at runtime: {error}");
+            ShortcutModifiers::ALT
         }
     }
 }

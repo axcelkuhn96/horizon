@@ -38,7 +38,7 @@ pub use board::{
 };
 pub use config::{
     AppearanceConfig, AppearanceTheme, Config, FeaturesConfig, InputConfig, OverlaysConfig, PresetConfig,
-    ShortcutsConfig, TerminalConfig, WindowConfig, WorkspaceConfig,
+    ShortcutsConfig, TerminalConfig, WindowConfig, WorkspaceConfig, scroll_should_pan_canvas,
 };
 pub use editor::{MarkdownEditor, PanelContent, PreviewMode};
 pub use error::{Error, Result};
