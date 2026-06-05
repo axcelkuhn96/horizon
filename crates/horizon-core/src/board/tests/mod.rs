@@ -2,6 +2,7 @@ use crate::panel::{PanelKind, PanelOptions};
 
 mod core;
 mod layout;
+mod navigation;
 mod workspace;
 
 fn editor_panel_options() -> PanelOptions {

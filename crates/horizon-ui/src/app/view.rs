@@ -197,6 +197,23 @@ impl HorizonApp {
         true
     }
 
+    /// Snap the viewport to fit a single panel (instant, no animation),
+    /// mirroring [`Self::fit_workspace_in_rect`] but for one panel's frame.
+    pub(super) fn fit_panel_in_rect(&mut self, panel_id: PanelId, canvas_rect: Rect) -> bool {
+        let Some((pos, size)) = self.panel_focus_frame(panel_id) else {
+            return false;
+        };
+
+        let zoom = fit_zoom_for_frame(canvas_rect.size(), size, Vec2::splat(64.0));
+        let pan_offset = aligned_pan_offset(canvas_rect, pos, size, zoom, false);
+
+        self.pan_target = None;
+        self.canvas_view.set_zoom(zoom);
+        self.canvas_view.set_pan_offset([pan_offset.x, pan_offset.y]);
+        self.mark_runtime_dirty();
+        true
+    }
+
     fn reveal_initial_workspace(&mut self, ctx: &Context, workspace_id: WorkspaceId, workspace_count_before: usize) {
         if workspace_count_before != 0 {
             return;

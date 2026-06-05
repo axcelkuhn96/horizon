@@ -1,9 +1,11 @@
 mod arrangement;
 mod attention;
 mod geometry;
+mod navigation;
 mod shutdown;
 mod workspaces;
 
+pub use navigation::{Direction, PanelRect, nearest_in_direction};
 pub use shutdown::ShutdownProgress;
 
 use std::collections::{HashMap, HashSet};

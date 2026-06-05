@@ -1,4 +1,4 @@
-use horizon_core::{AppShortcuts, PanelId, WorkspaceId};
+use horizon_core::{AppShortcuts, Direction, PanelId, WorkspaceId};
 
 /// Every dispatchable action in Horizon.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -6,6 +6,8 @@ pub enum CommandId {
     // Navigation
     SwitchWorkspace(WorkspaceId),
     FocusPanel(PanelId),
+    /// Move focus to the nearest panel in the given direction (spatial nav).
+    FocusPanelDirection(Direction),
     FocusActiveWorkspace,
     FitActiveWorkspace,
 

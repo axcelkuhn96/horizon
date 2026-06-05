@@ -1,4 +1,5 @@
 use egui::Context;
+use horizon_core::Direction;
 
 use crate::app::HorizonApp;
 use crate::app::shortcuts::shortcut_pressed;
@@ -65,6 +66,9 @@ impl HorizonApp {
                 {
                     self.focus_workspace_bounds(ctx, min, max, true);
                 }
+            }
+            CommandId::FocusPanelDirection(direction) => {
+                self.focus_panel_in_direction(ctx, direction);
             }
             CommandId::FocusActiveWorkspace => {
                 let _ = self.focus_active_workspace(ctx, false);
@@ -138,6 +142,25 @@ impl HorizonApp {
         }
     }
 
+    /// Move focus to the nearest panel in `direction` within the focused
+    /// panel's workspace. When `auto_fit_on_focus` is enabled, snap the
+    /// viewport to fit the newly focused panel. No-op when there is no focused
+    /// panel or no neighbor in that direction.
+    fn focus_panel_in_direction(&mut self, ctx: &Context, direction: Direction) {
+        let Some(current) = self.board.focused else {
+            return;
+        };
+        let Some(target) = self.board.panel_in_direction(current, direction) else {
+            return;
+        };
+
+        self.board.focus(target);
+        if self.template_config.input.auto_fit_on_focus {
+            let canvas_rect = self.canvas_rect(ctx);
+            let _ = self.fit_panel_in_rect(target, canvas_rect);
+        }
+    }
+
     pub(in crate::app) fn handle_shortcuts(&mut self, ctx: &Context) {
         let shortcut_bindings: &[(_, CommandId)] = &[
             (self.shortcuts.zoom_reset, CommandId::ZoomReset),
@@ -145,6 +168,22 @@ impl HorizonApp {
             (self.shortcuts.zoom_out, CommandId::ZoomOut),
             (self.shortcuts.focus_active_workspace, CommandId::FocusActiveWorkspace),
             (self.shortcuts.fit_active_workspace, CommandId::FitActiveWorkspace),
+            (
+                self.shortcuts.focus_panel_left,
+                CommandId::FocusPanelDirection(Direction::Left),
+            ),
+            (
+                self.shortcuts.focus_panel_right,
+                CommandId::FocusPanelDirection(Direction::Right),
+            ),
+            (
+                self.shortcuts.focus_panel_up,
+                CommandId::FocusPanelDirection(Direction::Up),
+            ),
+            (
+                self.shortcuts.focus_panel_down,
+                CommandId::FocusPanelDirection(Direction::Down),
+            ),
             (
                 self.shortcuts.align_workspaces_horizontally,
                 CommandId::AlignWorkspacesHorizontally,
