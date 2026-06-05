@@ -32,10 +32,14 @@ enum EditableShortcut {
     FullscreenWindow,
     SaveEditor,
     SearchTerminals,
+    FocusPanelLeft,
+    FocusPanelRight,
+    FocusPanelUp,
+    FocusPanelDown,
 }
 
 impl EditableShortcut {
-    const ALL: [Self; 19] = [
+    const ALL: [Self; 23] = [
         Self::CommandPalette,
         Self::NewTerminal,
         Self::FocusWorkspace,
@@ -55,6 +59,10 @@ impl EditableShortcut {
         Self::FullscreenWindow,
         Self::SaveEditor,
         Self::SearchTerminals,
+        Self::FocusPanelLeft,
+        Self::FocusPanelRight,
+        Self::FocusPanelUp,
+        Self::FocusPanelDown,
     ];
 
     fn label(self) -> &'static str {
@@ -78,6 +86,10 @@ impl EditableShortcut {
             Self::FullscreenWindow => "Fullscreen Window",
             Self::SaveEditor => "Save Editor",
             Self::SearchTerminals => "Search Terminals",
+            Self::FocusPanelLeft => "Focus Panel Left",
+            Self::FocusPanelRight => "Focus Panel Right",
+            Self::FocusPanelUp => "Focus Panel Up",
+            Self::FocusPanelDown => "Focus Panel Down",
         }
     }
 
@@ -102,6 +114,10 @@ impl EditableShortcut {
             Self::FullscreenWindow => &mut shortcuts.fullscreen_window,
             Self::SaveEditor => &mut shortcuts.save_editor,
             Self::SearchTerminals => &mut shortcuts.search,
+            Self::FocusPanelLeft => &mut shortcuts.focus_panel_left,
+            Self::FocusPanelRight => &mut shortcuts.focus_panel_right,
+            Self::FocusPanelUp => &mut shortcuts.focus_panel_up,
+            Self::FocusPanelDown => &mut shortcuts.focus_panel_down,
         }
     }
 }
@@ -278,5 +294,51 @@ mod tests {
         *EditableShortcut::SearchTerminals.value_mut(&mut shortcuts) = "Alt+F".to_string();
 
         assert_eq!(shortcuts.search, "Alt+F");
+    }
+
+    #[test]
+    fn editable_shortcuts_include_focus_panel_directions() {
+        assert!(EditableShortcut::ALL.contains(&EditableShortcut::FocusPanelLeft));
+        assert!(EditableShortcut::ALL.contains(&EditableShortcut::FocusPanelRight));
+        assert!(EditableShortcut::ALL.contains(&EditableShortcut::FocusPanelUp));
+        assert!(EditableShortcut::ALL.contains(&EditableShortcut::FocusPanelDown));
+    }
+
+    #[test]
+    fn focus_panel_rows_update_the_expected_config_fields() {
+        let mut shortcuts = ShortcutsConfig::default();
+        *EditableShortcut::FocusPanelLeft.value_mut(&mut shortcuts) = "Alt+Left".to_string();
+        *EditableShortcut::FocusPanelRight.value_mut(&mut shortcuts) = "Alt+Right".to_string();
+        *EditableShortcut::FocusPanelUp.value_mut(&mut shortcuts) = "Alt+Up".to_string();
+        *EditableShortcut::FocusPanelDown.value_mut(&mut shortcuts) = "Alt+Down".to_string();
+
+        assert_eq!(shortcuts.focus_panel_left, "Alt+Left");
+        assert_eq!(shortcuts.focus_panel_right, "Alt+Right");
+        assert_eq!(shortcuts.focus_panel_up, "Alt+Up");
+        assert_eq!(shortcuts.focus_panel_down, "Alt+Down");
+    }
+
+    #[test]
+    fn all_editable_shortcuts_map_to_distinct_config_fields() {
+        assert_eq!(EditableShortcut::ALL.len(), 23);
+
+        // Each variant writes a unique marker into its field; distinct field
+        // pointers are proven by recovering every marker afterwards.
+        let mut shortcuts = ShortcutsConfig::default();
+        for (index, shortcut) in EditableShortcut::ALL.iter().enumerate() {
+            *shortcut.value_mut(&mut shortcuts) = index.to_string();
+        }
+
+        let mut markers: Vec<String> = EditableShortcut::ALL
+            .iter()
+            .map(|shortcut| {
+                let mut copy = shortcuts.clone();
+                shortcut.value_mut(&mut copy).clone()
+            })
+            .collect();
+        markers.sort();
+        markers.dedup();
+
+        assert_eq!(markers.len(), EditableShortcut::ALL.len());
     }
 }

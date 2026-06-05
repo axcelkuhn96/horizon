@@ -350,6 +350,10 @@ pub struct ShortcutsConfig {
     pub fullscreen_window: String,
     pub save_editor: String,
     pub search: String,
+    pub focus_panel_left: String,
+    pub focus_panel_right: String,
+    pub focus_panel_up: String,
+    pub focus_panel_down: String,
 }
 
 impl Default for ShortcutsConfig {
@@ -374,6 +378,10 @@ impl Default for ShortcutsConfig {
             fullscreen_window: "Ctrl+Shift+F11".to_string(),
             save_editor: "Ctrl+Shift+S".to_string(),
             search: "Ctrl+Shift+F".to_string(),
+            focus_panel_left: "Ctrl+Shift+Left".to_string(),
+            focus_panel_right: "Ctrl+Shift+Right".to_string(),
+            focus_panel_up: "Ctrl+Shift+Up".to_string(),
+            focus_panel_down: "Ctrl+Shift+Down".to_string(),
         }
     }
 }
@@ -408,6 +416,10 @@ impl ShortcutsConfig {
             fullscreen_window: parse_shortcut("fullscreen_window", &self.fullscreen_window)?,
             save_editor: parse_shortcut("save_editor", &self.save_editor)?,
             search: parse_shortcut("search", &self.search)?,
+            focus_panel_left: parse_shortcut("focus_panel_left", &self.focus_panel_left)?,
+            focus_panel_right: parse_shortcut("focus_panel_right", &self.focus_panel_right)?,
+            focus_panel_up: parse_shortcut("focus_panel_up", &self.focus_panel_up)?,
+            focus_panel_down: parse_shortcut("focus_panel_down", &self.focus_panel_down)?,
         };
 
         validate_distinct_shortcuts([
@@ -430,6 +442,10 @@ impl ShortcutsConfig {
             ("fullscreen_window", shortcuts.fullscreen_window),
             ("save_editor", shortcuts.save_editor),
             ("search", shortcuts.search),
+            ("focus_panel_left", shortcuts.focus_panel_left),
+            ("focus_panel_right", shortcuts.focus_panel_right),
+            ("focus_panel_up", shortcuts.focus_panel_up),
+            ("focus_panel_down", shortcuts.focus_panel_down),
         ])?;
 
         Ok(shortcuts)
@@ -902,6 +918,79 @@ mod tests {
             shortcuts.toggle_sessions,
             crate::shortcuts::ShortcutBinding::parse("Alt+J").expect("shortcut should parse")
         );
+    }
+
+    #[test]
+    fn focus_panel_default_strings_parse_to_expected_bindings() {
+        use crate::shortcuts::{ShortcutBinding, ShortcutKey, ShortcutModifiers};
+
+        let defaults = super::ShortcutsConfig::default();
+        let ps = ShortcutModifiers::PRIMARY_SHIFT;
+
+        assert_eq!(
+            ShortcutBinding::parse(&defaults.focus_panel_left).expect("focus_panel_left should parse"),
+            ShortcutBinding::new(ps, ShortcutKey::ArrowLeft)
+        );
+        assert_eq!(
+            ShortcutBinding::parse(&defaults.focus_panel_right).expect("focus_panel_right should parse"),
+            ShortcutBinding::new(ps, ShortcutKey::ArrowRight)
+        );
+        assert_eq!(
+            ShortcutBinding::parse(&defaults.focus_panel_up).expect("focus_panel_up should parse"),
+            ShortcutBinding::new(ps, ShortcutKey::ArrowUp)
+        );
+        assert_eq!(
+            ShortcutBinding::parse(&defaults.focus_panel_down).expect("focus_panel_down should parse"),
+            ShortcutBinding::new(ps, ShortcutKey::ArrowDown)
+        );
+    }
+
+    #[test]
+    fn default_shortcuts_resolve_includes_focus_panel_bindings() {
+        use crate::shortcuts::{ShortcutBinding, ShortcutKey, ShortcutModifiers};
+
+        let shortcuts = super::ShortcutsConfig::default()
+            .resolve()
+            .expect("default shortcuts should resolve without conflicts");
+        let ps = ShortcutModifiers::PRIMARY_SHIFT;
+
+        assert_eq!(
+            shortcuts.focus_panel_left,
+            ShortcutBinding::new(ps, ShortcutKey::ArrowLeft)
+        );
+        assert_eq!(
+            shortcuts.focus_panel_right,
+            ShortcutBinding::new(ps, ShortcutKey::ArrowRight)
+        );
+        assert_eq!(shortcuts.focus_panel_up, ShortcutBinding::new(ps, ShortcutKey::ArrowUp));
+        assert_eq!(
+            shortcuts.focus_panel_down,
+            ShortcutBinding::new(ps, ShortcutKey::ArrowDown)
+        );
+    }
+
+    #[test]
+    fn focus_panel_shortcut_colliding_with_existing_is_rejected() {
+        let error = Config::from_yaml("shortcuts:\n  focus_panel_left: Ctrl+Shift+K\n")
+            .expect_err("config should reject focus_panel shortcut colliding with command_palette");
+
+        let message = error.to_string();
+        assert!(message.contains("focus_panel_left"));
+        assert!(message.contains("duplicate shortcut") || message.contains("conflicts with"));
+        assert!(matches!(error, crate::Error::Config(_)));
+    }
+
+    #[test]
+    fn duplicate_focus_panel_shortcuts_are_rejected() {
+        let error = Config::from_yaml(
+            "shortcuts:\n  focus_panel_left: Ctrl+Shift+Left\n  focus_panel_right: Ctrl+Shift+Left\n",
+        )
+        .expect_err("config should reject two focus_panel shortcuts sharing a binding");
+
+        let message = error.to_string();
+        assert!(message.contains("focus_panel_right"));
+        assert!(message.contains("duplicate shortcut") || message.contains("conflicts with"));
+        assert!(matches!(error, crate::Error::Config(_)));
     }
 
     #[test]

@@ -247,6 +247,10 @@ pub struct AppShortcuts {
     pub fullscreen_window: ShortcutBinding,
     pub save_editor: ShortcutBinding,
     pub search: ShortcutBinding,
+    pub focus_panel_left: ShortcutBinding,
+    pub focus_panel_right: ShortcutBinding,
+    pub focus_panel_up: ShortcutBinding,
+    pub focus_panel_down: ShortcutBinding,
 }
 
 impl Default for AppShortcuts {
@@ -272,6 +276,10 @@ impl Default for AppShortcuts {
             fullscreen_window: ShortcutBinding::new(ps, ShortcutKey::Function(11)),
             save_editor: ShortcutBinding::new(ps, ShortcutKey::Letter('S')),
             search: ShortcutBinding::new(ps, ShortcutKey::Letter('F')),
+            focus_panel_left: ShortcutBinding::new(ps, ShortcutKey::ArrowLeft),
+            focus_panel_right: ShortcutBinding::new(ps, ShortcutKey::ArrowRight),
+            focus_panel_up: ShortcutBinding::new(ps, ShortcutKey::ArrowUp),
+            focus_panel_down: ShortcutBinding::new(ps, ShortcutKey::ArrowDown),
         }
     }
 }
@@ -543,6 +551,26 @@ mod tests {
         );
         assert_eq!(shortcuts.zoom_in, ShortcutBinding::new(primary, ShortcutKey::Plus));
         assert_eq!(shortcuts.zoom_out, ShortcutBinding::new(primary, ShortcutKey::Minus));
+    }
+
+    #[test]
+    fn app_shortcuts_default_focus_panel_bindings() {
+        let shortcuts = AppShortcuts::default();
+        let ps = ShortcutModifiers::PRIMARY_SHIFT;
+
+        assert_eq!(
+            shortcuts.focus_panel_left,
+            ShortcutBinding::new(ps, ShortcutKey::ArrowLeft)
+        );
+        assert_eq!(
+            shortcuts.focus_panel_right,
+            ShortcutBinding::new(ps, ShortcutKey::ArrowRight)
+        );
+        assert_eq!(shortcuts.focus_panel_up, ShortcutBinding::new(ps, ShortcutKey::ArrowUp));
+        assert_eq!(
+            shortcuts.focus_panel_down,
+            ShortcutBinding::new(ps, ShortcutKey::ArrowDown)
+        );
     }
 
     #[test]
