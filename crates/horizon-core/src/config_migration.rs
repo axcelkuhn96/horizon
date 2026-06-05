@@ -9,7 +9,7 @@ use crate::error::{Error, Result};
 use crate::panel::{PanelKind, PanelResume};
 use crate::shortcuts::ShortcutBinding;
 
-pub const CURRENT_CONFIG_VERSION: u32 = 8;
+pub const CURRENT_CONFIG_VERSION: u32 = 9;
 
 /// Run any pending migrations on `config` and write back to disk.
 ///
@@ -33,6 +33,7 @@ pub fn migrate_if_needed(config: &mut Config, config_path: &Path) -> Result<bool
             5 => migrate_v5_to_v6(config),
             6 => migrate_v6_to_v7(config),
             7 => migrate_v7_to_v8(config),
+            8 => migrate_v8_to_v9(config),
             _ => {
                 return Err(Error::Config(format!(
                     "unknown config version {version}, expected 1..={CURRENT_CONFIG_VERSION}"
@@ -131,6 +132,14 @@ fn migrate_v6_to_v7(config: &mut Config) {
 fn migrate_v7_to_v8(config: &mut Config) {
     insert_missing_pi_presets(&mut config.presets);
 }
+
+/// v8 -> v9: introduce the `input:` section.
+///
+/// Purely additive: `Config::input` carries `#[serde(default)]`, so an old v8
+/// YAML without an `input:` block already deserializes to `InputConfig`
+/// defaults. No field rewrites are needed — the only observable change is the
+/// version bump applied by `migrate_if_needed`.
+fn migrate_v8_to_v9(_config: &mut Config) {}
 
 /// Remove every preset matching `should_remove`, then insert `replacement()`
 /// at the slot of the first removed preset (unless a preset named
@@ -369,7 +378,7 @@ presets:
         assert_eq!(config.version, CURRENT_CONFIG_VERSION);
 
         let reloaded = std::fs::read_to_string(&path).expect("read back");
-        assert!(reloaded.contains("version: 8"));
+        assert!(reloaded.contains("version: 9"));
         assert!(reloaded.contains("Ctrl+Shift+K"));
         assert!(reloaded.contains("zoom_reset: Ctrl+0"));
         assert!(reloaded.contains("appearance:"));
@@ -378,7 +387,7 @@ presets:
     #[test]
     fn serialized_config_includes_version() {
         let yaml = Config::default().to_yaml().expect("should serialize");
-        assert!(yaml.contains("version: 8"));
+        assert!(yaml.contains("version: 9"));
     }
 
     #[test]
@@ -885,5 +894,55 @@ presets:
             .expect("codex preset");
         assert_eq!(codex.args, vec!["--no-alt-screen".to_string()]);
         assert_eq!(codex.alias.as_deref(), Some("cx"));
+    }
+
+    #[test]
+    fn migration_v8_to_v9_yields_input_defaults_without_input_section() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("config.yaml");
+        let v8_yaml = "version: 8\nworkspaces: []\n";
+        std::fs::write(&path, v8_yaml).expect("write");
+
+        let mut config: Config = serde_yaml::from_str(v8_yaml).expect("should deserialize");
+        let migrated = migrate_if_needed(&mut config, &path).expect("should succeed");
+
+        assert!(migrated);
+        assert_eq!(config.version, CURRENT_CONFIG_VERSION);
+        assert_eq!(config.version, 9);
+        assert!(!config.input.scroll_pans_over_panels);
+        assert_eq!(config.input.pan_modifier, "Alt");
+        assert!(config.input.auto_fit_on_focus);
+    }
+
+    #[test]
+    fn migration_v8_to_v9_preserves_explicit_input_section() {
+        let mut config: Config = serde_yaml::from_str(
+            "\
+version: 8
+input:
+  scroll_pans_over_panels: true
+  pan_modifier: Ctrl
+  auto_fit_on_focus: false
+",
+        )
+        .expect("should deserialize");
+
+        migrate_v8_to_v9(&mut config);
+
+        assert!(config.input.scroll_pans_over_panels);
+        assert_eq!(config.input.pan_modifier, "Ctrl");
+        assert!(!config.input.auto_fit_on_focus);
+    }
+
+    #[test]
+    fn migration_is_idempotent_on_current_version() {
+        let mut config = Config::default();
+        assert_eq!(config.version, CURRENT_CONFIG_VERSION);
+        let tmp = tempfile::NamedTempFile::new().expect("temp file");
+
+        let migrated = migrate_if_needed(&mut config, tmp.path()).expect("should succeed");
+
+        assert!(!migrated, "migrating an already-current config is a no-op");
+        assert_eq!(config.version, CURRENT_CONFIG_VERSION);
     }
 }

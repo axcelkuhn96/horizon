@@ -58,6 +58,24 @@ impl ShortcutModifiers {
     pub const fn mac_cmd(self) -> bool {
         self.contains(Self::MAC_CMD)
     }
+
+    /// Parse a single modifier token (e.g. `Alt`, `Ctrl`, `Shift`) into its
+    /// [`ShortcutModifiers`] value. Token matching is case-insensitive and
+    /// mirrors the modifier aliases accepted by [`ShortcutBinding::parse`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the token is not a recognised modifier name.
+    pub fn parse_single(token: &str) -> Result<Self> {
+        match token.trim().to_ascii_lowercase().as_str() {
+            "ctrl" | "primary" | "cmdorctrl" | "commandorcontrol" => Ok(Self::PRIMARY),
+            "control" => Ok(Self::CTRL),
+            "cmd" | "command" | "maccmd" => Ok(Self::MAC_CMD),
+            "alt" | "option" => Ok(Self::ALT),
+            "shift" => Ok(Self::SHIFT),
+            other => Err(Error::Config(format!("unsupported modifier `{other}`"))),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -114,17 +132,12 @@ impl ShortcutBinding {
 
         let mut modifiers = ShortcutModifiers::NONE;
         for token in modifier_tokens {
-            let token = token.to_ascii_lowercase();
-            let modifier = match token.as_str() {
-                "ctrl" | "primary" | "cmdorctrl" | "commandorcontrol" => ShortcutModifiers::PRIMARY,
-                "control" => ShortcutModifiers::CTRL,
-                "cmd" | "command" | "maccmd" => ShortcutModifiers::MAC_CMD,
-                "alt" | "option" => ShortcutModifiers::ALT,
-                "shift" => ShortcutModifiers::SHIFT,
-                _ => return Err(Error::Config(format!("unsupported modifier `{token}`"))),
-            };
+            let modifier = ShortcutModifiers::parse_single(token)?;
             if modifiers.contains(modifier) {
-                return Err(Error::Config(format!("duplicate modifier `{token}`")));
+                return Err(Error::Config(format!(
+                    "duplicate modifier `{}`",
+                    token.to_ascii_lowercase()
+                )));
             }
             modifiers.insert(modifier);
         }
@@ -472,6 +485,25 @@ mod tests {
         let error = ShortcutBinding::parse("Ctrl++").expect_err("shortcut should be rejected");
 
         assert!(error.to_string().contains("empty component"));
+    }
+
+    #[test]
+    fn parses_single_modifier_token() {
+        assert_eq!(
+            ShortcutModifiers::parse_single("Alt").expect("alt should parse"),
+            ShortcutModifiers::ALT
+        );
+        assert_eq!(
+            ShortcutModifiers::parse_single("shift").expect("shift should parse"),
+            ShortcutModifiers::SHIFT
+        );
+    }
+
+    #[test]
+    fn single_modifier_rejects_unknown_token() {
+        let error = ShortcutModifiers::parse_single("Bogus").expect_err("unknown modifier should be rejected");
+
+        assert!(error.to_string().contains("unsupported modifier"));
     }
 
     #[test]

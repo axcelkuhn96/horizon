@@ -2,6 +2,10 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+mod input;
+
+pub use input::InputConfig;
+
 use crate::config_migration::{self, CURRENT_CONFIG_VERSION};
 use crate::error::{Error, Result};
 use crate::horizon_home::HorizonHome;
@@ -23,6 +27,8 @@ pub struct Config {
     pub overlays: OverlaysConfig,
     #[serde(default)]
     pub features: FeaturesConfig,
+    #[serde(default)]
+    pub input: InputConfig,
     #[serde(default = "default_presets")]
     pub presets: Vec<PresetConfig>,
     #[serde(default)]
@@ -45,6 +51,7 @@ impl Default for Config {
             shortcuts: ShortcutsConfig::default(),
             overlays: OverlaysConfig::default(),
             features: FeaturesConfig::default(),
+            input: InputConfig::default(),
             presets: default_presets(),
             workspaces: Vec::new(),
         }
@@ -621,6 +628,7 @@ impl Config {
     /// Returns an error if any configured shortcut is invalid or duplicated.
     pub fn validate(&self) -> Result<()> {
         self.shortcuts.resolve()?;
+        self.input.resolve_pan_modifier()?;
         validate_ssh_connections(&self.presets, &self.workspaces)?;
         Ok(())
     }
