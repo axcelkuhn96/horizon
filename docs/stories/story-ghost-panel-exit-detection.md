@@ -66,7 +66,7 @@ The core already detects death — only SSH panels consume it:
 - [x] Task 4 (input): generalize the reconnect-request predicate + keyboard
       gate to dead non-SSH terminal panels (TDD following `input.rs:912+`
       test patterns). Mouse/scrollback/copy untouched.
-- [ ] Task 5 (sidebar): extend Restart button condition to Shell/Command.
+- [x] Task 5 (sidebar): extend Restart button condition to Shell/Command.
 - [ ] Task 6 (delivery): full gates → release build → install
       `~/.local/bin/horizon` → conventional commit → push branch → merge main
       → push main.
@@ -81,6 +81,7 @@ The core already detects death — only SSH panels consume it:
 - `crates/horizon-ui/src/app/panel_chrome.rs` — added `process_exit_label: Option<&'a str>` to `PanelChrome`; added `paint_process_exited_badge` fn (mirrors `paint_ssh_status_badge` geometry, uses `PALETTE_RED`); hooked into `paint_panel_chrome` after the SSH badge block
 - `crates/horizon-ui/src/terminal_widget/mod.rs` — added `use crate::theme;` import; added `render_process_exited_banner` free fn (24 px footer strip, pure painting, no input capture); called from `TerminalView::show` between grid-render and keyboard blocks, gated on `process_exited() && is_rect_visible`
 - `crates/horizon-ui/src/terminal_widget/input.rs` — extracted `restart_shortcut_pressed` helper from `disconnected_ssh_reconnect_requested` (pure refactor); added `exited_panel_restart_requested(process_exited, events) -> bool`; added keyboard gate in `handle_terminal_keyboard_input` after SSH gate (swallows all input on dead panels, returns restart request on Ctrl/Cmd+Shift+R)
+- `crates/horizon-ui/src/app/sidebar.rs` — extended context-menu Restart button condition to include `Shell` and `Command` panel kinds (via `matches!` macro)
 
 ### Notes
 - Do NOT touch replay/transcript flow or spawn logic.

@@ -691,7 +691,11 @@ impl HorizonApp {
             }
 
             ui.separator();
-            if (kind.is_agent() || kind == horizon_core::PanelKind::Ssh)
+            if (kind.is_agent()
+                || matches!(
+                    kind,
+                    horizon_core::PanelKind::Ssh | horizon_core::PanelKind::Shell | horizon_core::PanelKind::Command
+                ))
                 && ui
                     .add(
                         Button::new(
