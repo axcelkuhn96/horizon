@@ -34,5 +34,6 @@ tempfile.workspace = true
 alacritty_terminal.workspace = true
 egui_commonmark.workspace = true
 arboard.workspace = true
+png.workspace = true
 tokio.workspace = true
 surge-core.workspace = true

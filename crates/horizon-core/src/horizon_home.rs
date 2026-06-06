@@ -74,6 +74,12 @@ impl HorizonHome {
         self.plugins_dir().join("claude-code")
     }
 
+    /// Directory where clipboard images pasted into terminals are stored as PNG files.
+    #[must_use]
+    pub fn pasted_dir(&self) -> PathBuf {
+        self.root.join("pasted")
+    }
+
     #[must_use]
     pub fn codex_integrations_dir(&self) -> PathBuf {
         self.root.join("integrations").join("codex")
@@ -112,5 +118,6 @@ mod tests {
             home.claude_plugin_dir(),
             PathBuf::from("/tmp/horizon-home/plugins/claude-code")
         );
+        assert_eq!(home.pasted_dir(), PathBuf::from("/tmp/horizon-home/pasted"));
     }
 }

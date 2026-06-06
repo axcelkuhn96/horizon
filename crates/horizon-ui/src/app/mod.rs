@@ -43,6 +43,7 @@ use super::command_palette::CommandPalette;
 use super::command_registry::CommandEntry;
 use super::dir_picker::DirPicker;
 use super::editor_widget::MarkdownPreviewCache;
+use super::image_paste;
 use super::input;
 use super::primary_selection::PrimarySelection;
 use super::remote_hosts_overlay::RemoteHostsOverlay;
@@ -403,6 +404,47 @@ impl HorizonApp {
             exit_cleanup_complete: false,
         }
     }
+
+    /// When a paste keystroke targets a focused terminal and the clipboard holds
+    /// an image, save it as a PNG and rewrite the frame's input so a single
+    /// [`egui::Event::Paste`] carries the file PATH instead of (or in place of)
+    /// any text paste. This lets CLIs that accept image paths receive the file.
+    ///
+    /// Doing the rewrite here, before [`Self::take_frame_key_events`] consumes
+    /// the observed queue, keeps a single paste event in the frame — there is no
+    /// parallel write path, so there is never a double paste. When there is no
+    /// image (or any failure), the input is left untouched and the normal text
+    /// paste flow proceeds unchanged.
+    fn maybe_rewrite_paste_as_image_path(&mut self, raw_input: &mut egui::RawInput) {
+        // A focused terminal is required: the paste must have a destination.
+        let Some(_) = self.board.focused else {
+            return;
+        };
+
+        let has_text_paste = raw_input
+            .events
+            .iter()
+            .any(|event| matches!(event, egui::Event::Paste(_)));
+        let has_paste_keystroke = self.observed_keyboard_inputs.has_pending_paste_keystroke();
+
+        // Only consult the clipboard when this frame actually carries a paste.
+        if !has_text_paste && !has_paste_keystroke {
+            return;
+        }
+
+        let pasted_dir = self.session_store.home().pasted_dir();
+        let Some(path) = image_paste::read_clipboard_image_to_png(&pasted_dir) else {
+            return;
+        };
+
+        let path_text = path.to_string_lossy().into_owned();
+        tracing::debug!(path = %path.display(), "pasting clipboard image as file path");
+
+        // Replace any text paste with the image-path paste so exactly one paste
+        // reaches the terminal (no double paste).
+        raw_input.events.retain(|event| !matches!(event, egui::Event::Paste(_)));
+        raw_input.events.push(egui::Event::Paste(path_text));
+    }
 }
 
 fn managed_install_state() -> (Option<ManagedInstall>, Option<Instant>) {
@@ -523,6 +565,8 @@ impl eframe::App for HorizonApp {
     }
 
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        self.maybe_rewrite_paste_as_image_path(raw_input);
+
         let viewport_id = raw_input.viewport_id;
         let frame_keyboard_events = self.observed_keyboard_inputs.take_frame_key_events(raw_input);
         if frame_keyboard_events.is_empty() {

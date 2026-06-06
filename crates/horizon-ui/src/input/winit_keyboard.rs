@@ -47,6 +47,19 @@ impl ObservedKeyboardInputs {
             .push_back(observed);
     }
 
+    /// Whether the observed queue currently holds a paste keystroke (for
+    /// example Ctrl+V on Linux). This is used to detect an image-only clipboard
+    /// paste, where egui-winit emits no [`Event::Paste`] because the clipboard
+    /// has no text — so the keystroke is only visible in the raw observed queue.
+    /// Peeking does not consume the queue.
+    pub(crate) fn has_pending_paste_keystroke(&self) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .any(|event| event.kind == KeyboardOutputKind::Paste && event.pressed)
+    }
+
     pub(crate) fn take_frame_key_events(&self, raw_input: &RawInput) -> Vec<FrameKeyEvent> {
         if !raw_input.events.iter().any(EventClassifier::is_keyboard_output) {
             return Vec::new();
@@ -559,6 +572,35 @@ mod tests {
         );
 
         assert!(terminal_events[0].is_plain_ctrl_c_copy_command());
+    }
+
+    #[test]
+    fn has_pending_paste_keystroke_detects_paste_without_consuming() {
+        let observed = super::ObservedKeyboardInputs::default();
+        assert!(!observed.has_pending_paste_keystroke());
+
+        observed
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push_back(ObservedKeyboardEvent {
+                kind: KeyboardOutputKind::Paste,
+                key: Key::V,
+                physical_key: Some(Key::V),
+                pressed: true,
+                modifiers: Modifiers::CTRL,
+                key_without_modifiers_text: Some("v".to_owned()),
+            });
+
+        assert!(observed.has_pending_paste_keystroke());
+        // Peeking must not consume the queued event.
+        assert!(observed.has_pending_paste_keystroke());
+        let remaining = observed
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len();
+        assert_eq!(remaining, 1);
     }
 
     #[test]

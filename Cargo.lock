@@ -1387,6 +1387,7 @@ dependencies = [
  "egui_commonmark",
  "horizon-core",
  "horizon-cursor",
+ "png",
  "profiling",
  "serde_yaml",
  "surge-core",
