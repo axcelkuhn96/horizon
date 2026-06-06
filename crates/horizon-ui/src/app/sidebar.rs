@@ -204,24 +204,22 @@ impl HorizonApp {
             .order(Order::Tooltip)
             .show(ctx, |ui| {
                 let strip_rect = Rect::from_min_size(sidebar_origin, strip_size);
+                let hovered = ui.rect_contains_pointer(strip_rect);
                 let painter = ui.painter_at(strip_rect);
                 painter.rect_filled(strip_rect, CornerRadius::ZERO, theme::BG_ELEVATED());
-                // Subtle accent handle centered vertically, like a grab affordance.
+                // Accent grab-handle; brightens on hover to read as a reveal affordance.
                 let handle_height = (sidebar_height * 0.18).clamp(28.0, 96.0);
                 let handle_rect = Rect::from_center_size(
                     Pos2::new(strip_rect.center().x, strip_rect.center().y),
                     Vec2::new(SIDEBAR_STRIP_WIDTH - 2.0, handle_height),
                 );
-                painter.rect_filled(handle_rect, CornerRadius::same(2), theme::alpha(theme::ACCENT(), 150));
-                painter.line_segment(
-                    [
-                        Pos2::new(strip_rect.max.x, strip_rect.min.y),
-                        Pos2::new(strip_rect.max.x, strip_rect.max.y),
-                    ],
-                    Stroke::new(1.0, theme::BORDER_SUBTLE()),
-                );
+                let handle = theme::alpha(theme::ACCENT(), if hovered { 230 } else { 170 });
+                painter.rect_filled(handle_rect, CornerRadius::same(2), handle);
+                let edge_top = Pos2::new(strip_rect.max.x, strip_rect.min.y);
+                let edge_bottom = Pos2::new(strip_rect.max.x, strip_rect.max.y);
+                painter.line_segment([edge_top, edge_bottom], Stroke::new(1.0, theme::BORDER_SUBTLE()));
                 ui.advance_cursor_after_rect(strip_rect);
-                if ui.rect_contains_pointer(strip_rect) {
+                if hovered {
                     ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
                 }
             });
@@ -852,15 +850,15 @@ fn render_sidebar_workspace_header_row(
     } else {
         "\u{25BC}"
     };
-    // Paint the caret glyph and remember its rect; the interactive hit-test is
-    // performed by the caller (on top of the row interaction) to avoid the
-    // full-row click_and_drag region swallowing the caret click.
-    let caret_color = if workspace.is_active {
+    // Paint the caret glyph and remember its rect; the click hit-test runs in
+    // the caller (on top of the row) so the row drag region cannot swallow it.
+    // The glyph brightens on hover, mirroring the titlebar collapse caret.
+    let caret_rect = ui.allocate_space(Vec2::new(11.0, 22.0)).1;
+    let caret_color = if ui.rect_contains_pointer(caret_rect.expand(4.0)) || workspace.is_active {
         theme::FG_SOFT()
     } else {
-        theme::FG_DIM()
+        theme::alpha(theme::FG_DIM(), 200)
     };
-    let caret_rect = ui.allocate_space(Vec2::new(11.0, 22.0)).1;
     ui.painter().text(
         caret_rect.center(),
         egui::Align2::CENTER_CENTER,
