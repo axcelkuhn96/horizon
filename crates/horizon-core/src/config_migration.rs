@@ -922,7 +922,6 @@ presets:
         assert_eq!(config.version, 10);
         assert!(!config.input.scroll_pans_over_panels);
         assert_eq!(config.input.pan_modifier, "Alt");
-        assert!(config.input.auto_fit_on_focus);
     }
 
     #[test]
@@ -933,7 +932,6 @@ version: 8
 input:
   scroll_pans_over_panels: true
   pan_modifier: Ctrl
-  auto_fit_on_focus: false
 ",
         )
         .expect("should deserialize");
@@ -942,7 +940,6 @@ input:
 
         assert!(config.input.scroll_pans_over_panels);
         assert_eq!(config.input.pan_modifier, "Ctrl");
-        assert!(!config.input.auto_fit_on_focus);
     }
 
     #[test]

@@ -24,7 +24,7 @@
 > | Botão direito no terminal | Menu: Copy / Paste / **Paste Image** |
 > | `Ctrl+V` com imagem no clipboard | Cola o caminho de um PNG temporário (útil pro Claude Code) |
 >
-> Configs em `~/.horizon/config.yaml`: seção `input` (`scroll_pans_over_panels`, `pan_modifier`, `auto_fit_on_focus`) e `overlays.sidebar_auto_hide`.
+> Configs em `~/.horizon/config.yaml`: seção `input` (`scroll_pans_over_panels`, `pan_modifier`) e `overlays.sidebar_auto_hide`.
 >
 > ---
 

@@ -150,9 +150,9 @@ impl HorizonApp {
     }
 
     /// Move focus to the nearest panel in `direction` within the focused
-    /// panel's workspace. When `auto_fit_on_focus` is enabled, snap the
-    /// viewport to fit the newly focused panel. No-op when there is no focused
-    /// panel or no neighbor in that direction.
+    /// panel's workspace. This only moves focus: the current zoom and pan are
+    /// left unchanged (no auto-fit/zoom). No-op when there is no focused panel
+    /// or no neighbor in that direction.
     fn focus_panel_in_direction(&mut self, ctx: &Context, direction: Direction) {
         let Some(current) = self.board.focused else {
             return;
@@ -171,10 +171,6 @@ impl HorizonApp {
         // unchanged.
         if let Some(body_id) = crate::terminal_widget::terminal_focus_id(ctx, target) {
             ctx.memory_mut(|memory| memory.request_focus(body_id));
-        }
-        if self.template_config.input.auto_fit_on_focus {
-            let canvas_rect = self.canvas_rect(ctx);
-            let _ = self.fit_panel_in_rect(target, canvas_rect);
         }
     }
 

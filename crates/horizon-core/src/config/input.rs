@@ -7,8 +7,6 @@ use crate::shortcuts::ShortcutModifiers;
 const DEFAULT_SCROLL_PANS_OVER_PANELS: bool = false;
 /// Default for [`InputConfig::pan_modifier`].
 const DEFAULT_PAN_MODIFIER: &str = "Alt";
-/// Default for [`InputConfig::auto_fit_on_focus`].
-const DEFAULT_AUTO_FIT_ON_FOCUS: bool = true;
 
 fn default_scroll_pans_over_panels() -> bool {
     DEFAULT_SCROLL_PANS_OVER_PANELS
@@ -16,10 +14,6 @@ fn default_scroll_pans_over_panels() -> bool {
 
 fn default_pan_modifier() -> String {
     DEFAULT_PAN_MODIFIER.to_string()
-}
-
-fn default_auto_fit_on_focus() -> bool {
-    DEFAULT_AUTO_FIT_ON_FOCUS
 }
 
 /// Pointer/scroll input behaviour for board navigation.
@@ -34,9 +28,6 @@ pub struct InputConfig {
     /// Parsed via [`InputConfig::resolve_pan_modifier`].
     #[serde(default = "default_pan_modifier")]
     pub pan_modifier: String,
-    /// When `true`, focusing a workspace automatically fits it to the viewport.
-    #[serde(default = "default_auto_fit_on_focus")]
-    pub auto_fit_on_focus: bool,
 }
 
 impl Default for InputConfig {
@@ -44,7 +35,6 @@ impl Default for InputConfig {
         Self {
             scroll_pans_over_panels: default_scroll_pans_over_panels(),
             pan_modifier: default_pan_modifier(),
-            auto_fit_on_focus: default_auto_fit_on_focus(),
         }
     }
 }
@@ -97,7 +87,6 @@ mod tests {
 
         assert!(!input.scroll_pans_over_panels);
         assert_eq!(input.pan_modifier, "Alt");
-        assert!(input.auto_fit_on_focus);
     }
 
     #[test]
@@ -112,17 +101,33 @@ mod tests {
         let yaml = "\
 scroll_pans_over_panels: true
 pan_modifier: Ctrl
-auto_fit_on_focus: false
 ";
         let input: InputConfig = serde_yaml::from_str(yaml).expect("should deserialize");
 
         assert!(input.scroll_pans_over_panels);
         assert_eq!(input.pan_modifier, "Ctrl");
-        assert!(!input.auto_fit_on_focus);
 
         let reserialized = serde_yaml::to_string(&input).expect("should serialize");
         let reparsed: InputConfig = serde_yaml::from_str(&reserialized).expect("should re-deserialize");
         assert_eq!(reparsed, input);
+    }
+
+    #[test]
+    fn legacy_auto_fit_on_focus_key_is_ignored_not_rejected() {
+        // The `auto_fit_on_focus` field was removed when directional focus
+        // became focus-only (no auto-fit/zoom). Existing user configs may still
+        // carry the key; serde must ignore the unknown field rather than fail
+        // to load. There is no `#[serde(deny_unknown_fields)]` on this struct or
+        // its parents, so the legacy key is silently dropped.
+        let yaml = "\
+scroll_pans_over_panels: true
+pan_modifier: Ctrl
+auto_fit_on_focus: true
+";
+        let input: InputConfig = serde_yaml::from_str(yaml).expect("legacy key should be ignored");
+
+        assert!(input.scroll_pans_over_panels);
+        assert_eq!(input.pan_modifier, "Ctrl");
     }
 
     #[test]
