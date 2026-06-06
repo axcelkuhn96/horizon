@@ -32,91 +32,94 @@ struct ThemePalette {
     terminal_palette: [Color32; 16],
 }
 
-// Dark palette: Catppuccin Mocha family, tuned for clear elevation
-// (canvas -> panel -> chrome) and legible foreground tiers.
+// Dark palette: "Ember Forge" — warm charcoal canvas with a molten amber
+// accent. Deliberately warm (taupe/graphite neutrals, no blue cast) for a
+// distinctive forge feel, with a clear elevation ladder
+// (canvas -> panel -> chrome) and legible warm foreground tiers.
 const DARK_THEME: ThemePalette = ThemePalette {
-    bg: Color32::from_rgb(24, 24, 37), // Mocha Mantle: canvas, warmer than near-black
-    bg_elevated: Color32::from_rgb(30, 30, 46), // Mocha Base: first elevation step
-    panel_bg: Color32::from_rgb(30, 30, 46), // Mocha Base: terminal body
-    panel_bg_alt: Color32::from_rgb(49, 50, 68), // Mocha Surface0: chrome / titlebars
-    fg: Color32::from_rgb(205, 214, 244), // Mocha Text
-    fg_soft: Color32::from_rgb(166, 173, 200), // Mocha Subtext0
-    fg_dim: Color32::from_rgb(127, 132, 156), // Mocha Overlay1: brighter dim tier
-    cursor: Color32::from_rgb(180, 190, 254), // Mocha Lavender
-    grid_dot: Color32::from_rgb(49, 50, 68), // Mocha Surface0: visible dot grid
-    accent: Color32::from_rgb(137, 180, 250), // Mocha Blue
-    border_subtle: Color32::from_rgb(69, 71, 90), // Mocha Surface1: readable edges
-    border_strong: Color32::from_rgb(88, 91, 112), // Mocha Surface2
-    titlebar_bg: Color32::from_rgb(17, 17, 27), // Mocha Crust: deepest chrome
-    toolbar_bg: Color32::from_rgb(24, 24, 37), // Mocha Mantle
-    canvas_cool_glow: Color32::from_rgba_unmultiplied_const(110, 145, 240, 26),
-    canvas_warm_glow: Color32::from_rgba_unmultiplied_const(250, 179, 135, 30),
-    btn_close: Color32::from_rgb(243, 139, 168), // Mocha Maroon/Red family
-    palette_green: Color32::from_rgb(166, 227, 161),
-    palette_red: Color32::from_rgb(243, 139, 168),
-    palette_yellow: Color32::from_rgb(249, 226, 175),
-    palette_cyan: Color32::from_rgb(148, 226, 213),
+    bg: Color32::from_rgb(18, 17, 16),            // Forge Coal: warm near-black canvas
+    bg_elevated: Color32::from_rgb(26, 24, 22),   // first elevation step
+    panel_bg: Color32::from_rgb(26, 24, 22),      // terminal body
+    panel_bg_alt: Color32::from_rgb(42, 38, 34),  // warm graphite chrome / titlebars
+    fg: Color32::from_rgb(237, 228, 217),         // warm off-white text
+    fg_soft: Color32::from_rgb(186, 176, 164),    // warm subtext
+    fg_dim: Color32::from_rgb(138, 128, 117),     // warm dim tier
+    cursor: Color32::from_rgb(255, 176, 92),      // bright amber cursor
+    grid_dot: Color32::from_rgb(45, 40, 35),      // warm visible dot grid
+    accent: Color32::from_rgb(245, 158, 66),      // molten amber
+    border_subtle: Color32::from_rgb(58, 52, 46), // readable warm edges
+    border_strong: Color32::from_rgb(82, 73, 64),
+    titlebar_bg: Color32::from_rgb(13, 12, 11), // deepest warm crust
+    toolbar_bg: Color32::from_rgb(18, 17, 16),  // Forge Coal
+    canvas_cool_glow: Color32::from_rgba_unmultiplied_const(255, 122, 70, 24), // ember underglow
+    canvas_warm_glow: Color32::from_rgba_unmultiplied_const(255, 184, 104, 32), // amber bloom
+    btn_close: Color32::from_rgb(255, 107, 90), // warm coral red
+    palette_green: Color32::from_rgb(169, 200, 122), // warm sage
+    palette_red: Color32::from_rgb(255, 107, 90),
+    palette_yellow: Color32::from_rgb(245, 200, 92),
+    palette_cyan: Color32::from_rgb(122, 200, 192), // muted warm teal
     terminal_palette: [
-        Color32::from_rgb(69, 71, 90),    // black (Surface1)
-        Color32::from_rgb(243, 139, 168), // red
-        Color32::from_rgb(166, 227, 161), // green
-        Color32::from_rgb(249, 226, 175), // yellow
-        Color32::from_rgb(137, 180, 250), // blue
-        Color32::from_rgb(245, 194, 231), // magenta (Pink)
-        Color32::from_rgb(148, 226, 213), // cyan (Teal)
-        Color32::from_rgb(186, 194, 222), // white (Subtext1)
-        Color32::from_rgb(88, 91, 112),   // bright black (Surface2)
-        Color32::from_rgb(235, 160, 172), // bright red (Maroon)
-        Color32::from_rgb(166, 227, 161), // bright green
-        Color32::from_rgb(249, 226, 175), // bright yellow
-        Color32::from_rgb(137, 180, 250), // bright blue
-        Color32::from_rgb(245, 194, 231), // bright magenta
-        Color32::from_rgb(148, 226, 213), // bright cyan
-        Color32::from_rgb(205, 214, 244), // bright white (Text)
+        Color32::from_rgb(58, 52, 46),    // black (warm graphite)
+        Color32::from_rgb(255, 107, 90),  // red (coral)
+        Color32::from_rgb(169, 200, 122), // green (sage)
+        Color32::from_rgb(245, 200, 92),  // yellow (amber-gold)
+        Color32::from_rgb(232, 145, 88),  // blue slot -> burnt orange
+        Color32::from_rgb(214, 145, 196), // magenta (dusty rose)
+        Color32::from_rgb(122, 200, 192), // cyan (muted teal)
+        Color32::from_rgb(214, 204, 192), // white (warm light)
+        Color32::from_rgb(82, 73, 64),    // bright black
+        Color32::from_rgb(255, 138, 122), // bright red
+        Color32::from_rgb(188, 216, 142), // bright green
+        Color32::from_rgb(255, 214, 122), // bright yellow
+        Color32::from_rgb(245, 168, 110), // bright blue slot -> amber-orange
+        Color32::from_rgb(232, 168, 214), // bright magenta
+        Color32::from_rgb(146, 218, 210), // bright cyan
+        Color32::from_rgb(237, 228, 217), // bright white (text)
     ],
 };
 
-// Light palette: Catppuccin Latte family, cohesive with the dark theme's
-// elevation logic (canvas -> panel -> chrome) and Latte Blue accent.
+// Light palette: "Ember Forge" light counterpart — warm parchment/sand
+// canvas with a deep terracotta-amber accent, mirroring the dark theme's
+// elevation logic (canvas -> panel -> chrome).
 const LIGHT_THEME: ThemePalette = ThemePalette {
-    bg: Color32::from_rgb(230, 233, 239),            // Latte Mantle: canvas
-    bg_elevated: Color32::from_rgb(239, 241, 245),   // Latte Base
-    panel_bg: Color32::from_rgb(239, 241, 245),      // Latte Base: panel body
-    panel_bg_alt: Color32::from_rgb(204, 208, 218),  // Latte Surface0: chrome
-    fg: Color32::from_rgb(76, 79, 105),              // Latte Text
-    fg_soft: Color32::from_rgb(108, 111, 133),       // Latte Subtext0
-    fg_dim: Color32::from_rgb(140, 143, 161),        // Latte Overlay1
-    cursor: Color32::from_rgb(30, 102, 245),         // Latte Blue
-    grid_dot: Color32::from_rgb(204, 208, 218),      // Latte Surface0
-    accent: Color32::from_rgb(30, 102, 245),         // Latte Blue
-    border_subtle: Color32::from_rgb(188, 192, 204), // Latte Surface1
-    border_strong: Color32::from_rgb(172, 176, 190), // Latte Surface2
-    titlebar_bg: Color32::from_rgb(220, 224, 232),   // Latte Crust
-    toolbar_bg: Color32::from_rgb(230, 233, 239),    // Latte Mantle
-    canvas_cool_glow: Color32::from_rgba_unmultiplied_const(30, 102, 245, 16),
-    canvas_warm_glow: Color32::from_rgba_unmultiplied_const(254, 100, 11, 22),
-    btn_close: Color32::from_rgb(210, 15, 57), // Latte Red
-    palette_green: Color32::from_rgb(5, 150, 105),
-    palette_red: Color32::from_rgb(210, 15, 57),
-    palette_yellow: Color32::from_rgb(217, 119, 6),
-    palette_cyan: Color32::from_rgb(8, 145, 178),
+    bg: Color32::from_rgb(238, 231, 220),            // warm parchment canvas
+    bg_elevated: Color32::from_rgb(247, 242, 234),   // sand base
+    panel_bg: Color32::from_rgb(247, 242, 234),      // panel body
+    panel_bg_alt: Color32::from_rgb(224, 214, 200),  // chrome
+    fg: Color32::from_rgb(58, 48, 40),               // warm espresso text
+    fg_soft: Color32::from_rgb(101, 88, 76),         // warm subtext
+    fg_dim: Color32::from_rgb(140, 126, 112),        // warm dim tier
+    cursor: Color32::from_rgb(193, 102, 23),         // deep terracotta
+    grid_dot: Color32::from_rgb(220, 209, 194),      // warm dot grid
+    accent: Color32::from_rgb(193, 102, 23),         // deep terracotta-amber
+    border_subtle: Color32::from_rgb(212, 200, 184), // readable warm edges
+    border_strong: Color32::from_rgb(190, 176, 158),
+    titlebar_bg: Color32::from_rgb(229, 220, 207), // warm crust
+    toolbar_bg: Color32::from_rgb(238, 231, 220),
+    canvas_cool_glow: Color32::from_rgba_unmultiplied_const(193, 102, 23, 14),
+    canvas_warm_glow: Color32::from_rgba_unmultiplied_const(224, 122, 36, 22),
+    btn_close: Color32::from_rgb(196, 53, 33), // warm brick red
+    palette_green: Color32::from_rgb(76, 128, 52),
+    palette_red: Color32::from_rgb(196, 53, 33),
+    palette_yellow: Color32::from_rgb(176, 116, 18),
+    palette_cyan: Color32::from_rgb(24, 132, 124),
     terminal_palette: [
-        Color32::from_rgb(92, 95, 119),
-        Color32::from_rgb(210, 15, 57),
-        Color32::from_rgb(64, 160, 43),
-        Color32::from_rgb(223, 142, 29),
-        Color32::from_rgb(30, 102, 245),
-        Color32::from_rgb(136, 57, 239),
-        Color32::from_rgb(4, 165, 229),
-        Color32::from_rgb(76, 79, 105),
-        Color32::from_rgb(124, 127, 147),
-        Color32::from_rgb(224, 108, 129),
-        Color32::from_rgb(83, 168, 66),
-        Color32::from_rgb(228, 160, 71),
-        Color32::from_rgb(79, 135, 255),
-        Color32::from_rgb(158, 84, 235),
-        Color32::from_rgb(54, 180, 231),
-        Color32::from_rgb(42, 47, 64),
+        Color32::from_rgb(74, 64, 56),
+        Color32::from_rgb(196, 53, 33),
+        Color32::from_rgb(76, 128, 52),
+        Color32::from_rgb(176, 116, 18),
+        Color32::from_rgb(186, 92, 24),  // blue slot -> burnt orange
+        Color32::from_rgb(150, 64, 132), // magenta (mulberry)
+        Color32::from_rgb(24, 132, 124), // cyan (deep teal)
+        Color32::from_rgb(58, 48, 40),
+        Color32::from_rgb(120, 106, 94),
+        Color32::from_rgb(212, 80, 58),
+        Color32::from_rgb(98, 150, 70),
+        Color32::from_rgb(196, 136, 36),
+        Color32::from_rgb(210, 116, 44), // bright blue slot -> amber-orange
+        Color32::from_rgb(174, 86, 156),
+        Color32::from_rgb(40, 156, 146),
+        Color32::from_rgb(40, 33, 27),
     ],
 };
 
