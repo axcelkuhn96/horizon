@@ -29,6 +29,7 @@ struct StaticPanelSeed {
     position: Option<[f32; 2]>,
     size: Option<[f32; 2]>,
     template: Option<PanelTemplateRef>,
+    collapsed: bool,
 }
 
 struct TerminalLaunchTrace<'a> {
@@ -62,6 +63,7 @@ struct TerminalPanelBuildArgs {
     launch_args: Vec<String>,
     launch_cwd: Option<PathBuf>,
     ssh_connection: Option<SshConnection>,
+    collapsed: bool,
 }
 
 impl StaticPanelSeed {
@@ -82,7 +84,13 @@ impl StaticPanelSeed {
             position,
             size,
             template,
+            collapsed: false,
         }
+    }
+
+    fn with_collapsed(mut self, collapsed: bool) -> Self {
+        self.collapsed = collapsed;
+        self
     }
 
     fn take_title(&mut self, fallback: impl FnOnce() -> String) -> (String, bool) {
@@ -123,6 +131,8 @@ impl StaticPanelSeed {
             launch_cwd,
             ssh_connection: None,
             ssh_status: None,
+            collapsed: self.collapsed,
+            expanded_height: None,
         }
     }
 }
@@ -138,9 +148,11 @@ pub(super) fn spawn_panel(id: PanelId, workspace_id: WorkspaceId, opts: PanelOpt
                 position,
                 size,
                 template,
+                collapsed,
                 ..
             } = opts;
-            let seed = StaticPanelSeed::new(id, workspace_id, local_id, name, position, size, template);
+            let seed = StaticPanelSeed::new(id, workspace_id, local_id, name, position, size, template)
+                .with_collapsed(collapsed);
             spawn_editor(seed, command)
         }
         PanelKind::GitChanges => {
@@ -150,9 +162,11 @@ pub(super) fn spawn_panel(id: PanelId, workspace_id: WorkspaceId, opts: PanelOpt
                 size,
                 template,
                 cwd,
+                collapsed,
                 ..
             } = opts;
-            let seed = StaticPanelSeed::new(id, workspace_id, local_id, name, position, size, template);
+            let seed = StaticPanelSeed::new(id, workspace_id, local_id, name, position, size, template)
+                .with_collapsed(collapsed);
             Ok(spawn_git_changes(seed, cwd))
         }
         PanelKind::Usage => {
@@ -161,9 +175,11 @@ pub(super) fn spawn_panel(id: PanelId, workspace_id: WorkspaceId, opts: PanelOpt
                 position,
                 size,
                 template,
+                collapsed,
                 ..
             } = opts;
-            let seed = StaticPanelSeed::new(id, workspace_id, local_id, name, position, size, template);
+            let seed = StaticPanelSeed::new(id, workspace_id, local_id, name, position, size, template)
+                .with_collapsed(collapsed);
             Ok(spawn_usage(seed))
         }
         _ => spawn_terminal(id, workspace_id, local_id, opts),
@@ -191,6 +207,7 @@ pub(super) fn restore_failure_panel(
         size,
         session_binding,
         template,
+        collapsed,
         ..
     } = opts;
 
@@ -222,6 +239,7 @@ pub(super) fn restore_failure_panel(
             launch_args: args,
             launch_cwd: cwd,
             ssh_connection: saved_ssh_connection,
+            collapsed,
         },
         terminal,
         ssh_status,
@@ -245,6 +263,7 @@ fn spawn_terminal(id: PanelId, workspace_id: WorkspaceId, local_id: String, opts
         template,
         transcript_root,
         restore_as_disconnected_snapshot,
+        collapsed,
         ..
     } = opts;
 
@@ -294,6 +313,7 @@ fn spawn_terminal(id: PanelId, workspace_id: WorkspaceId, local_id: String, opts
         launch_args: saved_args,
         launch_cwd: saved_cwd,
         ssh_connection: saved_ssh_connection,
+        collapsed,
     };
     if restore_as_disconnected_snapshot && panel_args.kind == PanelKind::Ssh && had_persisted_transcript_state {
         return spawn_disconnected_ssh_snapshot_panel(panel_args, rows, cols, replay_bytes);
@@ -472,6 +492,7 @@ fn build_terminal_panel(
         launch_args,
         launch_cwd,
         ssh_connection,
+        collapsed,
     } = panel_args;
     Panel {
         id,
@@ -497,6 +518,8 @@ fn build_terminal_panel(
         launch_cwd,
         ssh_connection,
         ssh_status,
+        collapsed,
+        expanded_height: None,
     }
 }
 

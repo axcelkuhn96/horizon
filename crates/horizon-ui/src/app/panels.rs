@@ -40,6 +40,7 @@ struct PanelSnapshot {
     is_renaming: bool,
     attention_badge: Option<(AttentionSeverity, String)>,
     ssh_status: Option<SshConnectionStatus>,
+    collapsed: bool,
 }
 
 #[derive(Default)]
@@ -59,6 +60,7 @@ enum PanelCommand {
     Close,
     CreateWorkspace,
     StartRename,
+    ToggleCollapse,
 }
 
 struct PanelFrame {
@@ -66,6 +68,7 @@ struct PanelFrame {
     titlebar: Rect,
     body: Rect,
     close: Rect,
+    collapse: Rect,
     resize: Rect,
 }
 
@@ -83,6 +86,12 @@ impl PanelFrame {
             Pos2::new(panel_rect.max.x - 18.0, panel_rect.min.y + PANEL_TITLEBAR_HEIGHT * 0.5),
             Vec2::splat(16.0),
         );
+        // Collapse caret sits immediately to the LEFT of the close button,
+        // mirroring its center-on-titlebar vertical alignment and 16px box.
+        let collapse = Rect::from_center_size(
+            Pos2::new(close.center().x - 22.0, panel_rect.min.y + PANEL_TITLEBAR_HEIGHT * 0.5),
+            Vec2::splat(16.0),
+        );
         let resize = Rect::from_min_size(
             Pos2::new(
                 panel_rect.max.x - RESIZE_HANDLE_SIZE,
@@ -96,6 +105,7 @@ impl PanelFrame {
             titlebar,
             body,
             close,
+            collapse,
             resize,
         }
     }
@@ -184,7 +194,7 @@ impl HorizonApp {
             ),
             canvas_rect,
         )?;
-        let terminal_body_screen_rect = panel.terminal().and_then(|_| {
+        let terminal_body_screen_rect = panel.terminal().filter(|_| !panel.collapsed).and_then(|_| {
             let panel_rect = Rect::from_min_size(canvas_position, canvas_size);
             let body_rect = PanelFrame::new(panel_rect).body;
             clip_screen_rect_to_canvas(
@@ -353,6 +363,7 @@ impl HorizonApp {
                 is_renaming: self.renaming_panel == Some(panel_id),
                 attention_badge,
                 ssh_status: panel.ssh_status(),
+                collapsed: panel.collapsed,
             })
         })
     }
@@ -396,10 +407,17 @@ impl HorizonApp {
                     ui.make_persistent_id(("panel_close", panel_id.0)),
                     if interactive { Sense::click() } else { Sense::hover() },
                 );
+                let collapse_response = ui.interact(
+                    rects.collapse.expand2(Vec2::splat(4.0)),
+                    ui.make_persistent_id(("panel_collapse", panel_id.0)),
+                    if interactive { Sense::click() } else { Sense::hover() },
+                );
+                // A collapsed panel has no body, so its resize handle is hidden
+                // and inert — only sense interactions while expanded.
                 let resize_response = ui.interact(
                     rects.resize.expand2(Vec2::splat(6.0)),
                     ui.make_persistent_id(("panel_resize", panel_id.0)),
-                    if interactive {
+                    if interactive && !snapshot.collapsed {
                         Sense::click_and_drag()
                     } else {
                         Sense::hover()
@@ -411,6 +429,7 @@ impl HorizonApp {
                         snapshot.is_renaming,
                         &drag_response,
                         &close_response,
+                        &collapse_response,
                         &resize_response,
                         &mut outcome,
                     );
@@ -443,12 +462,15 @@ impl HorizonApp {
                         panel_rect: rects.panel,
                         titlebar_rect: rects.titlebar,
                         close_rect: rects.close,
+                        collapse_rect: rects.collapse,
                         resize_rect: rects.resize,
                         title: display_title.as_deref(),
                         history_size: snapshot.history_size,
                         scrollback_limit: snapshot.scrollback_limit,
                         focused: snapshot.is_focused,
                         close_hovered: close_response.hovered(),
+                        collapse_hovered: collapse_response.hovered(),
+                        collapsed: snapshot.collapsed,
                         workspace_accent: snapshot.workspace_accent,
                         attention_badge: snapshot.attention_badge.as_ref(),
                         ssh_status: snapshot.ssh_status,
@@ -467,47 +489,52 @@ impl HorizonApp {
                     );
                 }
 
-                ui.scope_builder(
-                    UiBuilder::new()
-                        .max_rect(rects.body)
-                        .layout(Layout::top_down(Align::Min)),
-                    |ui| {
-                        let mut reconnect_requested = false;
-                        let board = &mut self.board;
-                        let editor_preview_cache = &mut self.editor_preview_cache;
-                        let terminal_grid_cache = &mut self.terminal_grid_cache;
-                        if let Some(panel) = board.panel_mut(panel_id) {
-                            let preview_cache = if panel.kind == PanelKind::Editor {
-                                Some(editor_preview_cache.entry(panel_id).or_default())
-                            } else {
-                                None
-                            };
-                            let grid_cache = if panel.terminal().is_some() {
-                                Some(terminal_grid_cache.entry(panel_id).or_default())
-                            } else {
-                                None
-                            };
-                            outcome.focus_requested |= show_panel_body_contents(
-                                ui,
-                                panel,
-                                snapshot.is_focused,
-                                interactive,
-                                PanelBodyContext {
-                                    keyboard_events: &self.terminal_keyboard_events,
-                                    editor_save_shortcut: self.shortcuts.save_editor,
-                                    editor_preview_cache: preview_cache,
-                                    local_ssh_reconnect_enabled,
-                                    primary_selection: &self.primary_selection,
-                                    reconnect_requested: &mut reconnect_requested,
-                                    terminal_grid_cache: grid_cache,
-                                },
-                            );
-                        }
-                        if reconnect_requested {
-                            self.panels_to_restart.push(panel_id);
-                        }
-                    },
-                );
+                // When collapsed, the panel is titlebar-only: skip the body
+                // entirely. The PTY/terminal session is untouched and keeps
+                // running, so re-expanding shows the preserved output.
+                if !snapshot.collapsed {
+                    ui.scope_builder(
+                        UiBuilder::new()
+                            .max_rect(rects.body)
+                            .layout(Layout::top_down(Align::Min)),
+                        |ui| {
+                            let mut reconnect_requested = false;
+                            let board = &mut self.board;
+                            let editor_preview_cache = &mut self.editor_preview_cache;
+                            let terminal_grid_cache = &mut self.terminal_grid_cache;
+                            if let Some(panel) = board.panel_mut(panel_id) {
+                                let preview_cache = if panel.kind == PanelKind::Editor {
+                                    Some(editor_preview_cache.entry(panel_id).or_default())
+                                } else {
+                                    None
+                                };
+                                let grid_cache = if panel.terminal().is_some() {
+                                    Some(terminal_grid_cache.entry(panel_id).or_default())
+                                } else {
+                                    None
+                                };
+                                outcome.focus_requested |= show_panel_body_contents(
+                                    ui,
+                                    panel,
+                                    snapshot.is_focused,
+                                    interactive,
+                                    PanelBodyContext {
+                                        keyboard_events: &self.terminal_keyboard_events,
+                                        editor_save_shortcut: self.shortcuts.save_editor,
+                                        editor_preview_cache: preview_cache,
+                                        local_ssh_reconnect_enabled,
+                                        primary_selection: &self.primary_selection,
+                                        reconnect_requested: &mut reconnect_requested,
+                                        terminal_grid_cache: grid_cache,
+                                    },
+                                );
+                            }
+                            if reconnect_requested {
+                                self.panels_to_restart.push(panel_id);
+                            }
+                        },
+                    );
+                }
             });
 
         outcome
@@ -517,6 +544,7 @@ impl HorizonApp {
         is_renaming: bool,
         drag_response: &egui::Response,
         close_response: &egui::Response,
+        collapse_response: &egui::Response,
         resize_response: &egui::Response,
         outcome: &mut PanelUiOutcome,
     ) {
@@ -537,6 +565,10 @@ impl HorizonApp {
         }
         if close_response.clicked() {
             outcome.command = Some(PanelCommand::Close);
+        }
+        if collapse_response.clicked() {
+            outcome.command = Some(PanelCommand::ToggleCollapse);
+            outcome.focus_requested = true;
         }
         if !is_renaming && drag_response.double_clicked() {
             outcome.command = Some(PanelCommand::StartRename);
@@ -628,6 +660,14 @@ impl HorizonApp {
         }
         self.panel_screen_order.push(panel_id);
 
+        if matches!(outcome.command, Some(PanelCommand::ToggleCollapse)) {
+            if let Some(panel) = self.board.panel_mut(panel_id) {
+                panel.toggle_collapsed(PANEL_TITLEBAR_HEIGHT);
+            }
+            self.mark_runtime_dirty();
+            ctx.request_repaint();
+        }
+
         if matches!(outcome.command, Some(PanelCommand::StartRename)) {
             self.clear_workspace_rename();
             self.renaming_panel = Some(panel_id);
@@ -704,8 +744,25 @@ impl HorizonApp {
 
 #[cfg(test)]
 mod tests {
-    use super::clip_screen_rect_to_canvas;
+    use super::{PanelFrame, clip_screen_rect_to_canvas};
     use egui::{Pos2, Rect, Vec2};
+
+    #[test]
+    fn collapse_caret_sits_left_of_close_within_titlebar() {
+        let panel_rect = Rect::from_min_size(Pos2::new(100.0, 80.0), Vec2::new(520.0, 340.0));
+        let frame = PanelFrame::new(panel_rect);
+
+        assert!(
+            frame.collapse.center().x < frame.close.center().x,
+            "collapse caret must be left of the close button"
+        );
+        assert!(
+            frame.titlebar.contains(frame.collapse.center()),
+            "collapse caret must lie within the titlebar"
+        );
+        // Caret and close should not overlap.
+        assert!(frame.collapse.max.x <= frame.close.min.x + f32::EPSILON);
+    }
 
     #[test]
     fn clip_screen_rect_to_canvas_intersects_with_canvas_bounds() {

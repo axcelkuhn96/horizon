@@ -243,6 +243,7 @@ impl RuntimeState {
                             editor_content: editor
                                 .filter(|editor| editor.file_path.is_none() && !editor.text.is_empty())
                                 .map(|editor| editor.text.clone()),
+                            collapsed: panel.collapsed,
                         }
                     })
                     .collect();
@@ -404,6 +405,9 @@ pub struct PanelState {
     /// Scratch editor buffer content (persisted for file-less editors).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub editor_content: Option<String>,
+    /// Whether the panel is collapsed to titlebar-only. Persists across relaunch.
+    #[serde(default)]
+    pub collapsed: bool,
 }
 
 impl PanelState {
@@ -449,6 +453,7 @@ impl PanelState {
                 ssh_connection,
             }),
             editor_content: None,
+            collapsed: panel.collapsed,
         }
     }
 
@@ -475,6 +480,7 @@ impl PanelState {
             template: self.template.clone(),
             transcript_root: None,
             restore_as_disconnected_snapshot: false,
+            collapsed: self.collapsed,
         }
     }
 }
@@ -497,6 +503,7 @@ impl Default for PanelState {
             session_binding: None,
             template: None,
             editor_content: None,
+            collapsed: false,
         }
     }
 }
@@ -726,6 +733,63 @@ workspaces:
 
         assert_eq!(state.workspaces.len(), 2);
         assert!(state.workspaces.iter().all(|workspace| workspace.layout.is_none()));
+    }
+
+    #[test]
+    fn collapsed_flag_maps_from_terminal_config_to_panel_state() {
+        let workspace = WorkspaceConfig {
+            name: "Alpha".to_string(),
+            color: None,
+            cwd: None,
+            position: None,
+            terminals: vec![TerminalConfig {
+                name: "Shell".to_string(),
+                collapsed: true,
+                ..TerminalConfig::default()
+            }],
+        };
+
+        let state = WorkspaceState::from_config(0, &workspace, [120.0, 64.0]);
+
+        assert!(
+            state.panels[0].collapsed,
+            "TerminalConfig.collapsed must map to PanelState.collapsed"
+        );
+    }
+
+    #[test]
+    fn collapsed_panel_state_round_trips_through_runtime_yaml() {
+        let state = RuntimeState {
+            workspaces: vec![WorkspaceState {
+                local_id: "workspace".to_string(),
+                name: "alpha".to_string(),
+                panels: vec![PanelState {
+                    local_id: "panel".to_string(),
+                    name: "Shell".to_string(),
+                    kind: PanelKind::Shell,
+                    collapsed: true,
+                    ..PanelState::default()
+                }],
+                ..WorkspaceState::default()
+            }],
+            ..RuntimeState::default()
+        };
+
+        let yaml = state.to_yaml().expect("serialize runtime state");
+        assert!(yaml.contains("collapsed: true"));
+
+        let reloaded: RuntimeState = serde_yaml::from_str(&yaml).expect("deserialize runtime state");
+        assert!(reloaded.workspaces[0].panels[0].collapsed);
+    }
+
+    #[test]
+    fn collapsed_flag_flows_through_to_panel_options() {
+        let panel = PanelState {
+            collapsed: true,
+            ..PanelState::default()
+        };
+
+        assert!(panel.to_panel_options().collapsed);
     }
 
     #[test]

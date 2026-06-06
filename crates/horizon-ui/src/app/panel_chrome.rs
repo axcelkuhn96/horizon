@@ -13,12 +13,15 @@ pub(super) struct PanelChrome<'a> {
     pub panel_rect: Rect,
     pub titlebar_rect: Rect,
     pub close_rect: Rect,
+    pub collapse_rect: Rect,
     pub resize_rect: Rect,
     pub title: Option<&'a str>,
     pub history_size: usize,
     pub scrollback_limit: usize,
     pub focused: bool,
     pub close_hovered: bool,
+    pub collapse_hovered: bool,
+    pub collapsed: bool,
     pub workspace_accent: Option<Color32>,
     pub attention_badge: Option<&'a (AttentionSeverity, String)>,
     pub ssh_status: Option<SshConnectionStatus>,
@@ -182,39 +185,92 @@ pub(super) fn paint_panel_chrome(ui: &mut egui::Ui, chrome: PanelChrome<'_>) {
         );
     }
 
-    if let Some((severity, summary)) = chrome.attention_badge {
-        paint_attention_badge(&painter, chrome.titlebar_rect, chrome.close_rect, *severity, summary);
-    }
-    if let Some(status) = chrome.ssh_status {
-        paint_ssh_status_badge(
-            &painter,
-            chrome.titlebar_rect,
-            chrome.close_rect,
-            chrome.scrollback_limit > 0,
-            status,
-        );
+    // Collapsed panels are titlebar-only: skip the badges/history meter that
+    // describe the (hidden) body. The caret + close button stay visible.
+    if !chrome.collapsed {
+        if let Some((severity, summary)) = chrome.attention_badge {
+            paint_attention_badge(&painter, chrome.titlebar_rect, chrome.close_rect, *severity, summary);
+        }
+        if let Some(status) = chrome.ssh_status {
+            paint_ssh_status_badge(
+                &painter,
+                chrome.titlebar_rect,
+                chrome.close_rect,
+                chrome.scrollback_limit > 0,
+                status,
+            );
+        }
+
+        if chrome.scrollback_limit > 0 {
+            paint_history_meter(
+                ui,
+                &painter,
+                HistoryMeter {
+                    panel_id: chrome.panel_id,
+                    titlebar_rect: chrome.titlebar_rect,
+                    close_rect: chrome.close_rect,
+                    accent,
+                    history_size: chrome.history_size,
+                    scrollback_limit: chrome.scrollback_limit,
+                    focused: chrome.focused,
+                },
+            );
+        }
     }
 
-    if chrome.scrollback_limit > 0 {
-        paint_history_meter(
-            ui,
-            &painter,
-            HistoryMeter {
-                panel_id: chrome.panel_id,
-                titlebar_rect: chrome.titlebar_rect,
-                close_rect: chrome.close_rect,
-                accent,
-                history_size: chrome.history_size,
-                scrollback_limit: chrome.scrollback_limit,
-                focused: chrome.focused,
-            },
-        );
-    }
-
-    paint_close_and_resize_controls(&painter, chrome.close_rect, chrome.resize_rect, chrome.close_hovered);
+    paint_collapse_caret(
+        &painter,
+        chrome.collapse_rect,
+        chrome.collapsed,
+        chrome.collapse_hovered,
+    );
+    paint_close_and_resize_controls(
+        &painter,
+        chrome.close_rect,
+        chrome.resize_rect,
+        chrome.close_hovered,
+        chrome.collapsed,
+    );
 }
 
-fn paint_close_and_resize_controls(painter: &egui::Painter, close_rect: Rect, resize_rect: Rect, close_hovered: bool) {
+/// Paint the collapse/expand caret to the left of the close button. The glyph
+/// is a small filled triangle: pointing right (▶) when collapsed, down (▼) when
+/// expanded. Sizing/coloring mirror the close button so it reads as native
+/// titlebar chrome rather than a bolted-on control.
+fn paint_collapse_caret(painter: &egui::Painter, caret_rect: Rect, collapsed: bool, hovered: bool) {
+    let color = if hovered {
+        theme::FG_SOFT()
+    } else {
+        theme::alpha(theme::FG_DIM(), 140)
+    };
+    let center = caret_rect.center();
+    // Match the close button's 5px visual radius for a consistent hit-size feel.
+    let r = 4.5;
+    let points = if collapsed {
+        // ▶ pointing right
+        vec![
+            Pos2::new(center.x - r * 0.7, center.y - r),
+            Pos2::new(center.x - r * 0.7, center.y + r),
+            Pos2::new(center.x + r, center.y),
+        ]
+    } else {
+        // ▼ pointing down
+        vec![
+            Pos2::new(center.x - r, center.y - r * 0.7),
+            Pos2::new(center.x + r, center.y - r * 0.7),
+            Pos2::new(center.x, center.y + r),
+        ]
+    };
+    painter.add(egui::Shape::convex_polygon(points, color, Stroke::NONE));
+}
+
+fn paint_close_and_resize_controls(
+    painter: &egui::Painter,
+    close_rect: Rect,
+    resize_rect: Rect,
+    close_hovered: bool,
+    collapsed: bool,
+) {
     painter.circle_filled(
         close_rect.center(),
         5.0,
@@ -224,6 +280,11 @@ fn paint_close_and_resize_controls(painter: &egui::Painter, close_rect: Rect, re
             theme::alpha(theme::FG_DIM(), 140)
         },
     );
+
+    // A collapsed panel cannot be resized (no body), so omit the resize grip.
+    if collapsed {
+        return;
+    }
 
     let handle_stroke = Stroke::new(1.0, theme::alpha(theme::FG_DIM(), 170));
     painter.line_segment(
@@ -245,7 +306,8 @@ fn paint_close_and_resize_controls(painter: &egui::Painter, close_rect: Rect, re
 /// Compute the right x boundary where the title text must stop, accounting
 /// for all badges (history meter, SSH status, attention) that sit to its right.
 fn title_right_boundary(chrome: &PanelChrome<'_>) -> f32 {
-    let mut right = chrome.close_rect.min.x - 12.0;
+    // Reserve space for the collapse caret that sits left of the close button.
+    let mut right = chrome.collapse_rect.min.x - 8.0;
     if chrome.scrollback_limit > 0 {
         right = panel_history_badge_rect(chrome.titlebar_rect, chrome.close_rect).min.x - 8.0;
     }

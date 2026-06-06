@@ -123,6 +123,7 @@ pub struct PanelOptions {
     pub template: Option<PanelTemplateRef>,
     pub transcript_root: Option<PathBuf>,
     pub restore_as_disconnected_snapshot: bool,
+    pub collapsed: bool,
 }
 
 impl Default for PanelOptions {
@@ -144,6 +145,7 @@ impl Default for PanelOptions {
             template: None,
             transcript_root: None,
             restore_as_disconnected_snapshot: false,
+            collapsed: false,
         }
     }
 }
@@ -176,6 +178,12 @@ pub struct Panel {
     pub ssh_connection: Option<SshConnection>,
     /// UI-facing SSH connection status for panels that remain visible after exit.
     pub ssh_status: Option<SshConnectionStatus>,
+    /// When `true`, the panel renders as titlebar-only (body hidden). The PTY
+    /// stays alive — collapsing never kills the terminal session.
+    pub collapsed: bool,
+    /// The panel height (`layout.size[1]`) recorded before collapse, so expand
+    /// can restore the prior height. `None` when the panel has never collapsed.
+    expanded_height: Option<f32>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -406,6 +414,34 @@ impl Panel {
         self.layout.size = size;
     }
 
+    /// Collapse or expand the panel.
+    ///
+    /// Collapsing records the current height in `expanded_height` and shrinks
+    /// the drawn height to `titlebar_height`. Expanding restores the recorded
+    /// height (falling back to the default panel height when none was stored).
+    ///
+    /// This is pure height bookkeeping — it never touches the PTY/terminal
+    /// session, so collapsed terminals keep running and preserve their output.
+    /// Repeated calls with the same value are idempotent.
+    pub fn set_collapsed(&mut self, collapsed: bool, titlebar_height: f32) {
+        if collapsed == self.collapsed {
+            return;
+        }
+
+        if collapsed {
+            self.expanded_height = Some(self.layout.size[1]);
+            self.layout.size[1] = titlebar_height;
+        } else {
+            let restored = self.expanded_height.take().unwrap_or(DEFAULT_PANEL_SIZE[1]);
+            self.layout.size[1] = restored;
+        }
+        self.collapsed = collapsed;
+    }
+
+    pub fn toggle_collapsed(&mut self, titlebar_height: f32) {
+        self.set_collapsed(!self.collapsed, titlebar_height);
+    }
+
     /// Restart the terminal process while keeping the same panel identity,
     /// layout, and session binding. For agent panels this
     /// resumes the existing session so no work is lost.
@@ -591,9 +627,9 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        AGENT_PANEL_SCROLLBACK_LIMIT, AgentSessionBinding, DEFAULT_PANEL_SCROLLBACK_LIMIT, Panel, PanelContent,
-        PanelId, PanelKind, PanelLayout, PanelResume, UsageDashboard, WorkspaceId, kitty_keyboard_for_kind,
-        platform_default_shell, resolve_launch_command, scrollback_limit_for_kind,
+        AGENT_PANEL_SCROLLBACK_LIMIT, AgentSessionBinding, DEFAULT_PANEL_SCROLLBACK_LIMIT, DEFAULT_PANEL_SIZE, Panel,
+        PanelContent, PanelId, PanelKind, PanelLayout, PanelResume, UsageDashboard, WorkspaceId,
+        kitty_keyboard_for_kind, platform_default_shell, resolve_launch_command, scrollback_limit_for_kind,
     };
     use crate::ssh::SshConnection;
 
@@ -619,6 +655,8 @@ mod tests {
             launch_cwd: None,
             ssh_connection: None,
             ssh_status: None,
+            collapsed: false,
+            expanded_height: None,
         }
     }
 
@@ -961,6 +999,83 @@ mod tests {
         assert!(kitty_keyboard_for_kind(PanelKind::Pi));
         assert!(kitty_keyboard_for_kind(PanelKind::Shell));
         assert!(kitty_keyboard_for_kind(PanelKind::Ssh));
+    }
+
+    #[test]
+    fn set_collapsed_stores_expanded_height_and_shrinks_to_titlebar() {
+        let mut panel = test_panel("Shell", "", false);
+        panel.layout.size = [520.0, 340.0];
+
+        panel.set_collapsed(true, 34.0);
+
+        assert!(panel.collapsed);
+        assert!((panel.layout.size[1] - 34.0).abs() <= f32::EPSILON);
+        assert!(
+            (panel.layout.size[0] - 520.0).abs() <= f32::EPSILON,
+            "width is untouched"
+        );
+    }
+
+    #[test]
+    fn set_collapsed_false_restores_previous_height() {
+        let mut panel = test_panel("Shell", "", false);
+        panel.layout.size = [520.0, 340.0];
+
+        panel.set_collapsed(true, 34.0);
+        panel.set_collapsed(false, 34.0);
+
+        assert!(!panel.collapsed);
+        assert!((panel.layout.size[1] - 340.0).abs() <= f32::EPSILON);
+    }
+
+    #[test]
+    fn double_collapse_is_idempotent_and_preserves_original_height() {
+        let mut panel = test_panel("Shell", "", false);
+        panel.layout.size = [520.0, 340.0];
+
+        panel.set_collapsed(true, 34.0);
+        // A second collapse must NOT overwrite the stored expanded height with
+        // the already-collapsed titlebar height.
+        panel.set_collapsed(true, 34.0);
+        panel.set_collapsed(false, 34.0);
+
+        assert!((panel.layout.size[1] - 340.0).abs() <= f32::EPSILON);
+    }
+
+    #[test]
+    fn double_expand_is_idempotent() {
+        let mut panel = test_panel("Shell", "", false);
+        panel.layout.size = [520.0, 340.0];
+
+        panel.set_collapsed(false, 34.0);
+        assert!(!panel.collapsed);
+        assert!((panel.layout.size[1] - 340.0).abs() <= f32::EPSILON);
+    }
+
+    #[test]
+    fn expand_without_stored_height_falls_back_to_default() {
+        let mut panel = test_panel("Shell", "", false);
+        // Simulate a panel restored already-collapsed: it is collapsed but never
+        // recorded an expanded height in this session.
+        panel.collapsed = true;
+        panel.layout.size = [520.0, 34.0];
+
+        panel.set_collapsed(false, 34.0);
+
+        assert!(!panel.collapsed);
+        assert!((panel.layout.size[1] - DEFAULT_PANEL_SIZE[1]).abs() <= f32::EPSILON);
+    }
+
+    #[test]
+    fn toggle_collapsed_flips_state() {
+        let mut panel = test_panel("Shell", "", false);
+        panel.layout.size = [520.0, 340.0];
+
+        panel.toggle_collapsed(34.0);
+        assert!(panel.collapsed);
+        panel.toggle_collapsed(34.0);
+        assert!(!panel.collapsed);
+        assert!((panel.layout.size[1] - 340.0).abs() <= f32::EPSILON);
     }
 
     #[test]
