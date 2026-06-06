@@ -9,7 +9,7 @@ use std::path::Path;
 use std::process::Command;
 
 use egui::{Align, Color32, CornerRadius, FontId, Layout, Rect, RichText, ScrollArea, Vec2};
-use horizon_core::file_tree::{ChangedFileRow, FileNode, FileTreeState, changed_file_rows, status_for_path};
+use horizon_core::file_tree::{ChangedTreeNode, FileNode, FileTreeState, changed_file_tree, status_for_path};
 use horizon_core::{FileStatus, GitStatus, Panel};
 
 use crate::scroll_forward::{forward_scroll_to_scroll_area, scroll_viewport_height};
@@ -24,6 +24,11 @@ const ROW_FONT_SIZE: f32 = 12.0;
 const ICON_FONT_SIZE: f32 = 13.0;
 const INDENT_PER_DEPTH: f32 = 14.0;
 const BASE_INDENT: f32 = 8.0;
+/// Right-edge space reserved for the status letter so long names truncate
+/// with `…` instead of running underneath it.
+const LETTER_RESERVE: f32 = 26.0;
+/// Right-edge padding for rows without a status letter.
+const PLAIN_RESERVE: f32 = 10.0;
 
 /// Returns a Nerd Font glyph (Private Use Area) for a path. `is_dir` selects a
 /// folder glyph. Unknown extensions fall back to a generic file glyph.
@@ -342,25 +347,28 @@ fn render_row(ui: &mut egui::Ui, node: &FileNode, depth: usize, status: Option<&
             );
             ui.add_space(6.0);
 
-            ui.label(
-                RichText::new(&node.name)
-                    .font(FontId::proportional(ROW_FONT_SIZE))
-                    .color(if node.is_dir { theme::FG_SOFT() } else { name_color }),
+            // Cap the label at the letter zone so long names truncate with
+            // `…` instead of overflowing the panel / running under the letter.
+            let reserve = if decoration.is_some() {
+                LETTER_RESERVE
+            } else {
+                PLAIN_RESERVE
+            };
+            ui.set_max_width((row_rect.width() - reserve).max(20.0));
+            ui.add(
+                egui::Label::new(
+                    RichText::new(&node.name)
+                        .font(FontId::proportional(ROW_FONT_SIZE))
+                        .color(if node.is_dir { theme::FG_SOFT() } else { name_color }),
+                )
+                .truncate(),
             );
-
-            if let Some((letter, color)) = decoration {
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.add_space(12.0);
-                    ui.label(
-                        RichText::new(letter)
-                            .font(FontId::monospace(11.0))
-                            .color(color)
-                            .strong(),
-                    );
-                });
-            }
         },
     );
+
+    if let Some((letter, color)) = decoration {
+        paint_status_letter(ui, row_rect, letter, color);
+    }
 
     if node.is_dir {
         response.clicked()
@@ -369,32 +377,41 @@ fn render_row(ui: &mut egui::Ui, node: &FileNode, depth: usize, status: Option<&
     }
 }
 
-/// Renders the flat "only uncommitted files" list. With no git snapshot, shows
-/// a dim "Sem reposit\u{f3}rio git" message; with an empty change set, shows
-/// "Nada para commitar". Double-clicking a row collects a [`TreeAction::Open`].
+/// Renders the grouped "only uncommitted files" tree. With no git snapshot,
+/// shows a dim "Sem reposit\u{f3}rio git" message; with an empty change set,
+/// shows "Nada para commitar". Changed files are nested under their parent
+/// folders (always expanded, single-child chains compacted VSCode-style).
+/// Double-clicking a file row collects a [`TreeAction::Open`].
 fn render_changes_only(ui: &mut egui::Ui, status: Option<&GitStatus>, action: &mut Option<TreeAction>) {
     let Some(status) = status else {
         render_centered_dim(ui, "Sem reposit\u{f3}rio git");
         return;
     };
 
-    let rows = changed_file_rows(status);
-    if rows.is_empty() {
+    let tree = changed_file_tree(status);
+    if tree.is_empty() {
         render_centered_dim(ui, "Nada para commitar");
         return;
     }
 
-    for row in &rows {
-        if render_change_row(ui, row) && action.is_none() {
-            *action = Some(TreeAction::Open(row.abs_path.clone()));
+    render_changed_nodes(ui, &tree, 0, action);
+}
+
+fn render_changed_nodes(ui: &mut egui::Ui, nodes: &[ChangedTreeNode], depth: usize, action: &mut Option<TreeAction>) {
+    for node in nodes {
+        if render_changed_row(ui, node, depth) && action.is_none() {
+            *action = Some(TreeAction::Open(node.abs_path.clone()));
         }
+        render_changed_nodes(ui, &node.children, depth + 1, action);
     }
 }
 
-/// Renders one row of the filtered uncommitted-files list: type icon, the
-/// repo-relative path colored by its status, and a right-aligned status letter.
-/// Returns `true` when double-clicked (open in editor). Mirrors the tree row.
-fn render_change_row(ui: &mut egui::Ui, row: &ChangedFileRow) -> bool {
+/// Renders one row of the grouped uncommitted-files tree: folders show an
+/// open-folder icon with a neutral name; files show their type icon, the name
+/// colored by status (truncated with `…` when too wide), and a fixed
+/// right-aligned status letter. Returns `true` when a file row is
+/// double-clicked (open in editor).
+fn render_changed_row(ui: &mut egui::Ui, node: &ChangedTreeNode, depth: usize) -> bool {
     let row_rect = Rect::from_min_size(ui.cursor().min, Vec2::new(ui.available_width(), ROW_HEIGHT));
     let response = ui.allocate_rect(row_rect, egui::Sense::click());
 
@@ -403,45 +420,65 @@ fn render_change_row(ui: &mut egui::Ui, row: &ChangedFileRow) -> bool {
             .rect_filled(row_rect, CornerRadius::ZERO, theme::alpha(theme::FG(), 6));
     }
 
-    let decoration = status_decoration(Some(row.status));
+    let decoration = status_decoration(node.status);
     let name_color = decoration.map_or_else(theme::FG, |(_, color)| color);
-    let path = Path::new(&row.rel_path);
+
+    #[allow(clippy::cast_precision_loss)]
+    let indent = BASE_INDENT + depth as f32 * INDENT_PER_DEPTH;
 
     ui.scope_builder(
         egui::UiBuilder::new()
             .max_rect(row_rect)
             .layout(Layout::left_to_right(Align::Center)),
         |ui| {
-            ui.add_space(BASE_INDENT);
+            ui.add_space(indent);
 
+            let (icon, icon_color, text_color) = if node.is_dir {
+                ("\u{f07c}", theme::ACCENT(), theme::FG_SOFT()) // nf-fa-folder_open
+            } else {
+                (file_type_icon(&node.abs_path, false), name_color, name_color)
+            };
             ui.label(
-                RichText::new(file_type_icon(path, false))
+                RichText::new(icon)
                     .font(FontId::proportional(ICON_FONT_SIZE))
-                    .color(name_color),
+                    .color(icon_color),
             );
             ui.add_space(6.0);
 
-            ui.label(
-                RichText::new(&row.rel_path)
-                    .font(FontId::proportional(ROW_FONT_SIZE))
-                    .color(name_color),
+            let reserve = if decoration.is_some() {
+                LETTER_RESERVE
+            } else {
+                PLAIN_RESERVE
+            };
+            ui.set_max_width((row_rect.width() - reserve).max(20.0));
+            ui.add(
+                egui::Label::new(
+                    RichText::new(&node.name)
+                        .font(FontId::proportional(ROW_FONT_SIZE))
+                        .color(text_color),
+                )
+                .truncate(),
             );
-
-            if let Some((letter, color)) = decoration {
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.add_space(12.0);
-                    ui.label(
-                        RichText::new(letter)
-                            .font(FontId::monospace(11.0))
-                            .color(color)
-                            .strong(),
-                    );
-                });
-            }
         },
     );
 
-    response.double_clicked()
+    if let Some((letter, color)) = decoration {
+        paint_status_letter(ui, row_rect, letter, color);
+    }
+
+    !node.is_dir && response.double_clicked()
+}
+
+/// Paints the status letter right-aligned inside the row, independent of the
+/// row's left-to-right content so truncated names can never collide with it.
+fn paint_status_letter(ui: &egui::Ui, row_rect: Rect, letter: &str, color: Color32) {
+    ui.painter().text(
+        egui::Pos2::new(row_rect.max.x - 12.0, row_rect.center().y),
+        egui::Align2::RIGHT_CENTER,
+        letter,
+        FontId::monospace(11.0),
+        color,
+    );
 }
 
 /// Centered, dim status message used for the empty / no-repo filtered states.

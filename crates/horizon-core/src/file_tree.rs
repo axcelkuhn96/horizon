@@ -108,6 +108,97 @@ pub fn changed_file_rows(status: &GitStatus) -> Vec<ChangedFileRow> {
         .collect()
 }
 
+/// One node of the grouped "only uncommitted files" tree: directories carry
+/// their changed descendants in `children`; files carry their git `status`.
+/// Single-child directory chains are compacted VSCode-style, so `name` may be
+/// a joined path segment like `"src/app/views"`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChangedTreeNode {
+    /// Display name. For compacted directory chains this is `"a/b/c"`.
+    pub name: String,
+    /// Absolute path (repo root joined with the relative path).
+    pub abs_path: PathBuf,
+    pub is_dir: bool,
+    /// `Some` for files, `None` for directories.
+    pub status: Option<FileStatus>,
+    pub children: Vec<ChangedTreeNode>,
+}
+
+/// Builds the grouped tree for the File Explorer "show only uncommitted files"
+/// filter: changed files nested under their parent directories (dirs first,
+/// case-insensitive alphabetical), with single-child directory chains
+/// compacted into one node (`a/b/c`) like `VSCode`'s compact folders.
+#[must_use]
+pub fn changed_file_tree(status: &GitStatus) -> Vec<ChangedTreeNode> {
+    let mut roots: Vec<ChangedTreeNode> = Vec::new();
+
+    for change in &status.changes {
+        let mut components: Vec<&str> = change.path.split('/').filter(|c| !c.is_empty()).collect();
+        let Some(file_name) = components.pop() else {
+            continue;
+        };
+
+        let mut abs = status.repo_root.clone();
+        let mut current = &mut roots;
+        for dir in components {
+            abs.push(dir);
+            let idx = current
+                .iter()
+                .position(|n| n.is_dir && n.abs_path == abs)
+                .unwrap_or_else(|| {
+                    current.push(ChangedTreeNode {
+                        name: dir.to_string(),
+                        abs_path: abs.clone(),
+                        is_dir: true,
+                        status: None,
+                        children: Vec::new(),
+                    });
+                    current.len() - 1
+                });
+            current = &mut current[idx].children;
+        }
+
+        abs.push(file_name);
+        current.push(ChangedTreeNode {
+            name: file_name.to_string(),
+            abs_path: abs,
+            is_dir: false,
+            status: Some(change.status),
+            children: Vec::new(),
+        });
+    }
+
+    sort_changed_nodes(&mut roots);
+    compact_dir_chains(&mut roots);
+    roots
+}
+
+/// Recursively sorts: directories first, then case-insensitive alphabetical.
+fn sort_changed_nodes(nodes: &mut [ChangedTreeNode]) {
+    nodes.sort_by(|a, b| {
+        b.is_dir
+            .cmp(&a.is_dir)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    for node in nodes {
+        sort_changed_nodes(&mut node.children);
+    }
+}
+
+/// Merges single-child directory chains (`a > b > c`) into one `a/b/c` node,
+/// recursively, mirroring `VSCode`'s "compact folders" behavior.
+fn compact_dir_chains(nodes: &mut [ChangedTreeNode]) {
+    for node in nodes.iter_mut() {
+        while node.is_dir && node.children.len() == 1 && node.children[0].is_dir {
+            let child = node.children.remove(0);
+            node.name = format!("{}/{}", node.name, child.name);
+            node.abs_path = child.abs_path;
+            node.children = child.children;
+        }
+        compact_dir_chains(&mut node.children);
+    }
+}
+
 /// Per-panel file-explorer state. Lives inside `PanelContent::FileExplorer`.
 #[derive(Clone, Debug)]
 pub struct FileTreeState {
@@ -282,6 +373,90 @@ mod tests {
             assert_eq!(row.status, *kind);
             assert_eq!(row.abs_path, root.join(path));
         }
+    }
+
+    fn status_with(paths: &[(&str, FileStatus)]) -> GitStatus {
+        use crate::git_status::FileChange;
+        use std::collections::HashMap;
+        use std::time::Instant;
+
+        GitStatus {
+            repo_root: std::path::PathBuf::from("/repo"),
+            branch: None,
+            changes: paths
+                .iter()
+                .map(|(path, status)| FileChange {
+                    path: (*path).to_string(),
+                    status: *status,
+                    insertions: 0,
+                    deletions: 0,
+                })
+                .collect(),
+            diffs: HashMap::new(),
+            total_insertions: 0,
+            total_deletions: 0,
+            timestamp: Instant::now(),
+        }
+    }
+
+    #[test]
+    fn changed_file_tree_groups_files_under_directories() {
+        let status = status_with(&[
+            ("src/main.rs", FileStatus::Modified),
+            ("src/lib.rs", FileStatus::Untracked),
+            ("README.md", FileStatus::Modified),
+        ]);
+
+        let tree = changed_file_tree(&status);
+        // dirs first: src, then the root-level file
+        assert_eq!(tree.len(), 2);
+        assert_eq!(tree[0].name, "src");
+        assert!(tree[0].is_dir);
+        assert_eq!(tree[0].abs_path, std::path::Path::new("/repo/src"));
+        let children: Vec<&str> = tree[0].children.iter().map(|n| n.name.as_str()).collect();
+        assert_eq!(children, vec!["lib.rs", "main.rs"]);
+        assert_eq!(tree[0].children[1].status, Some(FileStatus::Modified));
+        assert_eq!(tree[1].name, "README.md");
+        assert!(!tree[1].is_dir);
+        assert_eq!(tree[1].status, Some(FileStatus::Modified));
+    }
+
+    #[test]
+    fn changed_file_tree_compacts_single_child_dir_chains() {
+        let status = status_with(&[("a/b/c/deep.rs", FileStatus::Untracked)]);
+
+        let tree = changed_file_tree(&status);
+        assert_eq!(tree.len(), 1);
+        // a > b > c collapses into one "a/b/c" node
+        assert_eq!(tree[0].name, "a/b/c");
+        assert_eq!(tree[0].abs_path, std::path::Path::new("/repo/a/b/c"));
+        assert_eq!(tree[0].children.len(), 1);
+        assert_eq!(tree[0].children[0].name, "deep.rs");
+        assert_eq!(
+            tree[0].children[0].abs_path,
+            std::path::Path::new("/repo/a/b/c/deep.rs")
+        );
+    }
+
+    #[test]
+    fn changed_file_tree_does_not_compact_branching_dirs() {
+        let status = status_with(&[
+            ("a/b/one.rs", FileStatus::Modified),
+            ("a/c/two.rs", FileStatus::Modified),
+        ]);
+
+        let tree = changed_file_tree(&status);
+        // "a" branches into b and c, so it must stay its own node
+        assert_eq!(tree.len(), 1);
+        assert_eq!(tree[0].name, "a");
+        let subdirs: Vec<&str> = tree[0].children.iter().map(|n| n.name.as_str()).collect();
+        assert_eq!(subdirs, vec!["b", "c"]);
+    }
+
+    #[test]
+    fn changed_file_tree_empty_when_no_changes() {
+        let status = status_with(&[]);
+        assert!(changed_file_tree(&status).is_empty());
     }
 
     #[test]
