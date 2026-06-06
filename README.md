@@ -3,7 +3,8 @@
 > Fork pessoal do [peters/horizon](https://github.com/peters/horizon) com melhorias de **navegação e UX** que eu adicionei. CHANGELOG completo em [CHANGELOG.md](CHANGELOG.md).
 >
 > **O que eu fiz:**
-> - **Navegação por teclado** entre terminais do workspace (`Ctrl+Shift+Setas`) com auto-fit e foco de digitação imediato.
+> - **Navegação por teclado** entre terminais do workspace (`Ctrl+Shift+Setas`) com foco de digitação imediato (sem mexer no zoom).
+> - **File Explorer** (painel "Files"): árvore de arquivos estilo VSCode com ícones por tipo (Nerd Font), cores de status do git (U/M/A/D), filtro "só não-commitados" agrupado por pasta, e duplo clique abre o arquivo no VS Code.
 > - **Pan no touchpad** configurável (dois dedos / `Tab`+dois dedos / toggle `Ctrl+Shift+P`) movendo o canvas sobre os terminais.
 > - **Auto-hide da barra lateral**, com a área liberada virando canvas usável.
 > - **Collapse** por terminal (titlebar) e por grupo de workspace na barra lateral — persistentes.
@@ -14,7 +15,9 @@
 >
 > | Atalho / gesto | Ação |
 > |---|---|
-> | `Ctrl+Shift+←↑↓→` | Foca o terminal vizinho no workspace (com auto-fit + foco de digitação) |
+> | `Ctrl+Shift+←↑↓→` | Foca o terminal vizinho no workspace (só troca o foco, zoom intacto) |
+> | Duplo clique em arquivo (painel Files) | Abre o arquivo no VS Code (`code`) |
+> | Funil 🔽 no cabeçalho do painel Files | Filtra para só arquivos não-commitados, agrupados por pasta |
 > | `Ctrl+Shift+P` | Liga/desliga "dois dedos movem o canvas" sobre os terminais |
 > | Segurar `Tab` + dois dedos | Move o canvas em 2D (o Tab não vaza pro terminal enquanto move) |
 > | Segurar `Espaço` + scroll | Move o canvas sobre os painéis |
@@ -97,7 +100,7 @@ First-class **Claude Code**, **Codex**, **OpenCode**, **Gemini CLI**, and **Kilo
 <td>
 
 ### Git Integration
-A built-in **git status panel** watches your repo in the background. See changed files, inline diffs, and hunk-level detail — no context switching.
+A built-in **git status panel** watches your repo in the background. See changed files, inline diffs, and hunk-level detail — no context switching. The **File Explorer panel** adds a VSCode-style project tree with filetype icons, git status colors, an uncommitted-only filter, and double-click to open files in VS Code.
 
 </td>
 <td>
@@ -333,6 +336,9 @@ presets:
   - name: Git Changes
     alias: gc
     kind: git_changes
+  - name: Files
+    alias: fx
+    kind: file_explorer
 
 # Optional: disable the default attention feed
 features:

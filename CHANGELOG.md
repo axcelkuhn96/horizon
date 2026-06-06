@@ -6,7 +6,7 @@ Patch aditivo sobre o upstream **v0.2.6**.
 ## [feat/v1-navigation] — 2026-06-06
 
 ### Navegação
-- **Foco direcional entre painéis** com `Ctrl+Shift+Setas` (←↑↓→) — foca o terminal vizinho no workspace, com **auto-fit** do viewport no painel focado.
+- **Foco direcional entre painéis** com `Ctrl+Shift+Setas` (←↑↓→) — foca o terminal vizinho no workspace **sem alterar o zoom** (só troca o foco; o auto-fit inicial foi removido).
 - **Foco de digitação na navegação**: ao trocar de terminal com as setas, o terminal recém-focado recebe o foco de teclado — dá pra digitar imediatamente, sem clicar.
 - Atalhos de foco configuráveis na seção `shortcuts` do `config.yaml` (`focus_panel_left/right/up/down`).
 
@@ -22,13 +22,22 @@ Patch aditivo sobre o upstream **v0.2.6**.
 - **Collapse de grupos de workspace**: caret (▼/▶) no cabeçalho dobra/expande a lista de terminais daquele workspace na sidebar. Persiste entre sessões.
 - Menus de contexto da sidebar agora renderizam **por cima** da barra (z-order corrigido).
 
+### File Explorer (painel "Files")
+- **Árvore de arquivos estilo VSCode** do projeto do workspace: ícones por tipo de arquivo (Symbols Nerd Font), pastas com expand/collapse lazy, respeita `.gitignore` e pula `.git`/`node_modules`/`target`.
+- **Decorações de git ao vivo** (mesmo esquema do VS Code): untracked/added verde (`U`/`A`), modificado amarelo (`M`), deletado vermelho (`D`).
+- **Duplo clique abre o arquivo no VS Code** (`code <path>`); aviso não-fatal no rodapé se o `code` não estiver no PATH.
+- **Filtro "só não-commitados"** (funil no cabeçalho): mostra apenas os arquivos pendentes, **agrupados por pasta** (cadeias de pasta única compactadas tipo VSCode).
+- **Nomes longos truncam com `…`** sem atropelar a letra de status; scroll do mouse funciona e a árvore fica contida no painel.
+- Preset "Files" (alias `fx`, kind `file_explorer`) disponível no palette/config.
+
 ### Terminais / painéis
+- **Detecção de processo morto (ghost panel)**: badge vermelho "Exited" na titlebar, banner não-modal no rodapé, teclado bloqueado no painel morto e botão **Restart** na sidebar pra shells/commands.
 - **Collapse por terminal**: caret (▼/▶) na titlebar colapsa o terminal pra só a titlebar (corpo escondido, painel encolhe) e restaura a altura ao expandir. O processo/PTY continua vivo. Persiste entre sessões.
 - **Menu de contexto (botão direito)** no terminal: **Copy**, **Paste** e **Paste Image**.
 - **Paste de imagem**: `Ctrl+V` (ou menu) com uma imagem no clipboard salva um PNG temporário e cola o **caminho do arquivo** no terminal (útil pra CLIs como o Claude Code).
 
 ### Configuração
-- Nova seção `input` no `config.yaml` (`scroll_pans_over_panels`, `pan_modifier`, `auto_fit_on_focus`).
+- Nova seção `input` no `config.yaml` (`scroll_pans_over_panels`, `pan_modifier`). O campo `auto_fit_on_focus` foi removido junto com o auto-fit (configs antigas com a chave seguem carregando).
 - Novos campos `overlays.sidebar_auto_hide` e `terminals[].collapsed` / `workspaces[].sidebar_collapsed`.
 - Migração de config **v8 → v9 → v10**, backward-compatible (configs antigas carregam com defaults via serde).
 
