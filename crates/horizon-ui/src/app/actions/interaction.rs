@@ -119,6 +119,15 @@ fn space_drag_modifier_active(modifiers: Modifiers) -> bool {
     !modifiers.ctrl && !modifiers.command && !modifiers.alt
 }
 
+/// "Hold-to-pan with the touchpad": while the user HOLDS Space, a 2-finger /
+/// wheel scroll pans the canvas anywhere inside it (including over a terminal
+/// panel). This is the scroll counterpart of Space+left-drag panning. It is
+/// gated off when Ctrl/Cmd is held (that gesture is reserved for zoom) and only
+/// active when a scroll actually happened this frame.
+fn space_scroll_pan_active(space_down: bool, pointer_in_canvas: bool, scroll: Vec2, ctrl_or_cmd: bool) -> bool {
+    space_down && pointer_in_canvas && scroll != Vec2::ZERO && !ctrl_or_cmd
+}
+
 /// Convert the currently held egui [`Modifiers`] into the
 /// [`ShortcutModifiers`] bitset used by the pan-modifier config so that
 /// [`horizon_core::scroll_should_pan_canvas`] can test membership. `command`
@@ -220,6 +229,9 @@ impl HorizonApp {
         let space_drag_claimed =
             pointer_in_canvas && primary_down && space_down && space_drag_modifier_active(modifiers);
         let ctrl_or_cmd = modifiers.ctrl || modifiers.command;
+        // Space held + a scroll gesture pans the canvas even over a panel; the
+        // Space key must be deferred from the terminal exactly like Space+drag.
+        let space_scroll_pan_active = space_scroll_pan_active(space_down, pointer_in_canvas, scroll, ctrl_or_cmd);
         let pointer_over_terminal_body = primary_selection_routing_active()
             && pointer_position.is_some_and(|position| {
                 panel_geometry
@@ -232,7 +244,7 @@ impl HorizonApp {
         // the canvas-pan modifier or an actual terminal keystroke.
         self.terminal_keyboard_events = self
             .pending_space_pan_key
-            .filter_terminal_events(&terminal_events, space_drag_claimed);
+            .filter_terminal_events(&terminal_events, space_drag_claimed || space_scroll_pan_active);
         let target = if !pointer_in_canvas {
             MiddlePanTarget::OutsideCanvas
         } else if pointer_over_terminal_body {
@@ -273,11 +285,11 @@ impl HorizonApp {
         // letting the panel consume the scroll. Only evaluated when a scroll is
         // actually over a panel, so the input hot path stays cheap.
         let scroll_pans_over_panel = pointer_over_panel
-            && horizon_core::scroll_should_pan_canvas(
+            && (horizon_core::scroll_should_pan_canvas(
                 held_shortcut_modifiers(modifiers),
                 self.resolved_pan_modifier,
                 self.scroll_pans_over_panels,
-            );
+            ) || space_scroll_pan_active);
         if scroll_pans_over_panel {
             // Drop the wheel events so the terminal widget (rendered later this
             // frame) does not also scroll the same gesture.
@@ -373,7 +385,64 @@ mod tests {
 
     use super::super::super::super::input::TerminalInputEvent;
     use super::super::super::CanvasPanSpaceKeyState;
-    use super::{MiddlePanMode, MiddlePanTarget, next_middle_pan_active, primary_selection_routing_active};
+    use super::{
+        MiddlePanMode, MiddlePanTarget, next_middle_pan_active, primary_selection_routing_active,
+        space_scroll_pan_active,
+    };
+
+    #[test]
+    fn space_scroll_pan_active_when_space_held_and_scrolling_in_canvas() {
+        assert!(space_scroll_pan_active(true, true, Vec2::new(0.0, 12.0), false));
+        assert!(space_scroll_pan_active(true, true, Vec2::new(8.0, 0.0), false));
+    }
+
+    #[test]
+    fn space_scroll_pan_inactive_without_space_or_scroll_or_canvas() {
+        // Space not held.
+        assert!(!space_scroll_pan_active(false, true, Vec2::new(0.0, 12.0), false));
+        // No scroll this frame (plain Space tap).
+        assert!(!space_scroll_pan_active(true, true, Vec2::ZERO, false));
+        // Pointer outside the canvas.
+        assert!(!space_scroll_pan_active(true, false, Vec2::new(0.0, 12.0), false));
+    }
+
+    #[test]
+    fn space_scroll_pan_inactive_when_ctrl_or_cmd_held() {
+        // Ctrl/Cmd is reserved for zoom, not space-scroll panning.
+        assert!(!space_scroll_pan_active(true, true, Vec2::new(0.0, 12.0), true));
+    }
+
+    #[test]
+    fn space_candidate_is_dropped_once_scroll_pan_claims_it() {
+        // A Space press arrives, then a scroll lands while Space is still held:
+        // the claim (here passed as the combined `space_drag_claimed ||
+        // space_scroll_pan_active` flag) must suppress the Space keystroke.
+        let mut state = CanvasPanSpaceKeyState::default();
+
+        assert!(
+            state
+                .filter_terminal_events(
+                    &[
+                        terminal_event(space_press()),
+                        terminal_event(Event::Text(" ".to_owned()))
+                    ],
+                    false
+                )
+                .is_empty()
+        );
+        assert!(matches!(state, CanvasPanSpaceKeyState::Pending(_)));
+
+        // Scroll-pan claims the Space: nothing is forwarded to the terminal.
+        assert!(state.filter_terminal_events(&[], true).is_empty());
+        assert!(matches!(state, CanvasPanSpaceKeyState::Consumed));
+
+        assert!(
+            state
+                .filter_terminal_events(&[terminal_event(space_release())], false)
+                .is_empty()
+        );
+        assert!(matches!(state, CanvasPanSpaceKeyState::Idle));
+    }
 
     #[test]
     fn plain_space_is_delayed_until_release() {
