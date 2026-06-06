@@ -40,6 +40,7 @@ struct PanelSnapshot {
     is_renaming: bool,
     attention_badge: Option<(AttentionSeverity, String)>,
     ssh_status: Option<SshConnectionStatus>,
+    process_exit_label: Option<String>,
     collapsed: bool,
 }
 
@@ -367,6 +368,7 @@ impl HorizonApp {
                 is_renaming: self.renaming_panel == Some(panel_id),
                 attention_badge,
                 ssh_status: panel.ssh_status(),
+                process_exit_label: panel.process_exit_label(),
                 collapsed: panel.collapsed,
             })
         })
@@ -478,6 +480,7 @@ impl HorizonApp {
                         workspace_accent: snapshot.workspace_accent,
                         attention_badge: snapshot.attention_badge.as_ref(),
                         ssh_status: snapshot.ssh_status,
+                        process_exit_label: snapshot.process_exit_label.as_deref(),
                     },
                 );
 

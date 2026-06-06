@@ -25,6 +25,7 @@ pub(super) struct PanelChrome<'a> {
     pub workspace_accent: Option<Color32>,
     pub attention_badge: Option<&'a (AttentionSeverity, String)>,
     pub ssh_status: Option<SshConnectionStatus>,
+    pub process_exit_label: Option<&'a str>,
 }
 
 #[derive(Clone, Copy)]
@@ -212,6 +213,15 @@ pub(super) fn paint_panel_chrome(ui: &mut egui::Ui, chrome: PanelChrome<'_>) {
                 chrome.close_rect,
                 chrome.scrollback_limit > 0,
                 status,
+            );
+        }
+        if let Some(label) = chrome.process_exit_label {
+            paint_process_exited_badge(
+                &painter,
+                chrome.titlebar_rect,
+                chrome.close_rect,
+                chrome.scrollback_limit > 0,
+                label,
             );
         }
 
@@ -525,6 +535,53 @@ fn paint_ssh_status_badge(
         badge_rect.center(),
         egui::Align2::CENTER_CENTER,
         badge_text,
+        font,
+        color,
+    );
+}
+
+#[profiling::function]
+fn paint_process_exited_badge(
+    painter: &egui::Painter,
+    titlebar_rect: Rect,
+    close_rect: Rect,
+    has_history_meter: bool,
+    label: &str,
+) {
+    let color = theme::PALETTE_RED();
+    let font = egui::FontId::proportional(10.0);
+    let badge_right = if has_history_meter {
+        panel_history_badge_rect(titlebar_rect, close_rect).min.x - 6.0
+    } else {
+        close_rect.min.x - 8.0
+    };
+    let text_width = painter
+        .layout_no_wrap(label.to_string(), font.clone(), color)
+        .size()
+        .x;
+    let badge_width = text_width + 16.0;
+    let badge_height = 18.0;
+    let badge_left = (badge_right - badge_width).max(titlebar_rect.min.x + 60.0);
+    let badge_rect = Rect::from_min_size(
+        Pos2::new(badge_left, titlebar_rect.center().y - badge_height * 0.5),
+        Vec2::new(badge_right - badge_left, badge_height),
+    );
+
+    painter.rect_filled(
+        badge_rect,
+        CornerRadius::same(4),
+        Color32::from_rgba_unmultiplied(color.r() / 6, color.g() / 6, color.b() / 6, 72),
+    );
+    painter.rect_stroke(
+        badge_rect,
+        CornerRadius::same(4),
+        Stroke::new(1.0, theme::alpha(color, 140)),
+        StrokeKind::Inside,
+    );
+    painter.text(
+        badge_rect.center(),
+        egui::Align2::CENTER_CENTER,
+        label,
         font,
         color,
     );

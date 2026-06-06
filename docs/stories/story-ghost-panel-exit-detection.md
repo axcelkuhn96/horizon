@@ -59,7 +59,7 @@ The core already detects death — only SSH panels consume it:
       exit-status accessor), consumed from `child_exited`/`child_exit_status`
       for all terminal-backed non-SSH kinds. TDD: label formatting
       (code/signal/none) + predicate tests.
-- [ ] Task 2 (UI, domínio: frontend-rust-egui — N/A web rulebook): titlebar
+- [x] Task 2 (UI, domínio: frontend-rust-egui — N/A web rulebook): titlebar
       badge `Exited (…)` mirroring `paint_ssh_status_badge` (PALETTE_RED).
 - [ ] Task 3 (UI): footer banner "Process exited — Ctrl+Shift+R to restart"
       over dead panel body, theme-coherent, non-modal.
@@ -77,6 +77,8 @@ The core already detects death — only SSH panels consume it:
 - `crates/horizon-core/src/panel.rs` — added `process_exit_label` free fn, `Panel::process_exited()`, `Panel::process_exit_label()`, and `mod process_exit_tests`
 - `crates/horizon-core/src/terminal/lifecycle.rs` — gated `write_input` to no-op when `child_exited` is set (via `should_drop_input`)
 - `crates/horizon-core/src/terminal.rs` — extracted `should_drop_input` predicate + tests covering the dead-pty `write_input` gate (drop on exit/empty, forward when alive)
+- `crates/horizon-ui/src/app/panels.rs` — added `process_exit_label: Option<String>` to `PanelSnapshot`, populated from `panel.process_exit_label()`, forwarded to `PanelChrome` as `as_deref()`
+- `crates/horizon-ui/src/app/panel_chrome.rs` — added `process_exit_label: Option<&'a str>` to `PanelChrome`; added `paint_process_exited_badge` fn (mirrors `paint_ssh_status_badge` geometry, uses `PALETTE_RED`); hooked into `paint_panel_chrome` after the SSH badge block
 
 ### Notes
 - Do NOT touch replay/transcript flow or spawn logic.
