@@ -66,6 +66,10 @@ pub(super) fn sidebar_reveal_state(
 }
 
 #[cfg(test)]
+// Exact float equality is intended here: the widths asserted are constants
+// passed through `reserved_sidebar_width` unchanged, with no arithmetic that
+// could introduce rounding error.
+#[allow(clippy::float_cmp)]
 mod tests {
     use std::time::Duration;
 

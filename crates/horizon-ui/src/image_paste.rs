@@ -17,9 +17,16 @@
 //! text paste, if any, is replaced by the image-path paste.
 
 use std::path::{Path, PathBuf};
+#[cfg(any(target_os = "linux", test))]
 use std::time::SystemTime;
 
+// The PNG encode/write helpers below are only reachable from the Linux
+// clipboard path (`read_clipboard_image_to_png`) and the unit tests; on other
+// platforms the stub returns `None` without touching them, so they must be
+// cfg-gated or `cargo build --release` fails dead-code under `-D warnings`.
+
 /// Error encoding raw RGBA8 pixels into a PNG byte buffer.
+#[cfg(any(target_os = "linux", test))]
 #[derive(Debug)]
 pub(crate) enum PngEncodeError {
     /// The pixel buffer length did not match `width * height * 4`.
@@ -30,6 +37,7 @@ pub(crate) enum PngEncodeError {
     Encode(String),
 }
 
+#[cfg(any(target_os = "linux", test))]
 impl std::fmt::Display for PngEncodeError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -45,12 +53,14 @@ impl std::fmt::Display for PngEncodeError {
     }
 }
 
+#[cfg(any(target_os = "linux", test))]
 impl std::error::Error for PngEncodeError {}
 
 /// Encode raw RGBA8 pixels (row-major, 4 bytes per pixel) into an in-memory PNG.
 ///
 /// This is the pure, testable core of the feature: it has no clipboard or
 /// filesystem dependency.
+#[cfg(any(target_os = "linux", test))]
 pub(crate) fn encode_rgba_to_png(width: usize, height: usize, rgba: &[u8]) -> Result<Vec<u8>, PngEncodeError> {
     if width == 0 || height == 0 {
         return Err(PngEncodeError::EmptyDimensions);
@@ -90,6 +100,7 @@ pub(crate) fn encode_rgba_to_png(width: usize, height: usize, rgba: &[u8]) -> Re
 ///
 /// The name is millisecond-resolution to keep rapid successive pastes from
 /// colliding, and falls back to `0` for clocks before the Unix epoch.
+#[cfg(any(target_os = "linux", test))]
 pub(crate) fn pasted_png_filename(now: SystemTime) -> String {
     let millis = now
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -98,6 +109,7 @@ pub(crate) fn pasted_png_filename(now: SystemTime) -> String {
 }
 
 /// Encode `rgba` to PNG and write it under `pasted_dir`, returning the path.
+#[cfg(any(target_os = "linux", test))]
 pub(crate) fn write_pasted_png(
     pasted_dir: &Path,
     now: SystemTime,
@@ -113,18 +125,21 @@ pub(crate) fn write_pasted_png(
 }
 
 /// Failure while turning a clipboard image into an on-disk PNG path.
+#[cfg(any(target_os = "linux", test))]
 #[derive(Debug)]
 pub(crate) enum ImagePasteError {
     Encode(PngEncodeError),
     Io(std::io::Error),
 }
 
+#[cfg(any(target_os = "linux", test))]
 impl From<PngEncodeError> for ImagePasteError {
     fn from(error: PngEncodeError) -> Self {
         Self::Encode(error)
     }
 }
 
+#[cfg(any(target_os = "linux", test))]
 impl std::fmt::Display for ImagePasteError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -134,6 +149,7 @@ impl std::fmt::Display for ImagePasteError {
     }
 }
 
+#[cfg(any(target_os = "linux", test))]
 impl std::error::Error for ImagePasteError {}
 
 /// If the system clipboard currently holds an image, save it as a PNG under
