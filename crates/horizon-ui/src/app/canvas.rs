@@ -3,7 +3,6 @@ use egui::{Align, Context, Id, Layout, Margin, Mesh, Order, Pos2, Rect, Shape, S
 use crate::theme;
 
 use super::HorizonApp;
-use super::root_chrome::effective_sidebar_width;
 use super::util::{format_grid_position, paint_canvas_glow, rounded_i32, viewport_local_rect};
 
 const GRID_SPACING: f32 = 22.0;
@@ -64,11 +63,7 @@ impl HorizonApp {
                 },
             );
 
-        let hud_left = if self.sidebar_visible {
-            effective_sidebar_width(viewport_local_rect(ctx).width()) + 16.0
-        } else {
-            16.0
-        };
+        let hud_left = self.reserved_sidebar_width(viewport_local_rect(ctx).width()) + 16.0;
         egui::Area::new(Id::new("canvas_hud"))
             .anchor(egui::Align2::LEFT_BOTTOM, Vec2::new(hud_left, -16.0))
             .interactable(false)

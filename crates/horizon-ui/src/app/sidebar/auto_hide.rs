@@ -22,6 +22,24 @@ pub(super) enum SidebarReveal {
     ThinStrip,
 }
 
+/// Horizontal space the sidebar reserves from the canvas on the left edge.
+///
+/// Pure, egui-free so the canvas-layout seam can be unit-tested:
+/// - sidebar hidden entirely => `0.0` (canvas owns the full viewport);
+/// - auto-hide off, or auto-hide on but currently revealed => the full
+///   `sidebar_width` (canvas starts after the sidebar, unchanged behavior);
+/// - auto-hide on and collapsed to the strip => only [`SIDEBAR_STRIP_WIDTH`],
+///   so the reclaimed band becomes usable canvas.
+pub(super) fn reserved_sidebar_width(visible: bool, auto_hide: bool, revealed: bool, sidebar_width: f32) -> f32 {
+    if !visible {
+        return 0.0;
+    }
+    if auto_hide && !revealed {
+        return SIDEBAR_STRIP_WIDTH;
+    }
+    sidebar_width
+}
+
 /// Decide whether the sidebar should be fully visible or collapsed to a strip.
 ///
 /// Pure decision used by both runtime rendering and unit tests:
@@ -51,7 +69,32 @@ pub(super) fn sidebar_reveal_state(
 mod tests {
     use std::time::Duration;
 
-    use super::{SIDEBAR_AUTO_HIDE_DELAY, SidebarReveal, sidebar_reveal_state};
+    use super::{
+        SIDEBAR_AUTO_HIDE_DELAY, SIDEBAR_STRIP_WIDTH, SidebarReveal, reserved_sidebar_width, sidebar_reveal_state,
+    };
+
+    #[test]
+    fn reserved_width_zero_when_sidebar_hidden() {
+        assert_eq!(reserved_sidebar_width(false, false, false, 280.0), 0.0);
+        assert_eq!(reserved_sidebar_width(false, true, false, 280.0), 0.0);
+    }
+
+    #[test]
+    fn reserved_width_full_when_auto_hide_off() {
+        // Auto-hide off keeps the full sidebar reserved regardless of `revealed`.
+        assert_eq!(reserved_sidebar_width(true, false, false, 280.0), 280.0);
+        assert_eq!(reserved_sidebar_width(true, false, true, 280.0), 280.0);
+    }
+
+    #[test]
+    fn reserved_width_full_when_auto_hide_revealed() {
+        assert_eq!(reserved_sidebar_width(true, true, true, 280.0), 280.0);
+    }
+
+    #[test]
+    fn reserved_width_strip_when_auto_hide_collapsed() {
+        assert_eq!(reserved_sidebar_width(true, true, false, 280.0), SIDEBAR_STRIP_WIDTH);
+    }
 
     #[test]
     fn sidebar_reveal_always_full_when_auto_hide_off() {

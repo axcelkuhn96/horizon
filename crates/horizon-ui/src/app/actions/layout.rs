@@ -6,7 +6,6 @@ use egui::{Context, Id, Pos2, Rect, Vec2};
 use horizon_core::{PanelId, WorkspaceId};
 
 use crate::app::attention_feed::estimated_outer_rect;
-use crate::app::root_chrome::effective_sidebar_width;
 use crate::app::settings::{SETTINGS_BAR_HEIGHT, SETTINGS_BAR_ID, SETTINGS_PANEL_ID, settings_panel_default_width};
 use crate::app::util::{OverlayExclusion, viewport_local_rect};
 use crate::app::{HorizonApp, MINIMAP_MARGIN, MINIMAP_PAD, TOOLBAR_HEIGHT};
@@ -50,11 +49,7 @@ impl HorizonApp {
         let viewport = viewport_local_rect(ctx);
         let settings_panel_rect = self.settings_panel_rect(ctx, viewport);
         let settings_bar_rect = self.settings_bar_rect(ctx, viewport);
-        let sidebar_width = if self.sidebar_visible {
-            effective_sidebar_width(viewport.width())
-        } else {
-            0.0
-        };
+        let sidebar_width = self.reserved_sidebar_width(viewport.width());
         canvas_rect_for_layout(viewport, sidebar_width, settings_panel_rect, settings_bar_rect)
     }
 
@@ -84,11 +79,7 @@ impl HorizonApp {
     pub(in crate::app) fn overlay_exclusion_zones(&self, ctx: &Context) -> OverlayExclusion {
         let viewport = viewport_local_rect(ctx);
         let mut zones = Vec::new();
-        let sidebar_width = if self.sidebar_visible {
-            effective_sidebar_width(viewport.width())
-        } else {
-            0.0
-        };
+        let sidebar_width = self.reserved_sidebar_width(viewport.width());
 
         if sidebar_width > 0.0 {
             zones.push(Rect::from_min_max(

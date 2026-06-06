@@ -20,7 +20,8 @@ use super::util;
 use super::{HorizonApp, TOOLBAR_HEIGHT, WS_BG_PAD, WS_TITLE_HEIGHT};
 
 use auto_hide::{
-    SIDEBAR_AUTO_HIDE_DELAY, SIDEBAR_STRIP_HOVER_WIDTH, SIDEBAR_STRIP_WIDTH, SidebarReveal, sidebar_reveal_state,
+    SIDEBAR_AUTO_HIDE_DELAY, SIDEBAR_STRIP_HOVER_WIDTH, SIDEBAR_STRIP_WIDTH, SidebarReveal, reserved_sidebar_width,
+    sidebar_reveal_state,
 };
 
 struct WorkspaceSidebarEntry {
@@ -86,6 +87,21 @@ impl HorizonApp {
             .workspaces
             .iter()
             .any(|workspace| !self.workspace_is_detached(workspace.id))
+    }
+
+    /// Horizontal space the sidebar reserves from the canvas on the left edge,
+    /// for the given viewport width.
+    ///
+    /// When auto-hide is active and the sidebar is collapsed to its thin strip,
+    /// only the strip width is reserved so the freed band becomes usable canvas.
+    /// Otherwise the full effective sidebar width is reserved (unchanged layout).
+    pub(in crate::app) fn reserved_sidebar_width(&self, viewport_width: f32) -> f32 {
+        reserved_sidebar_width(
+            self.sidebar_visible,
+            self.template_config.overlays.sidebar_auto_hide,
+            self.sidebar_auto_hide_revealed,
+            effective_sidebar_width(viewport_width),
+        )
     }
 
     pub(super) fn render_sidebar(&mut self, ctx: &Context) {
