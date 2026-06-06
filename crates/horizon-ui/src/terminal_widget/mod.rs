@@ -10,6 +10,8 @@ use std::path::Path;
 use egui::{Context, FontId, Id, Vec2};
 use horizon_core::{Panel, PanelId};
 
+use crate::theme;
+
 use self::context_menu::{apply_terminal_context_action, show_terminal_context_menu};
 use self::ime::{clear_terminal_ime_state, publish_terminal_ime_output};
 pub(crate) use self::input::SSH_RECONNECT_SHORTCUT;
@@ -173,6 +175,10 @@ impl<'a> TerminalView<'a> {
             self.grid_cache = grid_cache;
         }
 
+        if self.panel.process_exited() && ui.is_rect_visible(interaction.layout.body) {
+            render_process_exited_banner(ui, interaction.layout.body);
+        }
+
         if interactive && has_terminal_focus {
             *keyboard.reconnect_requested |= handle_terminal_keyboard_input(
                 ui,
@@ -244,6 +250,36 @@ fn grid_metrics(ctx: &Context) -> GridMetrics {
         line_height,
         font_id,
     }
+}
+
+/// Non-modal footer strip painted over a dead panel's body so the exited
+/// state is obvious at a glance (the titlebar badge alone is easy to miss).
+fn render_process_exited_banner(ui: &egui::Ui, body: egui::Rect) {
+    use egui::{Align2, Color32, CornerRadius, Pos2, Rect, Stroke};
+
+    const BANNER_HEIGHT: f32 = 24.0;
+    let banner = Rect::from_min_max(
+        Pos2::new(body.min.x, (body.max.y - BANNER_HEIGHT).max(body.min.y)),
+        body.max,
+    );
+    let painter = ui.painter().with_clip_rect(body);
+    let red = theme::PALETTE_RED();
+    painter.rect_filled(
+        banner,
+        CornerRadius::ZERO,
+        Color32::from_rgba_unmultiplied(red.r() / 5, red.g() / 5, red.b() / 5, 230),
+    );
+    painter.line_segment(
+        [banner.left_top(), banner.right_top()],
+        Stroke::new(1.0, theme::alpha(red, 160)),
+    );
+    painter.text(
+        banner.center(),
+        Align2::CENTER_CENTER,
+        "Process exited — Ctrl+Shift+R to restart",
+        FontId::proportional(11.0),
+        theme::alpha(theme::FG(), 230),
+    );
 }
 
 pub(crate) fn viewport_for_available_space(ctx: &Context, available: Vec2) -> layout::TerminalViewportSize {
