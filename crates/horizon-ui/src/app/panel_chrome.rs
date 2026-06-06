@@ -88,7 +88,7 @@ pub(super) fn panel_kind_icon(kind: PanelKind, workspace_color: Color32, focused
         PanelKind::Ssh => ("SSH", panel_kind_label_color(theme::PALETTE_YELLOW(), focused)),
         PanelKind::Editor => ("MD", panel_kind_label_color(theme::PALETTE_GREEN(), focused)),
         PanelKind::GitChanges => ("GC", panel_kind_label_color(theme::PALETTE_YELLOW(), focused)),
-        PanelKind::FileExplorer => ("FE", panel_kind_label_color(theme::PALETTE_YELLOW(), focused)),
+        PanelKind::FileExplorer => ("FX", panel_kind_label_color(theme::PALETTE_CYAN(), focused)),
         PanelKind::Usage => ("US", panel_kind_label_color(theme::PALETTE_YELLOW(), focused)),
         PanelKind::Codex
         | PanelKind::Claude

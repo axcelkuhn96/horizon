@@ -305,6 +305,15 @@ fn default_presets() -> Vec<PresetConfig> {
             ssh_connection: None,
         },
         PresetConfig {
+            name: "Files".to_string(),
+            alias: Some("fx".to_string()),
+            kind: PanelKind::FileExplorer,
+            command: None,
+            args: Vec::new(),
+            resume: PanelResume::Fresh,
+            ssh_connection: None,
+        },
+        PresetConfig {
             name: "Markdown".to_string(),
             alias: Some("md".to_string()),
             kind: PanelKind::Editor,
