@@ -583,6 +583,13 @@ pub(super) fn handle_terminal_keyboard_input(
         return true;
     }
 
+    if panel.process_exited() {
+        // The pty is dead: swallow all keyboard input instead of forwarding it
+        // into the void. Only the restart shortcut acts (when not shadowed by
+        // a conflicting global shortcut).
+        return local_ssh_reconnect_enabled && exited_panel_restart_requested(true, events);
+    }
+
     let Some(terminal) = panel.terminal_mut() else {
         return false;
     };
@@ -653,6 +660,19 @@ pub(super) fn handle_terminal_keyboard_input(
     false
 }
 
+fn restart_shortcut_pressed(events: &[TerminalInputEvent]) -> bool {
+    events.iter().any(|input_event| {
+        matches!(
+            &input_event.event,
+            egui::Event::Key {
+                pressed: true,
+                repeat: false,
+                ..
+            }
+        ) && shortcut_event_matches(&input_event.event, SSH_RECONNECT_SHORTCUT)
+    })
+}
+
 fn disconnected_ssh_reconnect_requested(
     kind: PanelKind,
     ssh_status: Option<SshConnectionStatus>,
@@ -660,16 +680,12 @@ fn disconnected_ssh_reconnect_requested(
 ) -> bool {
     kind == PanelKind::Ssh
         && matches!(ssh_status, Some(SshConnectionStatus::Disconnected))
-        && events.iter().any(|input_event| {
-            matches!(
-                &input_event.event,
-                egui::Event::Key {
-                    pressed: true,
-                    repeat: false,
-                    ..
-                }
-            ) && shortcut_event_matches(&input_event.event, SSH_RECONNECT_SHORTCUT)
-        })
+        && restart_shortcut_pressed(events)
+}
+
+/// Dead non-SSH terminal panel + local Ctrl/Cmd+Shift+R → restart request.
+fn exited_panel_restart_requested(process_exited: bool, events: &[TerminalInputEvent]) -> bool {
+    process_exited && restart_shortcut_pressed(events)
 }
 
 #[derive(Default)]
@@ -910,6 +926,7 @@ impl InputEmission {
 mod tests {
     use super::{
         KeyboardInputForwarder, TerminalInputEvent, disconnected_ssh_reconnect_requested,
+        exited_panel_restart_requested,
         pointer_button_checks_clickable_target, pointer_button_event_needs_handling, pointer_button_event_pos,
         pointer_button_routes_to_pty_mouse, pointer_button_starts_local_selection,
         pointer_drag_updates_local_selection, pointer_event_targets_rect, pointer_motion_routes_to_pty_mouse,
@@ -1163,6 +1180,59 @@ mod tests {
                 true,
                 Modifiers::COMMAND | Modifiers::SHIFT,
             )],
+        ));
+    }
+
+    #[test]
+    fn dead_shell_panels_request_restart_from_local_shortcut() {
+        assert!(exited_panel_restart_requested(
+            true,
+            &[key_event(
+                Key::R,
+                Some(Key::R),
+                None,
+                true,
+                false,
+                Modifiers::COMMAND | Modifiers::SHIFT,
+            )],
+        ));
+    }
+
+    #[test]
+    fn live_panels_ignore_local_restart_shortcut() {
+        assert!(!exited_panel_restart_requested(
+            false,
+            &[key_event(
+                Key::R,
+                Some(Key::R),
+                None,
+                true,
+                false,
+                Modifiers::COMMAND | Modifiers::SHIFT,
+            )],
+        ));
+    }
+
+    #[test]
+    fn repeated_restart_shortcut_does_not_queue_another_restart() {
+        assert!(!exited_panel_restart_requested(
+            true,
+            &[key_event(
+                Key::R,
+                Some(Key::R),
+                None,
+                true,
+                true,
+                Modifiers::COMMAND | Modifiers::SHIFT,
+            )],
+        ));
+    }
+
+    #[test]
+    fn plain_typing_on_dead_panel_does_not_request_restart() {
+        assert!(!exited_panel_restart_requested(
+            true,
+            &[key_event(Key::A, Some(Key::A), Some("a"), true, false, Modifiers::NONE)],
         ));
     }
 
