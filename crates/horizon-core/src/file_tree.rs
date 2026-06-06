@@ -80,6 +80,34 @@ pub fn status_for_path(status: &GitStatus, abs_path: &Path) -> Option<FileStatus
     status.changes.iter().find(|c| c.path == rel).map(|c| c.status)
 }
 
+/// One row of the "only uncommitted files" filtered view: an absolute path,
+/// its git status, and the repo-relative display path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChangedFileRow {
+    /// Absolute path (repo root joined with the change's relative path).
+    pub abs_path: PathBuf,
+    /// Repo-relative path as reported by git (used for display).
+    pub rel_path: String,
+    pub status: FileStatus,
+}
+
+/// Builds the flat list of rows for the File Explorer "show only uncommitted
+/// files" filter from a [`GitStatus`] snapshot. Returns one row per pending
+/// change, preserving git's ordering. Includes every tracked change kind
+/// (Modified, Added, Untracked, Deleted, Renamed).
+#[must_use]
+pub fn changed_file_rows(status: &GitStatus) -> Vec<ChangedFileRow> {
+    status
+        .changes
+        .iter()
+        .map(|change| ChangedFileRow {
+            abs_path: status.repo_root.join(&change.path),
+            rel_path: change.path.clone(),
+            status: change.status,
+        })
+        .collect()
+}
+
 /// Per-panel file-explorer state. Lives inside `PanelContent::FileExplorer`.
 #[derive(Clone, Debug)]
 pub struct FileTreeState {
@@ -89,6 +117,9 @@ pub struct FileTreeState {
     pub git_status: Option<Arc<GitStatus>>,
     /// Set true when a `code` launch failed because the binary was missing.
     pub code_missing: bool,
+    /// When true, the view filters to a flat list of only the uncommitted
+    /// (pending) files from `git_status` instead of the full project tree.
+    pub show_only_changes: bool,
 }
 
 impl FileTreeState {
@@ -100,6 +131,7 @@ impl FileTreeState {
             loaded: false,
             git_status: None,
             code_missing: false,
+            show_only_changes: false,
         }
     }
 
@@ -207,5 +239,66 @@ mod tests {
         let found = status_for_path(&status, &root.join("src").join("main.rs"));
         assert_eq!(found, Some(FileStatus::Modified));
         assert_eq!(status_for_path(&status, &root.join("other.rs")), None);
+    }
+
+    #[test]
+    fn changed_file_rows_includes_every_pending_change() {
+        use crate::git_status::{FileChange, FileStatus, GitStatus};
+        use std::collections::HashMap;
+        use std::time::Instant;
+
+        let root = std::path::PathBuf::from("/repo");
+        let kinds = [
+            ("a.rs", FileStatus::Modified),
+            ("b.rs", FileStatus::Added),
+            ("c.rs", FileStatus::Untracked),
+            ("d.rs", FileStatus::Deleted),
+            ("e.rs", FileStatus::Renamed),
+        ];
+        let changes = kinds
+            .iter()
+            .map(|(path, status)| FileChange {
+                path: (*path).to_string(),
+                status: *status,
+                insertions: 0,
+                deletions: 0,
+            })
+            .collect();
+        let status = GitStatus {
+            repo_root: root.clone(),
+            branch: None,
+            changes,
+            diffs: HashMap::new(),
+            total_insertions: 0,
+            total_deletions: 0,
+            timestamp: Instant::now(),
+        };
+
+        let rows = changed_file_rows(&status);
+        // Every change kind is represented, ordering preserved.
+        assert_eq!(rows.len(), kinds.len());
+        for (row, (path, kind)) in rows.iter().zip(kinds.iter()) {
+            assert_eq!(row.rel_path, *path);
+            assert_eq!(row.status, *kind);
+            assert_eq!(row.abs_path, root.join(path));
+        }
+    }
+
+    #[test]
+    fn changed_file_rows_empty_when_no_changes() {
+        use crate::git_status::GitStatus;
+        use std::collections::HashMap;
+        use std::time::Instant;
+
+        let status = GitStatus {
+            repo_root: std::path::PathBuf::from("/repo"),
+            branch: None,
+            changes: Vec::new(),
+            diffs: HashMap::new(),
+            total_insertions: 0,
+            total_deletions: 0,
+            timestamp: Instant::now(),
+        };
+        assert!(changed_file_rows(&status).is_empty());
     }
 }

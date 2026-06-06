@@ -9,7 +9,7 @@ use std::path::Path;
 use std::process::Command;
 
 use egui::{Align, Color32, CornerRadius, FontId, Layout, Rect, RichText, ScrollArea, Vec2};
-use horizon_core::file_tree::{FileNode, FileTreeState, status_for_path};
+use horizon_core::file_tree::{ChangedFileRow, FileNode, FileTreeState, changed_file_rows, status_for_path};
 use horizon_core::{FileStatus, GitStatus, Panel};
 
 use crate::scroll_forward::{forward_scroll_to_scroll_area, scroll_viewport_height};
@@ -141,7 +141,11 @@ impl<'a> FileExplorerView<'a> {
         }
 
         let mut refresh = false;
-        render_header(ui, state, &mut refresh);
+        // Own the toggle value before the immutable borrows below; the header
+        // flips it in place and we persist it back into `state` afterwards.
+        let mut show_only = state.show_only_changes;
+        render_header(ui, state, &mut refresh, &mut show_only);
+        state.show_only_changes = show_only;
 
         // Clone the status Arc out before the recursive render so the immutable
         // borrow of `state.git_status` does not conflict with the mutations we
@@ -161,7 +165,11 @@ impl<'a> FileExplorerView<'a> {
             .id_salt(("file_explorer_tree", panel_id))
             .show(ui, |ui| {
                 ui.add_space(2.0);
-                render_nodes(ui, &state.roots, 0, status.as_deref(), &mut action);
+                if show_only {
+                    render_changes_only(ui, status.as_deref(), &mut action);
+                } else {
+                    render_nodes(ui, &state.roots, 0, status.as_deref(), &mut action);
+                }
                 ui.add_space(4.0);
             });
         // The panel `Area` is `interactable(false)`, so egui never registers the
@@ -191,7 +199,7 @@ impl<'a> FileExplorerView<'a> {
     }
 }
 
-fn render_header(ui: &mut egui::Ui, state: &FileTreeState, refresh: &mut bool) {
+fn render_header(ui: &mut egui::Ui, state: &FileTreeState, refresh: &mut bool, show_only: &mut bool) {
     let header_rect = Rect::from_min_size(ui.cursor().min, Vec2::new(ui.available_width(), HEADER_HEIGHT));
     ui.allocate_rect(header_rect, egui::Sense::hover());
 
@@ -220,6 +228,19 @@ fn render_header(ui: &mut egui::Ui, state: &FileTreeState, refresh: &mut bool) {
                     ui.add(egui::Button::new(RichText::new("\u{27f3}").size(14.0).color(theme::FG_DIM())).frame(false));
                 if refresh_btn.on_hover_text("Refresh").clicked() {
                     *refresh = true;
+                }
+
+                ui.add_space(8.0);
+                // Funnel toggle: filters the view to only uncommitted files.
+                // Accent when active, dim when off (nf-fa-filter).
+                let filter_color = if *show_only { theme::ACCENT() } else { theme::FG_DIM() };
+                let filter_btn =
+                    ui.add(egui::Button::new(RichText::new("\u{f0b0}").size(13.0).color(filter_color)).frame(false));
+                if filter_btn
+                    .on_hover_text("Mostrar s\u{f3} n\u{e3}o-commitados")
+                    .clicked()
+                {
+                    *show_only = !*show_only;
                 }
             });
         },
@@ -346,6 +367,89 @@ fn render_row(ui: &mut egui::Ui, node: &FileNode, depth: usize, status: Option<&
     } else {
         response.double_clicked()
     }
+}
+
+/// Renders the flat "only uncommitted files" list. With no git snapshot, shows
+/// a dim "Sem reposit\u{f3}rio git" message; with an empty change set, shows
+/// "Nada para commitar". Double-clicking a row collects a [`TreeAction::Open`].
+fn render_changes_only(ui: &mut egui::Ui, status: Option<&GitStatus>, action: &mut Option<TreeAction>) {
+    let Some(status) = status else {
+        render_centered_dim(ui, "Sem reposit\u{f3}rio git");
+        return;
+    };
+
+    let rows = changed_file_rows(status);
+    if rows.is_empty() {
+        render_centered_dim(ui, "Nada para commitar");
+        return;
+    }
+
+    for row in &rows {
+        if render_change_row(ui, row) && action.is_none() {
+            *action = Some(TreeAction::Open(row.abs_path.clone()));
+        }
+    }
+}
+
+/// Renders one row of the filtered uncommitted-files list: type icon, the
+/// repo-relative path colored by its status, and a right-aligned status letter.
+/// Returns `true` when double-clicked (open in editor). Mirrors the tree row.
+fn render_change_row(ui: &mut egui::Ui, row: &ChangedFileRow) -> bool {
+    let row_rect = Rect::from_min_size(ui.cursor().min, Vec2::new(ui.available_width(), ROW_HEIGHT));
+    let response = ui.allocate_rect(row_rect, egui::Sense::click());
+
+    if response.hovered() {
+        ui.painter()
+            .rect_filled(row_rect, CornerRadius::ZERO, theme::alpha(theme::FG(), 6));
+    }
+
+    let decoration = status_decoration(Some(row.status));
+    let name_color = decoration.map_or_else(theme::FG, |(_, color)| color);
+    let path = Path::new(&row.rel_path);
+
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .max_rect(row_rect)
+            .layout(Layout::left_to_right(Align::Center)),
+        |ui| {
+            ui.add_space(BASE_INDENT);
+
+            ui.label(
+                RichText::new(file_type_icon(path, false))
+                    .font(FontId::proportional(ICON_FONT_SIZE))
+                    .color(name_color),
+            );
+            ui.add_space(6.0);
+
+            ui.label(
+                RichText::new(&row.rel_path)
+                    .font(FontId::proportional(ROW_FONT_SIZE))
+                    .color(name_color),
+            );
+
+            if let Some((letter, color)) = decoration {
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.add_space(12.0);
+                    ui.label(
+                        RichText::new(letter)
+                            .font(FontId::monospace(11.0))
+                            .color(color)
+                            .strong(),
+                    );
+                });
+            }
+        },
+    );
+
+    response.double_clicked()
+}
+
+/// Centered, dim status message used for the empty / no-repo filtered states.
+fn render_centered_dim(ui: &mut egui::Ui, text: &str) {
+    ui.vertical_centered(|ui| {
+        ui.add_space(40.0);
+        ui.label(RichText::new(text).size(13.0).color(theme::FG_DIM()));
+    });
 }
 
 fn render_footer(ui: &mut egui::Ui, code_missing: bool) {
