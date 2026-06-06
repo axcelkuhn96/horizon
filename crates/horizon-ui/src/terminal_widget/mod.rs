@@ -4,8 +4,8 @@ mod layout;
 mod render;
 mod scrollbar;
 
-use egui::{Context, FontId, Vec2};
-use horizon_core::Panel;
+use egui::{Context, FontId, Id, Vec2};
+use horizon_core::{Panel, PanelId};
 
 use self::ime::{clear_terminal_ime_state, publish_terminal_ime_output};
 pub(crate) use self::input::SSH_RECONNECT_SHORTCUT;
@@ -18,6 +18,30 @@ use super::primary_selection::PrimarySelection;
 
 const FONT_SIZE: f32 = 13.0;
 const LINE_HEIGHT_FACTOR: f32 = 1.3;
+
+/// Stable, controller-reachable egui [`Id`] under which a terminal panel
+/// publishes the egui focus [`Id`] of its body widget each frame. The body
+/// widget's own [`Id`] is derived from the surrounding [`egui::Ui`] id stack at
+/// render time and cannot be reconstructed outside the render closure, so the
+/// widget stores it here and directional-focus navigation reads it back to
+/// deliver keyboard focus the same way a click does. See
+/// [`store_terminal_focus_id`] / [`terminal_focus_id`].
+pub(crate) fn terminal_focus_request_id(panel_id: PanelId) -> Id {
+    Id::new(("terminal_focus_request", panel_id.0))
+}
+
+/// Records the egui focus [`Id`] of `panel_id`'s terminal body so directional
+/// navigation can request focus on it without a prior click.
+fn store_terminal_focus_id(ctx: &Context, panel_id: PanelId, body_id: Id) {
+    ctx.data_mut(|data| data.insert_temp(terminal_focus_request_id(panel_id), body_id));
+}
+
+/// Looks up the egui focus [`Id`] last published for `panel_id`'s terminal body.
+/// Returns `None` if the panel has not been rendered as a terminal this session
+/// (e.g. it was never on screen) — callers then leave focus unchanged.
+pub(crate) fn terminal_focus_id(ctx: &Context, panel_id: PanelId) -> Option<Id> {
+    ctx.data(|data| data.get_temp::<Id>(terminal_focus_request_id(panel_id)))
+}
 
 pub struct TerminalView<'a> {
     panel: &'a mut Panel,
@@ -57,6 +81,10 @@ impl<'a> TerminalView<'a> {
             .resize(new_rows, new_cols, viewport.cell_width, viewport.cell_height);
 
         let interaction = terminal_interaction(ui, layout, self.panel.id.0, interactive);
+        // Publish the body's egui focus Id so directional-focus navigation can
+        // deliver keyboard focus the same way a click does (mirror of the
+        // `interaction.body.request_focus()` call in the pointer handler).
+        store_terminal_focus_id(ui.ctx(), self.panel.id, interaction.body.id);
         if interactive {
             handle_terminal_pointer_input(
                 ui,
@@ -168,4 +196,26 @@ fn grid_metrics(ctx: &Context) -> GridMetrics {
 pub(crate) fn viewport_for_available_space(ctx: &Context, available: Vec2) -> layout::TerminalViewportSize {
     let metrics = grid_metrics(ctx);
     terminal_viewport_size(available, metrics.char_width, metrics.line_height)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::terminal_focus_request_id;
+    use horizon_core::PanelId;
+
+    #[test]
+    fn focus_request_id_is_stable_per_panel() {
+        assert_eq!(
+            terminal_focus_request_id(PanelId(7)),
+            terminal_focus_request_id(PanelId(7))
+        );
+    }
+
+    #[test]
+    fn focus_request_id_differs_across_panels() {
+        assert_ne!(
+            terminal_focus_request_id(PanelId(1)),
+            terminal_focus_request_id(PanelId(2))
+        );
+    }
 }

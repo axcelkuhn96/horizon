@@ -162,6 +162,16 @@ impl HorizonApp {
         };
 
         self.board.focus(target);
+        // Deliver egui keyboard focus to the target terminal so the user can
+        // type immediately, mirroring what a click does
+        // (`interaction.body.request_focus()`). Without this the previously
+        // focused terminal keeps egui focus and the target only receives input
+        // after a click. The body Id is published each frame by the terminal
+        // widget; if the target was never rendered as a terminal we leave focus
+        // unchanged.
+        if let Some(body_id) = crate::terminal_widget::terminal_focus_id(ctx, target) {
+            ctx.memory_mut(|memory| memory.request_focus(body_id));
+        }
         if self.template_config.input.auto_fit_on_focus {
             let canvas_rect = self.canvas_rect(ctx);
             let _ = self.fit_panel_in_rect(target, canvas_rect);
