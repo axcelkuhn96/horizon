@@ -1,5 +1,10 @@
 mod auto_hide;
+mod routing;
 mod toolbar;
+
+use routing::{
+    should_focus_workspace_on_row_click, sidebar_workspace_drop_should_dock, sidebar_workspace_insert_dock_side,
+};
 
 use std::collections::HashMap;
 use std::time::Instant;
@@ -8,9 +13,7 @@ use egui::{
     Align, Button, Color32, Context, CornerRadius, CursorIcon, Id, Layout, Order, Pos2, Rect, Sense, Stroke, UiBuilder,
     Vec2,
 };
-use horizon_core::{
-    AttentionItem, AttentionSeverity, PanelId, PanelKind, WorkspaceDockSide, WorkspaceId, WorkspaceLayout,
-};
+use horizon_core::{AttentionItem, AttentionSeverity, PanelId, PanelKind, WorkspaceId, WorkspaceLayout};
 
 use crate::theme;
 
@@ -62,7 +65,7 @@ struct SidebarActions {
 }
 
 #[derive(Clone, Copy)]
-enum SidebarWorkspaceInsert {
+pub(super) enum SidebarWorkspaceInsert {
     Before,
     After,
 }
@@ -373,7 +376,7 @@ impl HorizonApp {
         let row_rect = ui.allocate_space(Vec2::new(ui.available_width(), 32.0)).1;
         let mut click_target_hovered = ui.rect_contains_pointer(row_rect);
         let mut row_clicked = false;
-        let mut caret_clicked = false;
+        let mut caret_rect = Rect::NOTHING;
         paint_workspace_row_bg(
             ui,
             row_rect,
@@ -387,10 +390,10 @@ impl HorizonApp {
                 .max_rect(row_rect)
                 .layout(Layout::left_to_right(Align::Center)),
             |ui| {
-                let row = render_sidebar_workspace_header_row(ui, workspace, actions);
+                let row = render_sidebar_workspace_header_row(ui, workspace);
                 click_target_hovered |= row.hovered;
                 row_clicked |= row.row_clicked;
-                caret_clicked |= row.caret_clicked;
+                caret_rect = row.caret_rect;
             },
         );
 
@@ -403,7 +406,23 @@ impl HorizonApp {
         row_clicked |= row_response.clicked();
         self.handle_sidebar_workspace_drag(ui, workspace, row_rect, &row_response, drag_state, click_target_hovered);
 
-        if row_clicked && !caret_clicked {
+        // Interact with the caret AFTER the full-row interaction so it sits on
+        // top and wins overlapping clicks. Expand the hit-rect for comfort.
+        let caret_hit_rect = caret_rect.expand(4.0);
+        let caret_response = ui.interact(
+            caret_hit_rect,
+            ui.make_persistent_id(("sidebar_ws_caret", workspace.id.0)),
+            Sense::click(),
+        );
+        let caret_hit = caret_response.clicked();
+        if caret_response.hovered() {
+            ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+        }
+        if caret_hit {
+            actions.toggle_sidebar_collapse = Some(workspace.id);
+        }
+
+        if should_focus_workspace_on_row_click(row_clicked, caret_hit) {
             if workspace.panels.len() == 1 {
                 actions.focus_panel = Some(workspace.panels[0].id);
                 actions.pan_to_panel = Some(workspace.panels[0].id);
@@ -797,22 +816,24 @@ impl HorizonApp {
     }
 }
 
-fn sidebar_workspace_insert_dock_side(insert: SidebarWorkspaceInsert) -> WorkspaceDockSide {
-    match insert {
-        SidebarWorkspaceInsert::Before => WorkspaceDockSide::Left,
-        SidebarWorkspaceInsert::After => WorkspaceDockSide::Right,
-    }
-}
-
-fn sidebar_workspace_drop_should_dock(target_detached: bool) -> bool {
-    !target_detached
-}
-
-#[derive(Default)]
 struct SidebarHeaderRowOutcome {
     hovered: bool,
     row_clicked: bool,
-    caret_clicked: bool,
+    /// Hit-rect of the collapse caret. The caret is painted (not interactive)
+    /// here; the caller runs the click interaction on this rect *after* the
+    /// full-row interaction so the caret sits on top and wins overlapping
+    /// clicks instead of falling through to the workspace-focus handler.
+    caret_rect: Rect,
+}
+
+impl Default for SidebarHeaderRowOutcome {
+    fn default() -> Self {
+        Self {
+            hovered: false,
+            row_clicked: false,
+            caret_rect: Rect::NOTHING,
+        }
+    }
 }
 
 /// Render the inner content of a workspace header row: the collapse caret, the
@@ -821,7 +842,6 @@ struct SidebarHeaderRowOutcome {
 fn render_sidebar_workspace_header_row(
     ui: &mut egui::Ui,
     workspace: &WorkspaceSidebarEntry,
-    actions: &mut SidebarActions,
 ) -> SidebarHeaderRowOutcome {
     let mut outcome = SidebarHeaderRowOutcome::default();
 
@@ -831,26 +851,23 @@ fn render_sidebar_workspace_header_row(
     } else {
         "\u{25BC}"
     };
-    let caret_response = ui.add(
-        egui::Label::new(
-            egui::RichText::new(caret)
-                .color(if workspace.is_active {
-                    theme::FG_SOFT()
-                } else {
-                    theme::FG_DIM()
-                })
-                .size(9.0),
-        )
-        .sense(Sense::click()),
+    // Paint the caret glyph and remember its rect; the interactive hit-test is
+    // performed by the caller (on top of the row interaction) to avoid the
+    // full-row click_and_drag region swallowing the caret click.
+    let caret_color = if workspace.is_active {
+        theme::FG_SOFT()
+    } else {
+        theme::FG_DIM()
+    };
+    let caret_rect = ui.allocate_space(Vec2::new(11.0, 22.0)).1;
+    ui.painter().text(
+        caret_rect.center(),
+        egui::Align2::CENTER_CENTER,
+        caret,
+        egui::FontId::proportional(9.0),
+        caret_color,
     );
-    outcome.hovered |= caret_response.hovered();
-    if caret_response.clicked() {
-        actions.toggle_sidebar_collapse = Some(workspace.id);
-        outcome.caret_clicked = true;
-    }
-    if caret_response.hovered() {
-        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
-    }
+    outcome.caret_rect = caret_rect;
     ui.add_space(4.0);
 
     let bar_color = if workspace.attention_count > 0 {
@@ -976,39 +993,6 @@ fn paint_panel_row_bg(ui: &mut egui::Ui, item_rect: Rect, workspace_color: Color
             bg_rect,
             CornerRadius::same(10),
             theme::alpha(theme::PANEL_BG_ALT(), 180),
-        );
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{SidebarWorkspaceInsert, sidebar_workspace_drop_should_dock, sidebar_workspace_insert_dock_side};
-    use horizon_core::WorkspaceDockSide;
-
-    #[test]
-    fn sidebar_drop_docks_attached_workspace_against_attached_target() {
-        assert!(sidebar_workspace_drop_should_dock(false));
-    }
-
-    #[test]
-    fn sidebar_drop_preserves_detached_workspace_reposition_against_attached_target() {
-        assert!(sidebar_workspace_drop_should_dock(false));
-    }
-
-    #[test]
-    fn sidebar_drop_skips_board_docking_when_target_workspace_is_detached() {
-        assert!(!sidebar_workspace_drop_should_dock(true));
-    }
-
-    #[test]
-    fn sidebar_insert_side_maps_to_expected_dock_side() {
-        assert_eq!(
-            sidebar_workspace_insert_dock_side(SidebarWorkspaceInsert::Before),
-            WorkspaceDockSide::Left
-        );
-        assert_eq!(
-            sidebar_workspace_insert_dock_side(SidebarWorkspaceInsert::After),
-            WorkspaceDockSide::Right
         );
     }
 }
