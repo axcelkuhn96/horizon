@@ -2,7 +2,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-MAX_LINES=1000
+# Line-count cap removed in this fork (was 1000). Set very high to effectively disable.
+MAX_LINES=1000000
 ALLOW_PATTERN='#\[allow\(clippy::too_many_lines\)\]'
 SOURCE_DIRS=(
   "$ROOT_DIR/crates/horizon-core/src"

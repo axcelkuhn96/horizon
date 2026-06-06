@@ -1,3 +1,17 @@
+> ## 🛠️ Fork de [@axcelkuhn96](https://github.com/axcelkuhn96)
+>
+> Fork pessoal do [peters/horizon](https://github.com/peters/horizon) com melhorias de **navegação e UX** que eu adicionei. CHANGELOG completo em [CHANGELOG.md](CHANGELOG.md).
+>
+> **O que eu fiz:**
+> - **Navegação por teclado** entre terminais do workspace (`Ctrl+Shift+Setas`) com auto-fit e foco de digitação imediato.
+> - **Pan no touchpad** configurável (dois dedos / `Tab`+dois dedos / toggle `Ctrl+Shift+P`) movendo o canvas sobre os terminais.
+> - **Auto-hide da barra lateral**, com a área liberada virando canvas usável.
+> - **Collapse** por terminal (titlebar) e por grupo de workspace na barra lateral — persistentes.
+> - **Menu de contexto** (botão direito) nos terminais: Copy / Paste / **Paste de imagem** (cola o caminho do print — útil pro Claude Code).
+> - **Layout organizado** dos terminais (2 empilhados + 1 alto, alinhado) e ajustes de paleta/UI.
+>
+> ---
+
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/hero-banner.svg" />
