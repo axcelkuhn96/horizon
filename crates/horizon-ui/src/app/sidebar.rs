@@ -215,6 +215,20 @@ impl HorizonApp {
                 );
                 let handle = theme::alpha(theme::ACCENT(), if hovered { 230 } else { 170 });
                 painter.rect_filled(handle_rect, CornerRadius::same(2), handle);
+                // Two short grip notches centered on the handle so it reads as a
+                // grab affordance (like a drawer pull) rather than a plain bar.
+                let grip_color = theme::alpha(theme::BG_ELEVATED(), if hovered { 235 } else { 200 });
+                let grip_half_w = (SIDEBAR_STRIP_WIDTH - 2.0) * 0.28;
+                for dy in [-3.0_f32, 3.0_f32] {
+                    let gy = handle_rect.center().y + dy;
+                    painter.line_segment(
+                        [
+                            Pos2::new(handle_rect.center().x - grip_half_w, gy),
+                            Pos2::new(handle_rect.center().x + grip_half_w, gy),
+                        ],
+                        Stroke::new(1.0, grip_color),
+                    );
+                }
                 let edge_top = Pos2::new(strip_rect.max.x, strip_rect.min.y);
                 let edge_bottom = Pos2::new(strip_rect.max.x, strip_rect.max.y);
                 painter.line_segment([edge_top, edge_bottom], Stroke::new(1.0, theme::BORDER_SUBTLE()));
@@ -491,16 +505,12 @@ impl HorizonApp {
         menu::context_menu_above_sidebar(response, |ui| {
             ui.set_min_width(160.0);
             ui.label(egui::RichText::new("Arrange Panels").size(11.0).color(theme::FG_DIM()));
-            if ui
-                .add(Button::new(egui::RichText::new("Default").size(12.0).color(theme::FG_SOFT())).frame(false))
-                .clicked()
-            {
+            if ui.add(sidebar_menu_item("Default", theme::FG_SOFT())).clicked() {
                 actions.clear_layout = Some(workspace.id);
                 ui.close();
             }
             for layout in WorkspaceLayout::ALL {
-                let text = egui::RichText::new(layout.label()).size(12.0).color(theme::FG_SOFT());
-                if ui.add(Button::new(text).frame(false)).clicked() {
+                if ui.add(sidebar_menu_item(layout.label(), theme::FG_SOFT())).clicked() {
                     actions.arrange_layout = Some((workspace.id, layout));
                     ui.close();
                 }
@@ -512,10 +522,7 @@ impl HorizonApp {
             } else {
                 "Open in New Window"
             };
-            if ui
-                .add(Button::new(egui::RichText::new(detach_label).size(12.0).color(theme::FG_SOFT())).frame(false))
-                .clicked()
-            {
+            if ui.add(sidebar_menu_item(detach_label, theme::FG_SOFT())).clicked() {
                 if workspace.detached {
                     actions.reattach_workspace = Some(workspace.id);
                 } else {
@@ -526,14 +533,7 @@ impl HorizonApp {
 
             ui.separator();
             if ui
-                .add(
-                    Button::new(
-                        egui::RichText::new("Close All Panels")
-                            .size(12.0)
-                            .color(theme::PALETTE_RED()),
-                    )
-                    .frame(false),
-                )
+                .add(sidebar_menu_item("Close All Panels", theme::PALETTE_RED()))
                 .clicked()
             {
                 actions.close_all_in_workspace = Some(workspace.id);
@@ -969,6 +969,16 @@ fn sidebar_attention_tag(severity: AttentionSeverity) -> (&'static str, Color32)
         AttentionSeverity::Medium => ("DONE", theme::PALETTE_GREEN()),
         AttentionSeverity::Low => ("INFO", theme::ACCENT()),
     }
+}
+
+/// A sidebar context-menu row button: flat at rest with a subtle warm
+/// hover/active fill (from the theme widget visuals) so the item reads as
+/// interactive. Spans the full menu width so the hover fill covers the row.
+fn sidebar_menu_item(label: &str, color: Color32) -> Button<'_> {
+    Button::new(egui::RichText::new(label).size(12.0).color(color))
+        .fill(Color32::TRANSPARENT)
+        .corner_radius(6)
+        .min_size(Vec2::new(160.0, 0.0))
 }
 
 fn paint_panel_row_bg(ui: &mut egui::Ui, item_rect: Rect, workspace_color: Color32, is_focused: bool, hovered: bool) {

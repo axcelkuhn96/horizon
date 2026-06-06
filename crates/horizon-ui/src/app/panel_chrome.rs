@@ -185,6 +185,20 @@ pub(super) fn paint_panel_chrome(ui: &mut egui::Ui, chrome: PanelChrome<'_>) {
         );
     }
 
+    // Collapsed panels are titlebar-only. Draw a faint hairline along the
+    // bottom edge of the titlebar so it reads as a closed drawer with hidden
+    // content beneath, rather than a free-floating bar.
+    if chrome.collapsed {
+        let y = chrome.titlebar_rect.max.y - 0.5;
+        painter.line_segment(
+            [
+                Pos2::new(chrome.titlebar_rect.min.x + 8.0, y),
+                Pos2::new(chrome.titlebar_rect.max.x - 8.0, y),
+            ],
+            Stroke::new(1.0, theme::alpha(theme::BORDER_STRONG(), 120)),
+        );
+    }
+
     // Collapsed panels are titlebar-only: skip the badges/history meter that
     // describe the (hidden) body. The caret + close button stay visible.
     if !chrome.collapsed {

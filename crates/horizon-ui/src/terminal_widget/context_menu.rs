@@ -42,32 +42,33 @@ pub(super) fn show_terminal_context_menu(ui: &mut Ui, has_selection: bool) -> Op
     ui.set_min_width(160.0);
     let mut action = None;
 
-    let copy = ui.add_enabled(
-        copy_enabled(has_selection),
-        Button::new(RichText::new("Copy").size(12.0).color(theme::FG_SOFT())).frame(false),
-    );
+    let copy = ui.add_enabled(copy_enabled(has_selection), menu_item_button("Copy"));
     if copy.clicked() {
         action = Some(TerminalContextAction::Copy);
         ui.close();
     }
 
-    if ui
-        .add(Button::new(RichText::new("Paste").size(12.0).color(theme::FG_SOFT())).frame(false))
-        .clicked()
-    {
+    if ui.add(menu_item_button("Paste")).clicked() {
         action = Some(TerminalContextAction::Paste);
         ui.close();
     }
 
-    if ui
-        .add(Button::new(RichText::new("Paste Image").size(12.0).color(theme::FG_SOFT())).frame(false))
-        .clicked()
-    {
+    if ui.add(menu_item_button("Paste Image")).clicked() {
         action = Some(TerminalContextAction::PasteImage);
         ui.close();
     }
 
     action
+}
+
+/// A context-menu row button: flat (transparent) at rest, with a subtle warm
+/// hover/active fill driven by the theme widget visuals so the item reads as
+/// interactive. Spans the full menu width so the hover fill covers the row.
+fn menu_item_button(label: &str) -> Button<'static> {
+    Button::new(RichText::new(label).size(12.0).color(theme::FG_SOFT()))
+        .fill(egui::Color32::TRANSPARENT)
+        .corner_radius(6)
+        .min_size(egui::Vec2::new(160.0, 0.0))
 }
 
 /// Apply a context-menu `action` to `panel`. Mirrors the keyboard copy/paste

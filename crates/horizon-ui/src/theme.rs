@@ -37,22 +37,22 @@ struct ThemePalette {
 // distinctive forge feel, with a clear elevation ladder
 // (canvas -> panel -> chrome) and legible warm foreground tiers.
 const DARK_THEME: ThemePalette = ThemePalette {
-    bg: Color32::from_rgb(18, 17, 16),            // Forge Coal: warm near-black canvas
-    bg_elevated: Color32::from_rgb(26, 24, 22),   // first elevation step
-    panel_bg: Color32::from_rgb(26, 24, 22),      // terminal body
-    panel_bg_alt: Color32::from_rgb(42, 38, 34),  // warm graphite chrome / titlebars
-    fg: Color32::from_rgb(237, 228, 217),         // warm off-white text
-    fg_soft: Color32::from_rgb(186, 176, 164),    // warm subtext
-    fg_dim: Color32::from_rgb(138, 128, 117),     // warm dim tier
-    cursor: Color32::from_rgb(255, 176, 92),      // bright amber cursor
-    grid_dot: Color32::from_rgb(45, 40, 35),      // warm visible dot grid
-    accent: Color32::from_rgb(245, 158, 66),      // molten amber
-    border_subtle: Color32::from_rgb(58, 52, 46), // readable warm edges
-    border_strong: Color32::from_rgb(82, 73, 64),
-    titlebar_bg: Color32::from_rgb(13, 12, 11), // deepest warm crust
-    toolbar_bg: Color32::from_rgb(18, 17, 16),  // Forge Coal
-    canvas_cool_glow: Color32::from_rgba_unmultiplied_const(255, 122, 70, 24), // ember underglow
-    canvas_warm_glow: Color32::from_rgba_unmultiplied_const(255, 184, 104, 32), // amber bloom
+    bg: Color32::from_rgb(28, 24, 20), // Forge Coal: warm charcoal canvas (perceptibly warm)
+    bg_elevated: Color32::from_rgb(36, 31, 26), // first elevation step
+    panel_bg: Color32::from_rgb(36, 31, 26), // terminal body
+    panel_bg_alt: Color32::from_rgb(52, 45, 38), // warm graphite chrome / titlebars
+    fg: Color32::from_rgb(237, 228, 217), // warm off-white text
+    fg_soft: Color32::from_rgb(186, 176, 164), // warm subtext
+    fg_dim: Color32::from_rgb(142, 130, 117), // warm dim tier
+    cursor: Color32::from_rgb(255, 176, 92), // bright amber cursor
+    grid_dot: Color32::from_rgb(58, 49, 40), // warm visible dot grid
+    accent: Color32::from_rgb(245, 158, 66), // molten amber
+    border_subtle: Color32::from_rgb(68, 59, 50), // readable warm edges
+    border_strong: Color32::from_rgb(94, 82, 70),
+    titlebar_bg: Color32::from_rgb(20, 17, 14), // deepest warm crust
+    toolbar_bg: Color32::from_rgb(28, 24, 20),  // Forge Coal
+    canvas_cool_glow: Color32::from_rgba_unmultiplied_const(255, 122, 70, 30), // ember underglow
+    canvas_warm_glow: Color32::from_rgba_unmultiplied_const(255, 184, 104, 40), // amber bloom
     btn_close: Color32::from_rgb(255, 107, 90), // warm coral red
     palette_green: Color32::from_rgb(169, 200, 122), // warm sage
     palette_red: Color32::from_rgb(255, 107, 90),
