@@ -1,6 +1,6 @@
 # Story: Surface child process exit on non-SSH terminal panels ("ghost panel" fix)
 
-**Status:** Approved (Ready for Dev)
+**Status:** Done
 **Epic:** v1 UX polish (feat/v1-navigation)
 **Created:** 2026-06-06
 
@@ -67,7 +67,7 @@ The core already detects death — only SSH panels consume it:
       gate to dead non-SSH terminal panels (TDD following `input.rs:912+`
       test patterns). Mouse/scrollback/copy untouched.
 - [x] Task 5 (sidebar): extend Restart button condition to Shell/Command.
-- [ ] Task 6 (delivery): full gates → release build → install
+- [x] Task 6 (delivery): full gates → release build → install
       `~/.local/bin/horizon` → conventional commit → push branch → merge main
       → push main.
 
@@ -88,3 +88,8 @@ The core already detects death — only SSH panels consume it:
 - Prefer new Panel methods over changing existing signatures.
 - Restart is always an explicit user action (shortcut or button) — no
   auto-respawn.
+
+### Known Accepted Trade-offs
+- (a) Keyboard Ctrl+C copy is swallowed on dead panels; copy still available via right-click context menu and primary selection (highlight-to-copy).
+- (b) The restart shortcut (Ctrl+Shift+R) shares the `local_ssh_reconnect_enabled` conflict flag with SSH reconnect; both paths safely coexist because the SSH gate runs first and only dead non-SSH panels reach the new gate.
+- (c) The footer banner label is literal "Ctrl+Shift+R" (Linux-first); macOS users see the same text even though Cmd+Shift+R also works.
