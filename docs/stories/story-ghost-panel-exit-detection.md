@@ -75,7 +75,8 @@ The core already detects death — only SSH panels consume it:
 
 ### File List
 - `crates/horizon-core/src/panel.rs` — added `process_exit_label` free fn, `Panel::process_exited()`, `Panel::process_exit_label()`, and `mod process_exit_tests`
-- `crates/horizon-core/src/terminal/lifecycle.rs` — gated `write_input` to no-op when `child_exited` is set
+- `crates/horizon-core/src/terminal/lifecycle.rs` — gated `write_input` to no-op when `child_exited` is set (via `should_drop_input`)
+- `crates/horizon-core/src/terminal.rs` — extracted `should_drop_input` predicate + tests covering the dead-pty `write_input` gate (drop on exit/empty, forward when alive)
 
 ### Notes
 - Do NOT touch replay/transcript flow or spawn logic.

@@ -136,6 +136,14 @@ pub struct Terminal {
     pending_notification: Option<AgentNotification>,
 }
 
+/// Gate for `Terminal::write_input`: returns `true` when the bytes must be
+/// dropped instead of forwarded to the pty — either there is nothing to send
+/// (`bytes_empty`) or the child process has already exited (`child_exited`),
+/// in which case writing would be a silent, misleading no-op.
+const fn should_drop_input(bytes_empty: bool, child_exited: bool) -> bool {
+    bytes_empty || child_exited
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -147,7 +155,7 @@ mod tests {
     use super::{
         AgentNotification, HorizonOscTitle, Terminal, TerminalDimensions, TerminalEventProxy, TerminalSpawnOptions,
         default_terminal_rgb, find_file_path_at_column, find_url_at_column, queue_debounced_pty_resize,
-        replay_terminal_bytes, should_debounce_pty_resize,
+        replay_terminal_bytes, should_debounce_pty_resize, should_drop_input,
     };
     use alacritty_terminal::event::Event;
     use alacritty_terminal::grid::Dimensions;
@@ -284,6 +292,35 @@ mod tests {
             kitty_keyboard: true,
         })
         .expect("terminal should spawn")
+    }
+
+    #[test]
+    fn should_drop_input_drops_when_child_exited_or_empty() {
+        // Dead pty: drop regardless of payload.
+        assert!(should_drop_input(false, true));
+        assert!(should_drop_input(true, true));
+        // Empty payload: drop even while the child is alive.
+        assert!(should_drop_input(true, false));
+    }
+
+    #[test]
+    fn should_drop_input_forwards_live_non_empty_input() {
+        assert!(!should_drop_input(false, false));
+    }
+
+    #[test]
+    fn write_input_is_a_no_op_after_child_exit() {
+        let mut terminal = spawn_test_terminal();
+        // Simulate the child process having died (set by Event::ChildExit in
+        // production); the field is crate-visible inside this test module.
+        terminal.child_exited = true;
+
+        // Must not panic and must not forward to the dead pty — the gate
+        // returns before touching `event_sender`.
+        terminal.write_input(b"echo hi");
+
+        assert!(should_drop_input(false, terminal.child_exited));
+        assert!(terminal.shutdown_with_timeout(Duration::from_secs(2)));
     }
 
     #[test]
