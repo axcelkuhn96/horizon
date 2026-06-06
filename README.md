@@ -8,7 +8,23 @@
 > - **Auto-hide da barra lateral**, com a área liberada virando canvas usável.
 > - **Collapse** por terminal (titlebar) e por grupo de workspace na barra lateral — persistentes.
 > - **Menu de contexto** (botão direito) nos terminais: Copy / Paste / **Paste de imagem** (cola o caminho do print — útil pro Claude Code).
-> - **Layout organizado** dos terminais (2 empilhados + 1 alto, alinhado) e ajustes de paleta/UI.
+> - **Layout organizado** dos terminais (2 empilhados + 1 alto, alinhado) e nova paleta de cores ("Ember Forge").
+>
+> ### ⌨️ Atalhos & gestos novos (deste fork)
+>
+> | Atalho / gesto | Ação |
+> |---|---|
+> | `Ctrl+Shift+←↑↓→` | Foca o terminal vizinho no workspace (com auto-fit + foco de digitação) |
+> | `Ctrl+Shift+P` | Liga/desliga "dois dedos movem o canvas" sobre os terminais |
+> | Segurar `Tab` + dois dedos | Move o canvas em 2D (o Tab não vaza pro terminal enquanto move) |
+> | Segurar `Espaço` + scroll | Move o canvas sobre os painéis |
+> | Modificador (`pan_modifier`) + scroll | Pan sobre os terminais (configurável em `input.pan_modifier`) |
+> | Caret ▼/▶ na titlebar do terminal | Colapsa/expande o terminal (só titlebar) |
+> | Caret ▼/▶ no cabeçalho do workspace (sidebar) | Dobra/expande a lista de terminais daquele workspace |
+> | Botão direito no terminal | Menu: Copy / Paste / **Paste Image** |
+> | `Ctrl+V` com imagem no clipboard | Cola o caminho de um PNG temporário (útil pro Claude Code) |
+>
+> Configs em `~/.horizon/config.yaml`: seção `input` (`scroll_pans_over_panels`, `pan_modifier`, `auto_fit_on_focus`) e `overlays.sidebar_auto_hide`.
 >
 > ---
 
