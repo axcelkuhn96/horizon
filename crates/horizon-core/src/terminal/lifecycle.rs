@@ -90,7 +90,9 @@ impl Terminal {
     }
 
     pub fn write_input(&self, bytes: &[u8]) {
-        if bytes.is_empty() {
+        if bytes.is_empty() || self.child_exited {
+            // Writing to a dead pty is a silent no-op that misleads the user —
+            // drop the bytes; restart spawns a fresh Terminal with a live pty.
             return;
         }
 

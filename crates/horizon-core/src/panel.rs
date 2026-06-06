@@ -347,6 +347,22 @@ impl Panel {
         self.content.terminal().is_some_and(Terminal::child_exited)
     }
 
+    /// `true` when this panel's child process died and the panel is NOT an SSH
+    /// panel (SSH has its own `SshConnectionStatus::Disconnected` flow).
+    /// Editor/GitChanges/Usage panels have no terminal, so this is `false`.
+    #[must_use]
+    pub fn process_exited(&self) -> bool {
+        self.kind != PanelKind::Ssh && self.child_exited()
+    }
+
+    /// UI label for the dead child process (badge text). `None` while alive
+    /// or for SSH panels.
+    #[must_use]
+    pub fn process_exit_label(&self) -> Option<String> {
+        self.process_exited()
+            .then(|| process_exit_label(self.content.terminal().and_then(Terminal::child_exit_status)))
+    }
+
     /// Returns `true` if the terminal bell has fired since the last call.
     pub fn take_bell(&mut self) -> bool {
         self.content.terminal_mut().is_some_and(Terminal::take_bell)
@@ -619,6 +635,52 @@ impl Panel {
 
         self.launch_cwd = Some(current_cwd);
         true
+    }
+}
+
+/// Human-readable label for a dead child process, e.g. `Exited (3)`,
+/// `Exited (signal 2)` (Unix), or `Exited` when no status is available.
+#[must_use]
+pub fn process_exit_label(status: Option<std::process::ExitStatus>) -> String {
+    let Some(status) = status else {
+        return "Exited".to_string();
+    };
+    if let Some(code) = status.code() {
+        return format!("Exited ({code})");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(signal) = status.signal() {
+            return format!("Exited (signal {signal})");
+        }
+    }
+    "Exited".to_string()
+}
+
+#[cfg(test)]
+mod process_exit_tests {
+    use super::process_exit_label;
+
+    #[test]
+    #[cfg(unix)]
+    fn exit_code_is_formatted_into_label() {
+        use std::os::unix::process::ExitStatusExt;
+        let status = std::process::ExitStatus::from_raw(3 << 8);
+        assert_eq!(process_exit_label(Some(status)), "Exited (3)");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn signal_death_is_formatted_into_label() {
+        use std::os::unix::process::ExitStatusExt;
+        let status = std::process::ExitStatus::from_raw(2);
+        assert_eq!(process_exit_label(Some(status)), "Exited (signal 2)");
+    }
+
+    #[test]
+    fn missing_status_falls_back_to_plain_label() {
+        assert_eq!(process_exit_label(None), "Exited");
     }
 }
 
