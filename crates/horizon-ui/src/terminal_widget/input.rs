@@ -37,6 +37,9 @@ struct PointerContext<'a> {
     hovered_point: Option<input::GridPoint>,
     from_global: Option<TSTransform>,
     active_pointer_pos: Option<Pos2>,
+    /// Occlusion-aware hit test for the terminal body: false while the pointer
+    /// is over an overlay floating above it (e.g. the right-click context menu).
+    body_contains_pointer: bool,
     primary_selection: &'a PrimarySelection,
     ui_ctx: egui::Context,
 }
@@ -81,20 +84,35 @@ pub(super) fn handle_terminal_pointer_input(
 
     // Only clone events for the panel that actually needs pointer processing.
     let events: Vec<egui::Event> = ui.input(|input| input.events.clone());
-    let body_primary_press_pos = pointer_button_event_pos(
-        &events,
-        from_global,
-        PointerButton::Primary,
-        true,
-        interaction.layout.body,
-    );
-    let body_middle_press_pos = pointer_button_event_pos(
-        &events,
-        from_global,
-        PointerButton::Middle,
-        true,
-        interaction.layout.body,
-    );
+    // Raw events are delivered regardless of egui layering, so a press that
+    // lands on an overlay floating above the terminal (e.g. the right-click
+    // context menu) still falls inside the body rect. Interpreting it as a
+    // body press would restart the selection underneath — destroying the
+    // selection the menu's "Copy" item is about to read. `contains_pointer`
+    // is occlusion-aware, so it is false while the pointer is over the menu.
+    let body_contains_pointer = interaction.body.contains_pointer();
+    let body_primary_press_pos = body_contains_pointer
+        .then(|| {
+            pointer_button_event_pos(
+                &events,
+                from_global,
+                PointerButton::Primary,
+                true,
+                interaction.layout.body,
+            )
+        })
+        .flatten();
+    let body_middle_press_pos = body_contains_pointer
+        .then(|| {
+            pointer_button_event_pos(
+                &events,
+                from_global,
+                PointerButton::Middle,
+                true,
+                interaction.layout.body,
+            )
+        })
+        .flatten();
 
     let Some(terminal_mode) = panel.terminal_mut().map(|terminal| terminal.mode()) else {
         return;
@@ -132,6 +150,7 @@ pub(super) fn handle_terminal_pointer_input(
         hovered_point,
         from_global,
         active_pointer_pos,
+        body_contains_pointer,
         primary_selection: support.primary_selection,
         ui_ctx: ui.ctx().clone(),
     };
@@ -223,6 +242,14 @@ fn pointer_motion_routes_to_pty_mouse(
         && !pointer_drag_updates_local_selection(terminal_mode, buttons, modifiers)
 }
 
+/// Whether a raw pointer-button event may be interpreted by the terminal.
+/// Presses require the occlusion-aware body hit test (so clicks on overlays
+/// such as the context menu are ignored); releases always pass so a PTY mouse
+/// button never gets stuck down when the pointer ends up over an overlay.
+fn raw_press_interpreted(body_contains_pointer: bool, pressed: bool) -> bool {
+    !pressed || body_contains_pointer
+}
+
 fn handle_pointer_events(events: &[egui::Event], panel: &mut Panel, pointer: &PointerContext<'_>) {
     for event in events {
         match event {
@@ -232,6 +259,9 @@ fn handle_pointer_events(events: &[egui::Event], panel: &mut Panel, pointer: &Po
                 pressed,
                 modifiers,
             } => {
+                if !raw_press_interpreted(pointer.body_contains_pointer, *pressed) {
+                    continue;
+                }
                 if !pointer_button_event_needs_handling(pointer.terminal_mode, *button, *pressed, *modifiers) {
                     continue;
                 }
@@ -246,7 +276,9 @@ fn handle_pointer_events(events: &[egui::Event], panel: &mut Panel, pointer: &Po
             }
             egui::Event::PointerMoved(pos) => {
                 let pos = transform_pos(pointer.from_global, *pos);
-                let inside = pointer.interaction.layout.body.contains(pos);
+                // `body_contains_pointer` keeps motion over an overlay (e.g.
+                // the context menu) from being reported to the PTY underneath.
+                let inside = pointer.body_contains_pointer && pointer.interaction.layout.body.contains(pos);
                 if inside
                     && pointer_motion_routes_to_pty_mouse(
                         pointer.terminal_mode,
@@ -881,7 +913,7 @@ mod tests {
         pointer_button_checks_clickable_target, pointer_button_event_needs_handling, pointer_button_event_pos,
         pointer_button_routes_to_pty_mouse, pointer_button_starts_local_selection,
         pointer_drag_updates_local_selection, pointer_event_targets_rect, pointer_motion_routes_to_pty_mouse,
-        selection_copy_completed, should_request_primary_paste,
+        raw_press_interpreted, selection_copy_completed, should_request_primary_paste,
     };
     use alacritty_terminal::term::TermMode;
     use egui::{Event, Key, Modifiers, PointerButton, Pos2, Rect};
@@ -909,6 +941,20 @@ mod tests {
             true,
             Modifiers::COMMAND
         ));
+    }
+
+    #[test]
+    fn presses_over_an_overlay_are_not_body_presses() {
+        // A press landing on the context menu floating above the terminal must
+        // not be treated as a terminal-body press (it would restart the
+        // selection the menu's "Copy" item is about to read).
+        assert!(!raw_press_interpreted(false, true));
+        assert!(raw_press_interpreted(true, true));
+    }
+
+    #[test]
+    fn releases_are_interpreted_even_when_pointer_is_over_an_overlay() {
+        assert!(raw_press_interpreted(false, false));
     }
 
     #[test]
