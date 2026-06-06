@@ -169,6 +169,20 @@ pub(super) fn spawn_panel(id: PanelId, workspace_id: WorkspaceId, opts: PanelOpt
                 .with_collapsed(collapsed);
             Ok(spawn_git_changes(seed, cwd))
         }
+        PanelKind::FileExplorer => {
+            let PanelOptions {
+                name,
+                position,
+                size,
+                template,
+                cwd,
+                collapsed,
+                ..
+            } = opts;
+            let seed = StaticPanelSeed::new(id, workspace_id, local_id, name, position, size, template)
+                .with_collapsed(collapsed);
+            Ok(spawn_file_explorer(seed, cwd))
+        }
         PanelKind::Usage => {
             let PanelOptions {
                 name,
@@ -598,6 +612,21 @@ fn spawn_git_changes(mut seed: StaticPanelSeed, cwd: Option<PathBuf>) -> Panel {
     )
 }
 
+fn spawn_file_explorer(mut seed: StaticPanelSeed, cwd: Option<PathBuf>) -> Panel {
+    let (title, has_custom_name) = seed.take_title(|| "Files".to_string());
+    tracing::info!("created file explorer panel '{}' (id={})", title, seed.id.0);
+
+    let root = cwd.clone().unwrap_or_else(|| PathBuf::from("."));
+    seed.into_panel(
+        title,
+        PanelKind::FileExplorer,
+        PanelContent::FileExplorer(crate::file_tree::FileTreeState::new(root)),
+        None,
+        cwd,
+        has_custom_name,
+    )
+}
+
 fn spawn_usage(mut seed: StaticPanelSeed) -> Panel {
     let (title, has_custom_name) = seed.take_title(|| "Usage".to_string());
     tracing::info!("created usage panel '{}' (id={})", title, seed.id.0);
@@ -622,7 +651,9 @@ pub(super) fn resolve_launch_command(
     should_resume_binding: bool,
 ) -> (String, Vec<String>) {
     match kind {
-        PanelKind::Editor | PanelKind::GitChanges | PanelKind::Usage => (String::new(), Vec::new()),
+        PanelKind::Editor | PanelKind::GitChanges | PanelKind::FileExplorer | PanelKind::Usage => {
+            (String::new(), Vec::new())
+        }
         PanelKind::Shell => {
             let use_login_shell = command.is_none() && PLATFORM_USES_LOGIN_SHELL;
             let program = command.unwrap_or_else(default_shell);
@@ -853,7 +884,7 @@ pub(super) fn scrollback_limit_for_kind(kind: PanelKind) -> usize {
     } else {
         match kind {
             PanelKind::Shell | PanelKind::Ssh | PanelKind::Command => DEFAULT_PANEL_SCROLLBACK_LIMIT,
-            PanelKind::Editor | PanelKind::GitChanges | PanelKind::Usage => 0,
+            PanelKind::Editor | PanelKind::GitChanges | PanelKind::FileExplorer | PanelKind::Usage => 0,
             PanelKind::Codex
             | PanelKind::Claude
             | PanelKind::OpenCode
@@ -989,5 +1020,23 @@ mod tests {
                 "deploy@prod-api".to_string(),
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod file_explorer_spawn_tests {
+    use super::*;
+
+    #[test]
+    fn spawn_file_explorer_sets_kind_and_root() {
+        let opts = PanelOptions {
+            kind: PanelKind::FileExplorer,
+            cwd: Some(std::path::PathBuf::from("/tmp/proj")),
+            ..PanelOptions::default()
+        };
+        let panel = spawn_panel(PanelId(1), WorkspaceId(1), opts).expect("spawn");
+        assert_eq!(panel.kind, PanelKind::FileExplorer);
+        let state = panel.content.file_explorer().expect("file explorer content");
+        assert_eq!(state.root, std::path::PathBuf::from("/tmp/proj"));
     }
 }

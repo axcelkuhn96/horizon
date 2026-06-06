@@ -146,6 +146,7 @@ pub const fn agent_definition(kind: PanelKind) -> Option<AgentDefinition> {
         | PanelKind::Command
         | PanelKind::Editor
         | PanelKind::GitChanges
+        | PanelKind::FileExplorer
         | PanelKind::Usage => None,
     }
 }

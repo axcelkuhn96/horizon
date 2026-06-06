@@ -46,6 +46,7 @@ pub enum PanelKind {
     Command,
     Editor,
     GitChanges,
+    FileExplorer,
     Usage,
 }
 
@@ -72,6 +73,7 @@ impl PanelKind {
             Self::Command => "Command",
             Self::Editor => "Editor",
             Self::GitChanges => "Git Changes",
+            Self::FileExplorer => "Files",
             Self::Usage => "Usage",
             Self::Codex | Self::Claude | Self::OpenCode | Self::Gemini | Self::KiloCode | Self::Pi => {
                 unreachable!()
@@ -394,7 +396,7 @@ impl Panel {
         match &mut self.content {
             PanelContent::Terminal(terminal) => terminal.request_shutdown(),
             PanelContent::Editor(editor) => editor.save_if_dirty(),
-            PanelContent::GitChanges(_) | PanelContent::Usage(_) => {}
+            PanelContent::GitChanges(_) | PanelContent::FileExplorer(_) | PanelContent::Usage(_) => {}
         }
     }
 
@@ -406,7 +408,7 @@ impl Panel {
                 editor.save_if_dirty();
                 true
             }
-            PanelContent::GitChanges(_) | PanelContent::Usage(_) => true,
+            PanelContent::GitChanges(_) | PanelContent::FileExplorer(_) | PanelContent::Usage(_) => true,
         }
     }
 
@@ -418,7 +420,7 @@ impl Panel {
                 editor.save_if_dirty();
                 true
             }
-            PanelContent::GitChanges(_) | PanelContent::Usage(_) => true,
+            PanelContent::GitChanges(_) | PanelContent::FileExplorer(_) | PanelContent::Usage(_) => true,
         }
     }
 
