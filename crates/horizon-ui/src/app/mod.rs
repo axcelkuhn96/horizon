@@ -417,9 +417,14 @@ impl HorizonApp {
     /// paste flow proceeds unchanged.
     fn maybe_rewrite_paste_as_image_path(&mut self, raw_input: &mut egui::RawInput) {
         // A focused terminal is required: the paste must have a destination.
-        let Some(_) = self.board.focused else {
+        let Some(focused) = self.board.focused else {
             return;
         };
+        // Only terminal panels accept a pasted image path; an editor/markdown
+        // paste must flow through unchanged.
+        if self.board.panel(focused).is_none_or(|panel| panel.terminal().is_none()) {
+            return;
+        }
 
         let has_text_paste = raw_input
             .events
@@ -434,6 +439,14 @@ impl HorizonApp {
 
         let pasted_dir = self.session_store.home().pasted_dir();
         let Some(path) = image_paste::read_clipboard_image_to_png(&pasted_dir) else {
+            // No image on the clipboard (or read failed): leave any text paste
+            // untouched so the normal text paste flow proceeds. Trace so an
+            // image-paste miss is diagnosable from logs.
+            tracing::trace!(
+                has_text_paste,
+                has_paste_keystroke,
+                "paste detected but no clipboard image; using text paste flow"
+            );
             return;
         };
 

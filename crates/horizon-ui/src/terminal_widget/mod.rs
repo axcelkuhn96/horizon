@@ -1,12 +1,16 @@
+mod context_menu;
 mod ime;
 mod input;
 mod layout;
 mod render;
 mod scrollbar;
 
+use std::path::Path;
+
 use egui::{Context, FontId, Id, Vec2};
 use horizon_core::{Panel, PanelId};
 
+use self::context_menu::{apply_terminal_context_action, show_terminal_context_menu};
 use self::ime::{clear_terminal_ime_state, publish_terminal_ime_output};
 pub(crate) use self::input::SSH_RECONNECT_SHORTCUT;
 use self::input::{PointerSupport, handle_terminal_keyboard_input, handle_terminal_pointer_input};
@@ -53,6 +57,9 @@ pub struct TerminalKeyboardContext<'a> {
     pub primary_selection: &'a PrimarySelection,
     pub local_ssh_reconnect_enabled: bool,
     pub reconnect_requested: &'a mut bool,
+    /// Directory under which a pasted clipboard image is saved as a temp PNG so
+    /// the right-click "Paste Image" action can feed its file path into the PTY.
+    pub pasted_dir: &'a Path,
 }
 
 impl<'a> TerminalView<'a> {
@@ -177,7 +184,53 @@ impl<'a> TerminalView<'a> {
             );
         }
 
+        if interactive {
+            self.show_terminal_context_menu(ui, &interaction, keyboard.primary_selection, keyboard.pasted_dir);
+        }
+
         interaction.body.clicked()
+    }
+
+    /// Offer the right-click context menu (Copy / Paste / Paste Image) on the
+    /// terminal body. The menu is suppressed while the PTY is in mouse-reporting
+    /// mode (so apps that consume right-clicks keep receiving them), matching how
+    /// the pointer handler already gates local interactions; holding Shift, which
+    /// bypasses mouse reporting, re-enables the menu.
+    fn show_terminal_context_menu(
+        &mut self,
+        ui: &egui::Ui,
+        interaction: &self::layout::TerminalInteraction,
+        primary_selection: &PrimarySelection,
+        pasted_dir: &Path,
+    ) {
+        if self.context_menu_suppressed_by_mouse_reporting(ui) {
+            return;
+        }
+
+        let has_selection = self.panel.terminal().is_some_and(horizon_core::Terminal::has_selection);
+
+        let mut chosen = None;
+        interaction.body.context_menu(|ui| {
+            chosen = show_terminal_context_menu(ui, has_selection);
+        });
+
+        if let Some(action) = chosen {
+            apply_terminal_context_action(ui, self.panel, primary_selection, pasted_dir, &action);
+        }
+    }
+
+    /// Whether right-click should be left to the PTY (mouse reporting on, no
+    /// Shift) instead of opening the context menu.
+    fn context_menu_suppressed_by_mouse_reporting(&self, ui: &egui::Ui) -> bool {
+        let shift_held = ui.input(|input| input.modifiers.shift);
+        if shift_held {
+            return false;
+        }
+        self.panel.terminal().is_some_and(|terminal| {
+            terminal
+                .mode()
+                .intersects(alacritty_terminal::term::TermMode::MOUSE_MODE)
+        })
     }
 }
 

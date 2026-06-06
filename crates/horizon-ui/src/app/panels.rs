@@ -119,6 +119,7 @@ struct PanelBodyContext<'a> {
     primary_selection: &'a PrimarySelection,
     reconnect_requested: &'a mut bool,
     terminal_grid_cache: Option<&'a mut TerminalGridCache>,
+    pasted_dir: &'a std::path::Path,
 }
 
 fn show_panel_body_contents(
@@ -145,6 +146,7 @@ fn show_panel_body_contents(
                 primary_selection: body_context.primary_selection,
                 local_ssh_reconnect_enabled: body_context.local_ssh_reconnect_enabled,
                 reconnect_requested: body_context.reconnect_requested,
+                pasted_dir: body_context.pasted_dir,
             },
         ),
     }
@@ -218,6 +220,7 @@ impl HorizonApp {
             return;
         };
         let local_ssh_reconnect_enabled = self.local_ssh_reconnect_shortcut_enabled();
+        let pasted_dir = self.session_store.home().pasted_dir();
 
         egui::CentralPanel::default()
             .frame(egui::Frame::default().fill(theme::PANEL_BG()))
@@ -253,6 +256,7 @@ impl HorizonApp {
                                     primary_selection: &self.primary_selection,
                                     reconnect_requested: &mut reconnect_requested,
                                     terminal_grid_cache: None,
+                                    pasted_dir: &pasted_dir,
                                 },
                             );
                         }
@@ -499,6 +503,7 @@ impl HorizonApp {
                             .layout(Layout::top_down(Align::Min)),
                         |ui| {
                             let mut reconnect_requested = false;
+                            let pasted_dir = self.session_store.home().pasted_dir();
                             let board = &mut self.board;
                             let editor_preview_cache = &mut self.editor_preview_cache;
                             let terminal_grid_cache = &mut self.terminal_grid_cache;
@@ -526,6 +531,7 @@ impl HorizonApp {
                                         primary_selection: &self.primary_selection,
                                         reconnect_requested: &mut reconnect_requested,
                                         terminal_grid_cache: grid_cache,
+                                        pasted_dir: &pasted_dir,
                                     },
                                 );
                             }

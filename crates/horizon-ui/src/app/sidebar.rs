@@ -1,4 +1,5 @@
 mod auto_hide;
+mod menu;
 mod routing;
 mod toolbar;
 
@@ -489,7 +490,7 @@ impl HorizonApp {
         workspace: &WorkspaceSidebarEntry,
         actions: &mut SidebarActions,
     ) {
-        response.context_menu(|ui| {
+        menu::context_menu_above_sidebar(response, |ui| {
             ui.set_min_width(160.0);
             ui.label(egui::RichText::new("Arrange Panels").size(11.0).color(theme::FG_DIM()));
             if ui
@@ -670,7 +671,7 @@ impl HorizonApp {
         kind: horizon_core::PanelKind,
         actions: &mut SidebarActions,
     ) {
-        response.context_menu(|ui| {
+        menu::context_menu_above_sidebar(response, |ui| {
             ui.set_min_width(160.0);
             ui.label(
                 egui::RichText::new("Move to Workspace")
