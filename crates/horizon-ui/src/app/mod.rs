@@ -69,6 +69,7 @@ const FONT_INTER: &str = "inter";
 const FONT_JETBRAINS_MONO: &str = "jetbrains-mono";
 const FONT_NOTO_CJK: &str = "noto-sans-cjk-sc";
 const FONT_NOTO_SYMBOLS: &str = "noto-sans-symbols-2";
+const FONT_NERD: &str = "symbols-nerd-font";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum RenameEditAction {
@@ -496,16 +497,25 @@ fn configure_fonts() -> egui::FontDefinitions {
         FONT_NOTO_SYMBOLS,
         include_bytes!("../../assets/fonts/NotoSansSymbols2-Regular.ttf"),
     );
+    // Symbols Nerd Font provides the file-tree icon glyphs (Private Use Area
+    // codepoints that never collide with text).
+    insert_font_data(
+        &mut fonts,
+        FONT_NERD,
+        include_bytes!("../../assets/fonts/SymbolsNerdFont-Regular.ttf"),
+    );
 
     let proportional = fonts.families.entry(egui::FontFamily::Proportional).or_default();
     proportional.insert(0, FONT_INTER.to_owned());
     proportional.insert(1, FONT_NOTO_CJK.to_owned());
     proportional.insert(2, FONT_NOTO_SYMBOLS.to_owned());
+    proportional.insert(3, FONT_NERD.to_owned());
 
     let monospace = fonts.families.entry(egui::FontFamily::Monospace).or_default();
     monospace.insert(0, FONT_JETBRAINS_MONO.to_owned());
     monospace.insert(1, FONT_NOTO_CJK.to_owned());
     monospace.insert(2, FONT_NOTO_SYMBOLS.to_owned());
+    monospace.insert(3, FONT_NERD.to_owned());
 
     fonts
 }
@@ -612,7 +622,7 @@ impl StartupChooserState {
 mod tests {
     use egui::FontFamily;
 
-    use super::{FONT_INTER, FONT_JETBRAINS_MONO, FONT_NOTO_CJK, FONT_NOTO_SYMBOLS, configure_fonts};
+    use super::{FONT_INTER, FONT_JETBRAINS_MONO, FONT_NERD, FONT_NOTO_CJK, FONT_NOTO_SYMBOLS, configure_fonts};
 
     #[test]
     fn configure_fonts_registers_ui_and_terminal_fallback_stacks() {
@@ -629,10 +639,13 @@ mod tests {
         assert_eq!(proportional.first().map(String::as_str), Some(FONT_INTER));
         assert_eq!(proportional.get(1).map(String::as_str), Some(FONT_NOTO_CJK));
         assert_eq!(proportional.get(2).map(String::as_str), Some(FONT_NOTO_SYMBOLS));
+        assert_eq!(proportional.get(3).map(String::as_str), Some(FONT_NERD));
         assert_eq!(monospace.first().map(String::as_str), Some(FONT_JETBRAINS_MONO));
         assert_eq!(monospace.get(1).map(String::as_str), Some(FONT_NOTO_CJK));
         assert_eq!(monospace.get(2).map(String::as_str), Some(FONT_NOTO_SYMBOLS));
+        assert_eq!(monospace.get(3).map(String::as_str), Some(FONT_NERD));
         assert!(fonts.font_data.contains_key(FONT_NOTO_CJK));
         assert!(fonts.font_data.contains_key(FONT_NOTO_SYMBOLS));
+        assert!(fonts.font_data.contains_key(FONT_NERD));
     }
 }
