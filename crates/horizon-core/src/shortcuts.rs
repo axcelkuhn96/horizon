@@ -251,6 +251,7 @@ pub struct AppShortcuts {
     pub focus_panel_right: ShortcutBinding,
     pub focus_panel_up: ShortcutBinding,
     pub focus_panel_down: ShortcutBinding,
+    pub toggle_scroll_pan: ShortcutBinding,
 }
 
 impl Default for AppShortcuts {
@@ -280,6 +281,7 @@ impl Default for AppShortcuts {
             focus_panel_right: ShortcutBinding::new(ps, ShortcutKey::ArrowRight),
             focus_panel_up: ShortcutBinding::new(ps, ShortcutKey::ArrowUp),
             focus_panel_down: ShortcutBinding::new(ps, ShortcutKey::ArrowDown),
+            toggle_scroll_pan: ShortcutBinding::new(ps, ShortcutKey::Letter('P')),
         }
     }
 }
@@ -570,6 +572,17 @@ mod tests {
         assert_eq!(
             shortcuts.focus_panel_down,
             ShortcutBinding::new(ps, ShortcutKey::ArrowDown)
+        );
+    }
+
+    #[test]
+    fn app_shortcuts_default_toggle_scroll_pan_binding() {
+        let shortcuts = AppShortcuts::default();
+        let ps = ShortcutModifiers::PRIMARY_SHIFT;
+
+        assert_eq!(
+            shortcuts.toggle_scroll_pan,
+            ShortcutBinding::new(ps, ShortcutKey::Letter('P'))
         );
     }
 

@@ -354,6 +354,7 @@ pub struct ShortcutsConfig {
     pub focus_panel_right: String,
     pub focus_panel_up: String,
     pub focus_panel_down: String,
+    pub toggle_scroll_pan: String,
 }
 
 impl Default for ShortcutsConfig {
@@ -382,6 +383,7 @@ impl Default for ShortcutsConfig {
             focus_panel_right: "Ctrl+Shift+Right".to_string(),
             focus_panel_up: "Ctrl+Shift+Up".to_string(),
             focus_panel_down: "Ctrl+Shift+Down".to_string(),
+            toggle_scroll_pan: "Ctrl+Shift+P".to_string(),
         }
     }
 }
@@ -420,6 +422,7 @@ impl ShortcutsConfig {
             focus_panel_right: parse_shortcut("focus_panel_right", &self.focus_panel_right)?,
             focus_panel_up: parse_shortcut("focus_panel_up", &self.focus_panel_up)?,
             focus_panel_down: parse_shortcut("focus_panel_down", &self.focus_panel_down)?,
+            toggle_scroll_pan: parse_shortcut("toggle_scroll_pan", &self.toggle_scroll_pan)?,
         };
 
         validate_distinct_shortcuts([
@@ -446,6 +449,7 @@ impl ShortcutsConfig {
             ("focus_panel_right", shortcuts.focus_panel_right),
             ("focus_panel_up", shortcuts.focus_panel_up),
             ("focus_panel_down", shortcuts.focus_panel_down),
+            ("toggle_scroll_pan", shortcuts.toggle_scroll_pan),
         ])?;
 
         Ok(shortcuts)
@@ -967,6 +971,46 @@ mod tests {
             shortcuts.focus_panel_down,
             ShortcutBinding::new(ps, ShortcutKey::ArrowDown)
         );
+    }
+
+    #[test]
+    fn toggle_scroll_pan_default_string_parses_to_expected_binding() {
+        use crate::shortcuts::{ShortcutBinding, ShortcutKey, ShortcutModifiers};
+
+        let defaults = super::ShortcutsConfig::default();
+        let ps = ShortcutModifiers::PRIMARY_SHIFT;
+
+        assert_eq!(defaults.toggle_scroll_pan, "Ctrl+Shift+P");
+        assert_eq!(
+            ShortcutBinding::parse(&defaults.toggle_scroll_pan).expect("toggle_scroll_pan should parse"),
+            ShortcutBinding::new(ps, ShortcutKey::Letter('P'))
+        );
+    }
+
+    #[test]
+    fn default_shortcuts_resolve_includes_toggle_scroll_pan_binding() {
+        use crate::shortcuts::{ShortcutBinding, ShortcutKey, ShortcutModifiers};
+
+        let shortcuts = super::ShortcutsConfig::default()
+            .resolve()
+            .expect("default shortcuts should resolve without conflicts");
+        let ps = ShortcutModifiers::PRIMARY_SHIFT;
+
+        assert_eq!(
+            shortcuts.toggle_scroll_pan,
+            ShortcutBinding::new(ps, ShortcutKey::Letter('P'))
+        );
+    }
+
+    #[test]
+    fn toggle_scroll_pan_shortcut_colliding_with_existing_is_rejected() {
+        let error = Config::from_yaml("shortcuts:\n  toggle_scroll_pan: Ctrl+Shift+K\n")
+            .expect_err("config should reject toggle_scroll_pan shortcut colliding with command_palette");
+
+        let message = error.to_string();
+        assert!(message.contains("toggle_scroll_pan"));
+        assert!(message.contains("duplicate shortcut") || message.contains("conflicts with"));
+        assert!(matches!(error, crate::Error::Config(_)));
     }
 
     #[test]

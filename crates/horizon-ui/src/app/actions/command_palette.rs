@@ -139,6 +139,13 @@ impl HorizonApp {
                     self.search_overlay = Some(SearchOverlay::new());
                 }
             }
+            CommandId::ToggleScrollPan => {
+                self.scroll_pans_over_panels = !self.scroll_pans_over_panels;
+                tracing::info!(
+                    "scroll-pan over panels: {}",
+                    if self.scroll_pans_over_panels { "on" } else { "off" }
+                );
+            }
         }
     }
 
@@ -196,6 +203,7 @@ impl HorizonApp {
             (self.shortcuts.toggle_sessions, CommandId::ToggleSessions),
             (self.shortcuts.new_terminal, CommandId::NewPanel),
             (self.shortcuts.search, CommandId::ToggleSearch),
+            (self.shortcuts.toggle_scroll_pan, CommandId::ToggleScrollPan),
         ];
 
         let (toggle_palette, triggered_command) = ctx.input(|input| {

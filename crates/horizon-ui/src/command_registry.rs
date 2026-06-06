@@ -33,6 +33,11 @@ pub enum CommandId {
 
     // Search
     ToggleSearch,
+
+    // Input
+    /// Flip whether 2-finger scroll over a panel pans the canvas or scrolls
+    /// the terminal scrollback.
+    ToggleScrollPan,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

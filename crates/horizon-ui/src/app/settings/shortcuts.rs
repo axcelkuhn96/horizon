@@ -36,10 +36,11 @@ enum EditableShortcut {
     FocusPanelRight,
     FocusPanelUp,
     FocusPanelDown,
+    ToggleScrollPan,
 }
 
 impl EditableShortcut {
-    const ALL: [Self; 23] = [
+    const ALL: [Self; 24] = [
         Self::CommandPalette,
         Self::NewTerminal,
         Self::FocusWorkspace,
@@ -63,6 +64,7 @@ impl EditableShortcut {
         Self::FocusPanelRight,
         Self::FocusPanelUp,
         Self::FocusPanelDown,
+        Self::ToggleScrollPan,
     ];
 
     fn label(self) -> &'static str {
@@ -90,6 +92,7 @@ impl EditableShortcut {
             Self::FocusPanelRight => "Focus Panel Right",
             Self::FocusPanelUp => "Focus Panel Up",
             Self::FocusPanelDown => "Focus Panel Down",
+            Self::ToggleScrollPan => "Toggle Scroll Pan",
         }
     }
 
@@ -118,6 +121,7 @@ impl EditableShortcut {
             Self::FocusPanelRight => &mut shortcuts.focus_panel_right,
             Self::FocusPanelUp => &mut shortcuts.focus_panel_up,
             Self::FocusPanelDown => &mut shortcuts.focus_panel_down,
+            Self::ToggleScrollPan => &mut shortcuts.toggle_scroll_pan,
         }
     }
 }
@@ -319,8 +323,21 @@ mod tests {
     }
 
     #[test]
+    fn editable_shortcuts_include_toggle_scroll_pan() {
+        assert!(EditableShortcut::ALL.contains(&EditableShortcut::ToggleScrollPan));
+    }
+
+    #[test]
+    fn toggle_scroll_pan_row_updates_the_expected_config_field() {
+        let mut shortcuts = ShortcutsConfig::default();
+        *EditableShortcut::ToggleScrollPan.value_mut(&mut shortcuts) = "Alt+P".to_string();
+
+        assert_eq!(shortcuts.toggle_scroll_pan, "Alt+P");
+    }
+
+    #[test]
     fn all_editable_shortcuts_map_to_distinct_config_fields() {
-        assert_eq!(EditableShortcut::ALL.len(), 23);
+        assert_eq!(EditableShortcut::ALL.len(), 24);
 
         // Each variant writes a unique marker into its field; distinct field
         // pointers are proven by recovering every marker afterwards.
