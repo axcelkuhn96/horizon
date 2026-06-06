@@ -1025,6 +1025,7 @@ workspaces:
                 collapsed: true,
                 ..TerminalConfig::default()
             }],
+            sidebar_collapsed: false,
         });
 
         let yaml = config.to_yaml().expect("should serialize");

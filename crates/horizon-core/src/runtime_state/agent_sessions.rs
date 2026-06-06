@@ -640,6 +640,7 @@ mod tests {
                 position: None,
                 template: None,
                 layout: None,
+                sidebar_collapsed: false,
                 panels: vec![
                     PanelState {
                         local_id: "a".to_string(),

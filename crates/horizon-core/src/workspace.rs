@@ -16,6 +16,10 @@ pub struct Workspace {
     pub color_idx: usize,
     pub panels: Vec<PanelId>,
     pub collapsed: bool,
+    /// Whether this workspace's terminal list is folded in the sidebar.
+    /// Sidebar-only affordance: it does NOT collapse the canvas panels
+    /// (that is `Panel.collapsed`) nor affect the terminals themselves.
+    pub sidebar_collapsed: bool,
     /// Canvas position (top-left) of the workspace badge.
     pub position: [f32; 2],
     /// Default working directory for new terminals in this workspace.
@@ -46,6 +50,7 @@ impl Workspace {
             color_idx,
             panels: Vec::new(),
             collapsed: false,
+            sidebar_collapsed: false,
             position: [0.0, 0.0],
             cwd: None,
             template: None,

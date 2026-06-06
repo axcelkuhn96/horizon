@@ -506,6 +506,7 @@ mod tests {
                 position: None,
                 template: None,
                 layout: None,
+                sidebar_collapsed: false,
                 panels: vec![PanelState {
                     local_id: "panel".to_string(),
                     name: "Claude".to_string(),
@@ -530,6 +531,7 @@ mod tests {
                 position: None,
                 template: None,
                 layout: None,
+                sidebar_collapsed: false,
                 panels: vec![PanelState {
                     local_id: "panel".to_string(),
                     name: "OpenCode".to_string(),
@@ -554,6 +556,7 @@ mod tests {
                 position: None,
                 template: None,
                 layout: None,
+                sidebar_collapsed: false,
                 panels: vec![PanelState {
                     local_id: "panel".to_string(),
                     name: "Pi".to_string(),
@@ -578,6 +581,7 @@ mod tests {
                 position: None,
                 template: None,
                 layout: None,
+                sidebar_collapsed: false,
                 panels: vec![
                     PanelState {
                         local_id: "fresh".to_string(),
@@ -618,6 +622,7 @@ mod tests {
                 position: None,
                 template: None,
                 layout: None,
+                sidebar_collapsed: false,
                 panels: vec![
                     PanelState {
                         local_id: "gemini".to_string(),

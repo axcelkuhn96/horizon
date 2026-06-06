@@ -501,6 +501,10 @@ pub struct WorkspaceConfig {
     pub position: Option<[f32; 2]>,
     #[serde(default)]
     pub terminals: Vec<TerminalConfig>,
+    /// Whether this workspace's terminal list is folded in the sidebar.
+    /// Sidebar-only: does not affect canvas panels. Persists across relaunch.
+    #[serde(default)]
+    pub sidebar_collapsed: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

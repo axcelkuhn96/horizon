@@ -430,6 +430,7 @@ impl Board {
             workspace.cwd = workspace_state.cwd.as_deref().map(Config::expand_tilde);
             workspace.template.clone_from(&workspace_state.template);
             workspace.layout = workspace_state.layout;
+            workspace.sidebar_collapsed = workspace_state.sidebar_collapsed;
         }
         self.retained_empty_workspaces.remove(&id);
         id

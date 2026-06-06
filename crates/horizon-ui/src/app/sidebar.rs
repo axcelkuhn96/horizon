@@ -31,6 +31,7 @@ struct WorkspaceSidebarEntry {
     detached: bool,
     panels: Vec<SidebarPanelEntry>,
     attention_count: usize,
+    sidebar_collapsed: bool,
 }
 
 #[derive(Clone)]
@@ -56,6 +57,7 @@ struct SidebarActions {
     close_all_in_workspace: Option<WorkspaceId>,
     clear_layout: Option<WorkspaceId>,
     arrange_layout: Option<(WorkspaceId, WorkspaceLayout)>,
+    toggle_sidebar_collapse: Option<WorkspaceId>,
 }
 
 #[derive(Clone, Copy)]
@@ -250,6 +252,7 @@ impl HorizonApp {
                     detached: self.workspace_is_detached(workspace.id),
                     panels,
                     attention_count,
+                    sidebar_collapsed: workspace.sidebar_collapsed,
                 }
             })
             .collect()
@@ -354,6 +357,7 @@ impl HorizonApp {
         let row_rect = ui.allocate_space(Vec2::new(ui.available_width(), 32.0)).1;
         let mut click_target_hovered = ui.rect_contains_pointer(row_rect);
         let mut row_clicked = false;
+        let mut caret_clicked = false;
         paint_workspace_row_bg(
             ui,
             row_rect,
@@ -367,46 +371,10 @@ impl HorizonApp {
                 .max_rect(row_rect)
                 .layout(Layout::left_to_right(Align::Center)),
             |ui| {
-                ui.add_space(14.0);
-
-                let bar_color = if workspace.attention_count > 0 {
-                    theme::PALETTE_RED()
-                } else {
-                    theme::alpha(workspace.color, if workspace.is_active { 240 } else { 110 })
-                };
-                let bar_rect = ui.allocate_space(Vec2::new(3.0, 22.0)).1;
-                ui.painter().rect_filled(bar_rect, CornerRadius::same(2), bar_color);
-
-                ui.add_space(8.0);
-                let name_response = ui.add(
-                    egui::Label::new(
-                        egui::RichText::new(&workspace.name)
-                            .color(if workspace.is_active {
-                                theme::FG()
-                            } else {
-                                theme::FG_SOFT()
-                            })
-                            .size(13.0)
-                            .strong(),
-                    )
-                    .sense(Sense::click()),
-                );
-                click_target_hovered |= name_response.hovered();
-                row_clicked |= name_response.clicked();
-                if workspace.detached {
-                    ui.add_space(4.0);
-                    let detached_response = ui.add(
-                        egui::Label::new(
-                            egui::RichText::new("NEW WINDOW")
-                                .color(theme::FG_DIM())
-                                .size(8.5)
-                                .strong(),
-                        )
-                        .sense(Sense::click()),
-                    );
-                    click_target_hovered |= detached_response.hovered();
-                    row_clicked |= detached_response.clicked();
-                }
+                let row = render_sidebar_workspace_header_row(ui, workspace, actions);
+                click_target_hovered |= row.hovered;
+                row_clicked |= row.row_clicked;
+                caret_clicked |= row.caret_clicked;
             },
         );
 
@@ -419,7 +387,7 @@ impl HorizonApp {
         row_clicked |= row_response.clicked();
         self.handle_sidebar_workspace_drag(ui, workspace, row_rect, &row_response, drag_state, click_target_hovered);
 
-        if row_clicked {
+        if row_clicked && !caret_clicked {
             if workspace.panels.len() == 1 {
                 actions.focus_panel = Some(workspace.panels[0].id);
                 actions.pan_to_panel = Some(workspace.panels[0].id);
@@ -429,9 +397,11 @@ impl HorizonApp {
         }
         Self::show_workspace_context_menu(&row_response, workspace, actions);
 
-        ui.add_space(2.0);
-        for panel in &workspace.panels {
-            self.render_sidebar_panel(ui, workspace, workspace_data, panel, actions);
+        if !workspace.sidebar_collapsed {
+            ui.add_space(2.0);
+            for panel in &workspace.panels {
+                self.render_sidebar_panel(ui, workspace, workspace_data, panel, actions);
+            }
         }
         ui.add_space(8.0);
     }
@@ -802,6 +772,12 @@ impl HorizonApp {
             self.board.arrange_workspace(workspace_id, layout);
             self.mark_runtime_dirty();
         }
+        if let Some(workspace_id) = actions.toggle_sidebar_collapse
+            && let Some(workspace) = self.board.workspace_mut(workspace_id)
+        {
+            workspace.sidebar_collapsed = !workspace.sidebar_collapsed;
+            self.mark_runtime_dirty();
+        }
     }
 }
 
@@ -814,6 +790,94 @@ fn sidebar_workspace_insert_dock_side(insert: SidebarWorkspaceInsert) -> Workspa
 
 fn sidebar_workspace_drop_should_dock(target_detached: bool) -> bool {
     !target_detached
+}
+
+#[derive(Default)]
+struct SidebarHeaderRowOutcome {
+    hovered: bool,
+    row_clicked: bool,
+    caret_clicked: bool,
+}
+
+/// Render the inner content of a workspace header row: the collapse caret, the
+/// accent bar, the workspace name, and the optional "NEW WINDOW" badge. Returns
+/// which affordances were interacted with so the caller can route actions.
+fn render_sidebar_workspace_header_row(
+    ui: &mut egui::Ui,
+    workspace: &WorkspaceSidebarEntry,
+    actions: &mut SidebarActions,
+) -> SidebarHeaderRowOutcome {
+    let mut outcome = SidebarHeaderRowOutcome::default();
+
+    ui.add_space(8.0);
+    let caret = if workspace.sidebar_collapsed {
+        "\u{25B6}"
+    } else {
+        "\u{25BC}"
+    };
+    let caret_response = ui.add(
+        egui::Label::new(
+            egui::RichText::new(caret)
+                .color(if workspace.is_active {
+                    theme::FG_SOFT()
+                } else {
+                    theme::FG_DIM()
+                })
+                .size(9.0),
+        )
+        .sense(Sense::click()),
+    );
+    outcome.hovered |= caret_response.hovered();
+    if caret_response.clicked() {
+        actions.toggle_sidebar_collapse = Some(workspace.id);
+        outcome.caret_clicked = true;
+    }
+    if caret_response.hovered() {
+        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+    }
+    ui.add_space(4.0);
+
+    let bar_color = if workspace.attention_count > 0 {
+        theme::PALETTE_RED()
+    } else {
+        theme::alpha(workspace.color, if workspace.is_active { 240 } else { 110 })
+    };
+    let bar_rect = ui.allocate_space(Vec2::new(3.0, 22.0)).1;
+    ui.painter().rect_filled(bar_rect, CornerRadius::same(2), bar_color);
+
+    ui.add_space(8.0);
+    let name_response = ui.add(
+        egui::Label::new(
+            egui::RichText::new(&workspace.name)
+                .color(if workspace.is_active {
+                    theme::FG()
+                } else {
+                    theme::FG_SOFT()
+                })
+                .size(13.0)
+                .strong(),
+        )
+        .sense(Sense::click()),
+    );
+    outcome.hovered |= name_response.hovered();
+    outcome.row_clicked |= name_response.clicked();
+
+    if workspace.detached {
+        ui.add_space(4.0);
+        let detached_response = ui.add(
+            egui::Label::new(
+                egui::RichText::new("NEW WINDOW")
+                    .color(theme::FG_DIM())
+                    .size(8.5)
+                    .strong(),
+            )
+            .sense(Sense::click()),
+        );
+        outcome.hovered |= detached_response.hovered();
+        outcome.row_clicked |= detached_response.clicked();
+    }
+
+    outcome
 }
 
 fn paint_workspace_row_bg(

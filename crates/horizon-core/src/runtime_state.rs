@@ -256,6 +256,7 @@ impl RuntimeState {
                     template: workspace.template.clone(),
                     layout: workspace.layout,
                     panels,
+                    sidebar_collapsed: workspace.sidebar_collapsed,
                 }
             })
             .collect();
@@ -316,6 +317,10 @@ pub struct WorkspaceState {
     )]
     pub layout: Option<WorkspaceLayout>,
     pub panels: Vec<PanelState>,
+    /// Whether this workspace's terminal list is folded in the sidebar.
+    /// Sidebar-only: persists across relaunch, does not affect canvas panels.
+    #[serde(default)]
+    pub sidebar_collapsed: bool,
 }
 
 fn deserialize_workspace_layout<'de, D>(deserializer: D) -> std::result::Result<Option<WorkspaceLayout>, D::Error>
@@ -380,6 +385,7 @@ impl WorkspaceState {
             }),
             layout,
             panels,
+            sidebar_collapsed: workspace.sidebar_collapsed,
         }
     }
 }
@@ -681,6 +687,7 @@ mod tests {
                 name: "Shell".to_string(),
                 ..TerminalConfig::default()
             }],
+            sidebar_collapsed: false,
         };
 
         let state = WorkspaceState::from_config(0, &workspace, [120.0, 64.0]);
@@ -700,6 +707,7 @@ mod tests {
                 position: Some([120.0, 80.0]),
                 ..TerminalConfig::default()
             }],
+            sidebar_collapsed: false,
         };
 
         let state = WorkspaceState::from_config(0, &workspace, [120.0, 64.0]);
@@ -747,6 +755,7 @@ workspaces:
                 collapsed: true,
                 ..TerminalConfig::default()
             }],
+            sidebar_collapsed: false,
         };
 
         let state = WorkspaceState::from_config(0, &workspace, [120.0, 64.0]);
@@ -780,6 +789,69 @@ workspaces:
 
         let reloaded: RuntimeState = serde_yaml::from_str(&yaml).expect("deserialize runtime state");
         assert!(reloaded.workspaces[0].panels[0].collapsed);
+    }
+
+    #[test]
+    fn sidebar_collapsed_flag_maps_from_workspace_config_to_workspace_state() {
+        let workspace = WorkspaceConfig {
+            name: "Alpha".to_string(),
+            color: None,
+            cwd: None,
+            position: None,
+            terminals: Vec::new(),
+            sidebar_collapsed: true,
+        };
+
+        let state = WorkspaceState::from_config(0, &workspace, [120.0, 64.0]);
+
+        assert!(
+            state.sidebar_collapsed,
+            "WorkspaceConfig.sidebar_collapsed must map to WorkspaceState.sidebar_collapsed"
+        );
+    }
+
+    #[test]
+    fn sidebar_collapsed_workspace_state_round_trips_through_runtime_yaml() {
+        let state = RuntimeState {
+            workspaces: vec![WorkspaceState {
+                local_id: "workspace".to_string(),
+                name: "alpha".to_string(),
+                sidebar_collapsed: true,
+                ..WorkspaceState::default()
+            }],
+            ..RuntimeState::default()
+        };
+
+        let yaml = state.to_yaml().expect("serialize runtime state");
+        assert!(yaml.contains("sidebar_collapsed: true"));
+
+        let reloaded: RuntimeState = serde_yaml::from_str(&yaml).expect("deserialize runtime state");
+        assert!(reloaded.workspaces[0].sidebar_collapsed);
+    }
+
+    #[test]
+    fn sidebar_collapsed_round_trips_through_board() {
+        let state = RuntimeState {
+            workspaces: vec![WorkspaceState {
+                local_id: "workspace".to_string(),
+                name: "alpha".to_string(),
+                sidebar_collapsed: true,
+                ..WorkspaceState::default()
+            }],
+            ..RuntimeState::default()
+        };
+
+        let board = crate::board::Board::from_runtime_state(&state).expect("board");
+        assert!(
+            board.workspaces[0].sidebar_collapsed,
+            "WorkspaceState.sidebar_collapsed must hydrate board Workspace.sidebar_collapsed"
+        );
+
+        let saved = RuntimeState::from_board(&board, WindowConfig::default(), CanvasViewState::default());
+        assert!(
+            saved.workspaces[0].sidebar_collapsed,
+            "board Workspace.sidebar_collapsed must persist back to WorkspaceState"
+        );
     }
 
     #[test]
