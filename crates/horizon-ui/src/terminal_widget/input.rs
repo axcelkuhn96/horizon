@@ -926,9 +926,8 @@ impl InputEmission {
 mod tests {
     use super::{
         KeyboardInputForwarder, TerminalInputEvent, disconnected_ssh_reconnect_requested,
-        exited_panel_restart_requested,
-        pointer_button_checks_clickable_target, pointer_button_event_needs_handling, pointer_button_event_pos,
-        pointer_button_routes_to_pty_mouse, pointer_button_starts_local_selection,
+        exited_panel_restart_requested, pointer_button_checks_clickable_target, pointer_button_event_needs_handling,
+        pointer_button_event_pos, pointer_button_routes_to_pty_mouse, pointer_button_starts_local_selection,
         pointer_drag_updates_local_selection, pointer_event_targets_rect, pointer_motion_routes_to_pty_mouse,
         raw_press_interpreted, selection_copy_completed, should_request_primary_paste,
     };

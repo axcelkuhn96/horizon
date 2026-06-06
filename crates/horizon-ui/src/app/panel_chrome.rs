@@ -555,10 +555,7 @@ fn paint_process_exited_badge(
     } else {
         close_rect.min.x - 8.0
     };
-    let text_width = painter
-        .layout_no_wrap(label.to_string(), font.clone(), color)
-        .size()
-        .x;
+    let text_width = painter.layout_no_wrap(label.to_string(), font.clone(), color).size().x;
     let badge_width = text_width + 16.0;
     let badge_height = 18.0;
     let badge_left = (badge_right - badge_width).max(titlebar_rect.min.x + 60.0);
@@ -578,13 +575,7 @@ fn paint_process_exited_badge(
         Stroke::new(1.0, theme::alpha(color, 140)),
         StrokeKind::Inside,
     );
-    painter.text(
-        badge_rect.center(),
-        egui::Align2::CENTER_CENTER,
-        label,
-        font,
-        color,
-    );
+    painter.text(badge_rect.center(), egui::Align2::CENTER_CENTER, label, font, color);
 }
 
 fn ssh_status_color(status: SshConnectionStatus) -> Color32 {
