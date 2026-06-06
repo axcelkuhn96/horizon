@@ -167,10 +167,10 @@ impl HorizonApp {
 
     #[profiling::function]
     fn poll_git_watchers(&mut self) {
-        // Collect which workspaces need watchers (have GitChanges panels).
+        // Collect which workspaces need watchers (have GitChanges or FileExplorer panels).
         let mut workspaces_needing_watchers: HashMap<WorkspaceId, Option<std::path::PathBuf>> = HashMap::new();
         for panel in &self.board.panels {
-            if panel.kind == PanelKind::GitChanges {
+            if matches!(panel.kind, PanelKind::GitChanges | PanelKind::FileExplorer) {
                 let cwd = panel
                     .launch_cwd
                     .clone()
@@ -198,16 +198,22 @@ impl HorizonApp {
 
         for (workspace_id, status) in updates {
             for panel in &mut self.board.panels {
-                if panel.workspace_id == workspace_id
-                    && panel.kind == PanelKind::GitChanges
-                    && let Some(viewer) = panel.content.git_changes_mut()
+                if panel.workspace_id != workspace_id {
+                    continue;
+                }
+                if panel.kind == PanelKind::GitChanges {
+                    if let Some(viewer) = panel.content.git_changes_mut() {
+                        viewer.update(std::sync::Arc::clone(&status));
+                    }
+                } else if panel.kind == PanelKind::FileExplorer
+                    && let Some(state) = panel.content.file_explorer_mut()
                 {
-                    viewer.update(std::sync::Arc::clone(&status));
+                    state.set_git_status(std::sync::Arc::clone(&status));
                 }
             }
         }
 
-        // Remove watchers for workspaces that no longer have GitChanges panels.
+        // Remove watchers for workspaces that no longer have GitChanges or FileExplorer panels.
         self.git_watchers
             .retain(|ws_id, _| workspaces_needing_watchers.contains_key(ws_id));
     }
