@@ -159,6 +159,13 @@ pub struct HorizonApp {
     middle_pan_active: bool,
     canvas_pan_input_claimed: bool,
     pending_space_pan_key: CanvasPanSpaceKeyState,
+    /// Modifier state latched from the most recent non-scroll frame. On X11,
+    /// touchpad scroll events do not carry keyboard-modifier state, so during a
+    /// 2-finger scroll `input.modifiers` reports the pan modifier (e.g. Alt) as
+    /// released even when it is physically held. We latch the modifiers from
+    /// frames without a scroll and reuse them to decide scroll-over-panel
+    /// panning. See [`effective_scroll_modifiers`].
+    latched_scroll_modifiers: egui::Modifiers,
     observed_keyboard_inputs: input::ObservedKeyboardInputs,
     frame_keyboard_events: HashMap<ViewportId, Vec<input::FrameKeyEvent>>,
     terminal_keyboard_events: Vec<input::TerminalInputEvent>,
@@ -381,6 +388,7 @@ impl HorizonApp {
             middle_pan_active: false,
             canvas_pan_input_claimed: false,
             pending_space_pan_key: CanvasPanSpaceKeyState::Idle,
+            latched_scroll_modifiers: egui::Modifiers::default(),
             observed_keyboard_inputs,
             frame_keyboard_events: HashMap::new(),
             terminal_keyboard_events: Vec::new(),

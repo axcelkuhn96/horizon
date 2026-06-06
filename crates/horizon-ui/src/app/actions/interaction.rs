@@ -128,6 +128,18 @@ fn space_scroll_pan_active(space_down: bool, pointer_in_canvas: bool, scroll: Ve
     space_down && pointer_in_canvas && scroll != Vec2::ZERO && !ctrl_or_cmd
 }
 
+/// Pick the modifier set to use for the scroll-over-panel pan-modifier
+/// (e.g. Alt) decision. On X11 a touchpad scroll event carries no
+/// keyboard-modifier state, so during a scroll `current` reports the pan
+/// modifier as released even when physically held. To work around this we use
+/// `latched` (captured from the most recent non-scroll frame) while a scroll is
+/// present, and `current` otherwise. This only affects the pan-modifier
+/// membership test; per-frame, key-driven modifier logic keeps using the raw
+/// modifiers.
+fn effective_scroll_modifiers(current: Modifiers, latched: Modifiers, scrolling: bool) -> Modifiers {
+    if scrolling { latched } else { current }
+}
+
 /// Convert the currently held egui [`Modifiers`] into the
 /// [`ShortcutModifiers`] bitset used by the pan-modifier config so that
 /// [`horizon_core::scroll_should_pan_canvas`] can test membership. `command`
@@ -229,6 +241,15 @@ impl HorizonApp {
         let space_drag_claimed =
             pointer_in_canvas && primary_down && space_down && space_drag_modifier_active(modifiers);
         let ctrl_or_cmd = modifiers.ctrl || modifiers.command;
+        // X11 touchpad scroll events carry no modifier state, so latch the
+        // modifiers from non-scroll frames and reuse them for the pan-modifier
+        // decision during a scroll. Only the pan-modifier membership test below
+        // uses `effective_modifiers`; everything else stays on raw `modifiers`.
+        let scrolling = scroll != Vec2::ZERO;
+        if !scrolling {
+            self.latched_scroll_modifiers = modifiers;
+        }
+        let effective_modifiers = effective_scroll_modifiers(modifiers, self.latched_scroll_modifiers, scrolling);
         // Space held + a scroll gesture pans the canvas even over a panel; the
         // Space key must be deferred from the terminal exactly like Space+drag.
         let space_scroll_pan_active = space_scroll_pan_active(space_down, pointer_in_canvas, scroll, ctrl_or_cmd);
@@ -286,7 +307,7 @@ impl HorizonApp {
         // actually over a panel, so the input hot path stays cheap.
         let scroll_pans_over_panel = pointer_over_panel
             && (horizon_core::scroll_should_pan_canvas(
-                held_shortcut_modifiers(modifiers),
+                held_shortcut_modifiers(effective_modifiers),
                 self.resolved_pan_modifier,
                 self.scroll_pans_over_panels,
             ) || space_scroll_pan_active);
@@ -386,9 +407,45 @@ mod tests {
     use super::super::super::super::input::TerminalInputEvent;
     use super::super::super::CanvasPanSpaceKeyState;
     use super::{
-        MiddlePanMode, MiddlePanTarget, next_middle_pan_active, primary_selection_routing_active,
-        space_scroll_pan_active,
+        MiddlePanMode, MiddlePanTarget, effective_scroll_modifiers, next_middle_pan_active,
+        primary_selection_routing_active, space_scroll_pan_active,
     };
+
+    #[test]
+    fn effective_scroll_modifiers_uses_current_when_not_scrolling() {
+        let current = Modifiers {
+            alt: true,
+            ..Modifiers::default()
+        };
+        let latched = Modifiers::default();
+        assert_eq!(effective_scroll_modifiers(current, latched, false), current);
+    }
+
+    #[test]
+    fn effective_scroll_modifiers_uses_latched_when_scrolling() {
+        let current = Modifiers::default();
+        let latched = Modifiers {
+            alt: true,
+            ..Modifiers::default()
+        };
+        assert_eq!(effective_scroll_modifiers(current, latched, true), latched);
+    }
+
+    #[test]
+    fn effective_scroll_modifiers_recovers_x11_alt_during_scroll() {
+        // X11 fix: Alt was held (latched alt=true) on the prior non-scroll
+        // frame, but the touchpad scroll event reports alt=false. The effective
+        // modifiers must still see Alt so scroll-over-panel panning triggers.
+        let current = Modifiers {
+            alt: false,
+            ..Modifiers::default()
+        };
+        let latched = Modifiers {
+            alt: true,
+            ..Modifiers::default()
+        };
+        assert!(effective_scroll_modifiers(current, latched, true).alt);
+    }
 
     #[test]
     fn space_scroll_pan_active_when_space_held_and_scrolling_in_canvas() {
