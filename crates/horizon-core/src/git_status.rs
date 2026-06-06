@@ -10,6 +10,7 @@ use crate::error::{Error, Result};
 pub enum FileStatus {
     Modified,
     Added,
+    Untracked,
     Deleted,
     Renamed,
 }
@@ -136,7 +137,8 @@ fn compute_changes(repo: &Repository) -> Result<ChangesResult> {
             continue;
         };
         let file_status = match delta.status() {
-            Delta::Added | Delta::Untracked => FileStatus::Added,
+            Delta::Added => FileStatus::Added,
+            Delta::Untracked => FileStatus::Untracked,
             Delta::Deleted => FileStatus::Deleted,
             Delta::Modified => FileStatus::Modified,
             Delta::Renamed | Delta::Copied => FileStatus::Renamed,
@@ -229,7 +231,7 @@ fn build_file_diff(file_path: &str, patch: &git2::Patch<'_>) -> FileDiff {
 const fn status_order(status: FileStatus) -> u8 {
     match status {
         FileStatus::Modified => 0,
-        FileStatus::Added => 1,
+        FileStatus::Added | FileStatus::Untracked => 1,
         FileStatus::Renamed => 2,
         FileStatus::Deleted => 3,
     }
@@ -238,10 +240,27 @@ const fn status_order(status: FileStatus) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn status_ordering_is_stable() {
         assert!(status_order(FileStatus::Modified) < status_order(FileStatus::Added));
         assert!(status_order(FileStatus::Added) < status_order(FileStatus::Deleted));
+    }
+
+    #[test]
+    fn untracked_file_maps_to_untracked_status() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = git2::Repository::init(dir.path()).expect("init repo");
+        let _ = repo; // repo created; leave file untracked
+        fs::write(dir.path().join("new.txt"), b"hello").expect("write file");
+
+        let status = compute_status(dir.path()).expect("compute status");
+        let change = status
+            .changes
+            .iter()
+            .find(|c| c.path == "new.txt")
+            .expect("new.txt present in changes");
+        assert_eq!(change.status, FileStatus::Untracked);
     }
 }

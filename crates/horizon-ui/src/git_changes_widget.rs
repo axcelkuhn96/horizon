@@ -315,6 +315,7 @@ fn file_status_label(status: FileStatus) -> (&'static str, Color32) {
     match status {
         FileStatus::Modified => ("MODIFIED", theme::ACCENT()),
         FileStatus::Added => ("ADDED", theme::PALETTE_GREEN()),
+        FileStatus::Untracked => ("UNTRACKED", theme::PALETTE_GREEN()),
         FileStatus::Deleted => ("DELETED", theme::PALETTE_RED()),
         FileStatus::Renamed => ("RENAMED", theme::PALETTE_YELLOW()),
     }
@@ -324,6 +325,7 @@ fn file_status_indicator(status: FileStatus) -> (&'static str, Color32) {
     match status {
         FileStatus::Modified => ("M", theme::ACCENT()),
         FileStatus::Added => ("A", theme::PALETTE_GREEN()),
+        FileStatus::Untracked => ("U", theme::PALETTE_GREEN()),
         FileStatus::Deleted => ("D", theme::PALETTE_RED()),
         FileStatus::Renamed => ("R", theme::PALETTE_YELLOW()),
     }
