@@ -8,6 +8,7 @@ mod config_migration;
 pub mod dir_search;
 mod editor;
 mod error;
+pub mod file_tree;
 pub mod git_changes;
 pub mod git_status;
 pub mod git_watcher;
@@ -42,6 +43,7 @@ pub use config::{
 };
 pub use editor::{MarkdownEditor, PanelContent, PreviewMode};
 pub use error::{Error, Result};
+pub use file_tree::{FileNode, FileTreeState};
 pub use git_changes::DiffViewer;
 pub use git_status::{DiffHunk, DiffLine, DiffLineKind, FileChange, FileDiff, FileStatus, GitStatus};
 pub use git_watcher::GitWatcher;
