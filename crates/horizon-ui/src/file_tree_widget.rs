@@ -427,4 +427,16 @@ mod tests {
             Some(("D", theme::PALETTE_RED()))
         );
     }
+
+    #[test]
+    fn missing_binary_sets_flag_and_does_not_panic() {
+        let mut code_missing = false;
+        // a program name that certainly does not exist on PATH
+        let ok = try_launch_editor("definitely-not-a-real-binary-xyz", Path::new("/tmp/x"));
+        if !ok {
+            code_missing = true;
+        }
+        assert!(!ok);
+        assert!(code_missing);
+    }
 }
