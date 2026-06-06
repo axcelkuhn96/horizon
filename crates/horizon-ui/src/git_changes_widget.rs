@@ -1,6 +1,7 @@
 use egui::{Align, Color32, CornerRadius, FontId, Layout, Pos2, Rect, RichText, ScrollArea, Vec2};
 use horizon_core::{DiffLineKind, FileStatus, GitStatus, Panel};
 
+use crate::scroll_forward::{forward_scroll_to_scroll_area, scroll_viewport_height};
 use crate::{loading_spinner, theme};
 
 const SECTION_LABEL_SIZE: f32 = 10.0;
@@ -159,7 +160,13 @@ fn render_file_list(ui: &mut egui::Ui, panel: &mut Panel, status: &GitStatus) {
     // Collect toggle actions so we can apply them after borrowing status.
     let mut toggle_path: Option<String> = None;
 
-    ScrollArea::vertical()
+    // Bound the scroll area to the panel body so a long change list clips and
+    // scrolls inside the panel instead of overflowing onto neighbours.
+    let max_h = scroll_viewport_height(ui.max_rect().bottom(), ui.cursor().top(), 0.0);
+
+    let scroll_output = ScrollArea::vertical()
+        .max_height(max_h)
+        .auto_shrink([false, false])
         .id_salt(("git_changes_files", panel.id.0))
         .show(ui, |ui| {
             ui.add_space(4.0);
@@ -201,6 +208,14 @@ fn render_file_list(ui: &mut egui::Ui, panel: &mut Panel, status: &GitStatus) {
             });
             ui.add_space(4.0);
         });
+    // Panel `Area`s are `interactable(false)`, so forward the wheel delta to the
+    // scroll area manually (and consume it) like the editor/file-explorer panels.
+    forward_scroll_to_scroll_area(
+        ui,
+        scroll_output.id,
+        scroll_output.inner_rect,
+        scroll_output.content_size.y,
+    );
 
     if let Some(path) = toggle_path
         && let Some(viewer) = panel.content.git_changes_mut()

@@ -12,9 +12,13 @@ use egui::{Align, Color32, CornerRadius, FontId, Layout, Rect, RichText, ScrollA
 use horizon_core::file_tree::{FileNode, FileTreeState, status_for_path};
 use horizon_core::{FileStatus, GitStatus, Panel};
 
+use crate::scroll_forward::{forward_scroll_to_scroll_area, scroll_viewport_height};
 use crate::theme;
 
 const HEADER_HEIGHT: f32 = 28.0;
+/// Height reserved below the scroll area for the footer when `code_missing`.
+/// Covers the single ~10pt label line plus its 4px trailing space.
+const FOOTER_HEIGHT: f32 = 22.0;
 const ROW_HEIGHT: f32 = 22.0;
 const ROW_FONT_SIZE: f32 = 12.0;
 const ICON_FONT_SIZE: f32 = 13.0;
@@ -145,13 +149,30 @@ impl<'a> FileExplorerView<'a> {
         let status = state.git_status.clone();
         let mut action: Option<TreeAction> = None;
 
-        ScrollArea::vertical()
+        // Bound the scroll area to the panel body so a tall tree clips and
+        // scrolls inside the panel instead of painting over neighbouring
+        // panels. Reserve footer space only when the footer is shown.
+        let footer_h = if state.code_missing { FOOTER_HEIGHT } else { 0.0 };
+        let max_h = scroll_viewport_height(ui.max_rect().bottom(), ui.cursor().top(), footer_h);
+
+        let scroll_output = ScrollArea::vertical()
+            .max_height(max_h)
+            .auto_shrink([false, false])
             .id_salt(("file_explorer_tree", panel_id))
             .show(ui, |ui| {
                 ui.add_space(2.0);
                 render_nodes(ui, &state.roots, 0, status.as_deref(), &mut action);
                 ui.add_space(4.0);
             });
+        // The panel `Area` is `interactable(false)`, so egui never registers the
+        // pointer as hovering the scroll area; forward the wheel delta manually
+        // (and consume it so the canvas pan handler ignores the same gesture).
+        forward_scroll_to_scroll_area(
+            ui,
+            scroll_output.id,
+            scroll_output.inner_rect,
+            scroll_output.content_size.y,
+        );
 
         render_footer(ui, state.code_missing);
 

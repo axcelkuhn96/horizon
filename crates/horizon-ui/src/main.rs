@@ -15,6 +15,7 @@ mod native_app;
 mod plugin_install;
 mod primary_selection;
 mod remote_hosts_overlay;
+mod scroll_forward;
 mod search_overlay;
 mod terminal_widget;
 mod theme;
