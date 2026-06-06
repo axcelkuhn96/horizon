@@ -5,6 +5,7 @@ use horizon_core::{
 };
 
 use super::super::editor_widget::{MarkdownEditorView, MarkdownPreviewCache};
+use super::super::file_tree_widget::FileExplorerView;
 use super::super::git_changes_widget::GitChangesView;
 use super::super::input::TerminalInputEvent;
 use super::super::primary_selection::PrimarySelection;
@@ -137,6 +138,7 @@ fn show_panel_body_contents(
             body_context.editor_save_shortcut,
         ),
         PanelKind::GitChanges => GitChangesView::new(panel).show(ui, is_focused),
+        PanelKind::FileExplorer => FileExplorerView::new(panel).show(ui, is_focused),
         PanelKind::Usage => UsageDashboardView::new(panel).show(ui, is_focused),
         _ => TerminalView::new(panel, body_context.terminal_grid_cache).show(
             ui,
