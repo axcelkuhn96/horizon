@@ -114,6 +114,7 @@ struct DetachedCanvasInteractionState {
     middle_pan_active: bool,
     canvas_pan_input_claimed: bool,
     pending_space_pan_key: CanvasPanSpaceKeyState,
+    pending_tab_pan_key: CanvasPanSpaceKeyState,
 }
 
 #[derive(Clone, Default)]
@@ -159,6 +160,11 @@ pub struct HorizonApp {
     middle_pan_active: bool,
     canvas_pan_input_claimed: bool,
     pending_space_pan_key: CanvasPanSpaceKeyState,
+    /// Hold-to-pan deferral for the Tab key, mirroring `pending_space_pan_key`.
+    /// While Tab drives a scroll-pan its key events are buffered then dropped so
+    /// the terminal never receives them; a plain Tab tap is flushed back on
+    /// release so shell tab-completion still works.
+    pending_tab_pan_key: CanvasPanSpaceKeyState,
     /// Modifier state latched from the most recent non-scroll frame. On X11,
     /// touchpad scroll events do not carry keyboard-modifier state, so during a
     /// 2-finger scroll `input.modifiers` reports the pan modifier (e.g. Alt) as
@@ -388,6 +394,7 @@ impl HorizonApp {
             middle_pan_active: false,
             canvas_pan_input_claimed: false,
             pending_space_pan_key: CanvasPanSpaceKeyState::Idle,
+            pending_tab_pan_key: CanvasPanSpaceKeyState::Idle,
             latched_scroll_modifiers: egui::Modifiers::default(),
             observed_keyboard_inputs,
             frame_keyboard_events: HashMap::new(),
