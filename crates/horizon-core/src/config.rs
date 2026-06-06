@@ -463,6 +463,7 @@ pub struct OverlaysConfig {
     pub attention_feed_width: f32,
     pub minimap_height: f32,
     pub minimap_width: f32,
+    pub sidebar_auto_hide: bool,
 }
 
 impl Default for OverlaysConfig {
@@ -472,6 +473,7 @@ impl Default for OverlaysConfig {
             attention_feed_width: 320.0,
             minimap_height: 180.0,
             minimap_width: 320.0,
+            sidebar_auto_hide: false,
         }
     }
 }
@@ -524,6 +526,8 @@ pub struct TerminalConfig {
     pub size: Option<[f32; 2]>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh_connection: Option<SshConnection>,
+    #[serde(default)]
+    pub collapsed: bool,
 }
 
 impl Default for TerminalConfig {
@@ -540,6 +544,7 @@ impl Default for TerminalConfig {
             position: None,
             size: None,
             ssh_connection: None,
+            collapsed: false,
         }
     }
 }

@@ -9,7 +9,7 @@ use crate::error::{Error, Result};
 use crate::panel::{PanelKind, PanelResume};
 use crate::shortcuts::ShortcutBinding;
 
-pub const CURRENT_CONFIG_VERSION: u32 = 9;
+pub const CURRENT_CONFIG_VERSION: u32 = 10;
 
 /// Run any pending migrations on `config` and write back to disk.
 ///
@@ -34,6 +34,7 @@ pub fn migrate_if_needed(config: &mut Config, config_path: &Path) -> Result<bool
             6 => migrate_v6_to_v7(config),
             7 => migrate_v7_to_v8(config),
             8 => migrate_v8_to_v9(config),
+            9 => migrate_v9_to_v10(config),
             _ => {
                 return Err(Error::Config(format!(
                     "unknown config version {version}, expected 1..={CURRENT_CONFIG_VERSION}"
@@ -140,6 +141,15 @@ fn migrate_v7_to_v8(config: &mut Config) {
 /// defaults. No field rewrites are needed — the only observable change is the
 /// version bump applied by `migrate_if_needed`.
 fn migrate_v8_to_v9(_config: &mut Config) {}
+
+/// v9 -> v10: introduce `overlays.sidebar_auto_hide` and per-terminal
+/// `terminals[].collapsed`.
+///
+/// Purely additive: both new fields carry `#[serde(default)]` (defaulting to
+/// `false`), so an old v9 YAML without them already deserializes to the correct
+/// defaults. No field rewrites are needed — the only observable change is the
+/// version bump applied by `migrate_if_needed`.
+fn migrate_v9_to_v10(_config: &mut Config) {}
 
 /// Remove every preset matching `should_remove`, then insert `replacement()`
 /// at the slot of the first removed preset (unless a preset named
@@ -282,6 +292,7 @@ fn write_back(config: &Config, path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{TerminalConfig, WorkspaceConfig};
 
     const V1_YAML: &str = "\
 shortcuts:
@@ -378,7 +389,7 @@ presets:
         assert_eq!(config.version, CURRENT_CONFIG_VERSION);
 
         let reloaded = std::fs::read_to_string(&path).expect("read back");
-        assert!(reloaded.contains("version: 9"));
+        assert!(reloaded.contains("version: 10"));
         assert!(reloaded.contains("Ctrl+Shift+K"));
         assert!(reloaded.contains("zoom_reset: Ctrl+0"));
         assert!(reloaded.contains("appearance:"));
@@ -387,7 +398,7 @@ presets:
     #[test]
     fn serialized_config_includes_version() {
         let yaml = Config::default().to_yaml().expect("should serialize");
-        assert!(yaml.contains("version: 9"));
+        assert!(yaml.contains("version: 10"));
     }
 
     #[test]
@@ -908,7 +919,7 @@ presets:
 
         assert!(migrated);
         assert_eq!(config.version, CURRENT_CONFIG_VERSION);
-        assert_eq!(config.version, 9);
+        assert_eq!(config.version, 10);
         assert!(!config.input.scroll_pans_over_panels);
         assert_eq!(config.input.pan_modifier, "Alt");
         assert!(config.input.auto_fit_on_focus);
@@ -944,5 +955,96 @@ input:
 
         assert!(!migrated, "migrating an already-current config is a no-op");
         assert_eq!(config.version, CURRENT_CONFIG_VERSION);
+    }
+
+    #[test]
+    fn migration_v9_to_v10_yields_new_field_defaults_without_them_present() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("config.yaml");
+        // A v9 config with overlays (no sidebar_auto_hide) and a terminal
+        // (no collapsed) — both new fields must default to false.
+        let v9_yaml = "\
+version: 9
+overlays:
+  attention_feed_height: 600.0
+  attention_feed_width: 320.0
+  minimap_height: 180.0
+  minimap_width: 320.0
+workspaces:
+  - name: Alpha
+    terminals:
+      - name: Shell
+        kind: shell
+";
+        std::fs::write(&path, v9_yaml).expect("write");
+
+        let mut config: Config = serde_yaml::from_str(v9_yaml).expect("should deserialize");
+        let migrated = migrate_if_needed(&mut config, &path).expect("should succeed");
+
+        assert!(migrated);
+        assert_eq!(config.version, CURRENT_CONFIG_VERSION);
+        assert_eq!(config.version, 10);
+        assert!(!config.overlays.sidebar_auto_hide);
+        assert!(!config.workspaces[0].terminals[0].collapsed);
+    }
+
+    #[test]
+    fn migration_v9_to_v10_preserves_explicit_new_field_values() {
+        let mut config: Config = serde_yaml::from_str(
+            "\
+version: 9
+overlays:
+  sidebar_auto_hide: true
+workspaces:
+  - name: Alpha
+    terminals:
+      - name: Shell
+        kind: shell
+        collapsed: true
+",
+        )
+        .expect("should deserialize");
+
+        migrate_v9_to_v10(&mut config);
+
+        assert!(config.overlays.sidebar_auto_hide);
+        assert!(config.workspaces[0].terminals[0].collapsed);
+    }
+
+    #[test]
+    fn new_v10_fields_round_trip_through_serialization() {
+        let mut config = Config::default();
+        config.overlays.sidebar_auto_hide = true;
+        config.workspaces.push(WorkspaceConfig {
+            name: "Alpha".to_string(),
+            color: None,
+            cwd: None,
+            position: None,
+            terminals: vec![TerminalConfig {
+                name: "Shell".to_string(),
+                collapsed: true,
+                ..TerminalConfig::default()
+            }],
+        });
+
+        let yaml = config.to_yaml().expect("should serialize");
+        let reloaded: Config = serde_yaml::from_str(&yaml).expect("should deserialize");
+
+        assert!(reloaded.overlays.sidebar_auto_hide);
+        assert!(reloaded.workspaces.last().expect("workspace").terminals[0].collapsed);
+    }
+
+    #[test]
+    fn migration_v9_to_v10_is_idempotent_on_v10_config() {
+        let mut config = Config::default();
+        config.overlays.sidebar_auto_hide = true;
+        assert_eq!(config.version, CURRENT_CONFIG_VERSION);
+        let tmp = tempfile::NamedTempFile::new().expect("temp file");
+
+        let migrated = migrate_if_needed(&mut config, tmp.path()).expect("should succeed");
+
+        assert!(!migrated, "migrating an already-current v10 config is a no-op");
+        assert_eq!(config.version, CURRENT_CONFIG_VERSION);
+        assert!(config.overlays.sidebar_auto_hide);
     }
 }
