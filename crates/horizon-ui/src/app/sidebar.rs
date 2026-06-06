@@ -1,6 +1,8 @@
+mod auto_hide;
 mod toolbar;
 
 use std::collections::HashMap;
+use std::time::Instant;
 
 use egui::{
     Align, Button, Color32, Context, CornerRadius, CursorIcon, Id, Layout, Order, Pos2, Rect, Sense, Stroke, UiBuilder,
@@ -16,6 +18,10 @@ use super::panels::panel_kind_icon;
 use super::root_chrome::effective_sidebar_width;
 use super::util;
 use super::{HorizonApp, TOOLBAR_HEIGHT, WS_BG_PAD, WS_TITLE_HEIGHT};
+
+use auto_hide::{
+    SIDEBAR_AUTO_HIDE_DELAY, SIDEBAR_STRIP_HOVER_WIDTH, SIDEBAR_STRIP_WIDTH, SidebarReveal, sidebar_reveal_state,
+};
 
 struct WorkspaceSidebarEntry {
     id: WorkspaceId,
@@ -88,7 +94,69 @@ impl HorizonApp {
         let viewport = util::viewport_local_rect(ctx);
         let sidebar_origin = Pos2::new(viewport.min.x, viewport.min.y + TOOLBAR_HEIGHT);
         let sidebar_width = effective_sidebar_width(viewport.width());
-        let sidebar_size = Vec2::new(sidebar_width, viewport.height() - TOOLBAR_HEIGHT);
+        let sidebar_height = viewport.height() - TOOLBAR_HEIGHT;
+        let auto_hide = self.template_config.overlays.sidebar_auto_hide;
+
+        // When auto-hide is off, preserve the original full-width behavior exactly.
+        if !auto_hide {
+            self.render_sidebar_full(
+                ctx,
+                sidebar_origin,
+                Vec2::new(sidebar_width, sidebar_height),
+                sidebar_width,
+            );
+            return;
+        }
+
+        let full_rect = Rect::from_min_size(sidebar_origin, Vec2::new(sidebar_width, sidebar_height));
+        let strip_hover_rect =
+            Rect::from_min_size(sidebar_origin, Vec2::new(SIDEBAR_STRIP_HOVER_WIDTH, sidebar_height));
+
+        // The region that counts as "over the sidebar" depends on what we drew last
+        // frame: the full rect while revealed, otherwise only the thin edge strip.
+        let hover_rect = if self.sidebar_revealed_last_frame() {
+            full_rect
+        } else {
+            strip_hover_rect
+        };
+
+        let pointer_over = ctx.pointer_interact_pos().is_some_and(|pos| hover_rect.contains(pos));
+
+        let now = Instant::now();
+        if pointer_over {
+            self.sidebar_last_hover = Some(now);
+        }
+        let since_left = self.sidebar_last_hover.map(|t| now.duration_since(t));
+        let reveal = sidebar_reveal_state(true, pointer_over, since_left, SIDEBAR_AUTO_HIDE_DELAY);
+        self.sidebar_auto_hide_revealed = matches!(reveal, SidebarReveal::FullVisible);
+
+        match reveal {
+            SidebarReveal::FullVisible => {
+                self.render_sidebar_full(
+                    ctx,
+                    sidebar_origin,
+                    Vec2::new(sidebar_width, sidebar_height),
+                    sidebar_width,
+                );
+                // Re-check the hide timer once the grace period would elapse, but only
+                // while the pointer is away (so no continuous repaint while hovering).
+                if !pointer_over && let Some(elapsed) = since_left {
+                    let remaining = SIDEBAR_AUTO_HIDE_DELAY.saturating_sub(elapsed);
+                    ctx.request_repaint_after(remaining);
+                }
+            }
+            SidebarReveal::ThinStrip => {
+                Self::render_sidebar_strip(ctx, sidebar_origin, sidebar_height);
+            }
+        }
+    }
+
+    /// Whether the sidebar was rendered at full width on the previous frame.
+    fn sidebar_revealed_last_frame(&self) -> bool {
+        self.sidebar_auto_hide_revealed
+    }
+
+    fn render_sidebar_full(&mut self, ctx: &Context, sidebar_origin: Pos2, sidebar_size: Vec2, sidebar_width: f32) {
         let workspace_data = self.sidebar_workspace_data();
         let mut actions = SidebarActions::default();
 
@@ -102,6 +170,39 @@ impl HorizonApp {
             });
 
         self.apply_sidebar_actions(ctx, &actions);
+    }
+
+    /// Render the collapsed auto-hide handle: a thin, theme-consistent strip on the
+    /// left edge that reads as a deliberate affordance to reveal the sidebar.
+    fn render_sidebar_strip(ctx: &Context, sidebar_origin: Pos2, sidebar_height: f32) {
+        let strip_size = Vec2::new(SIDEBAR_STRIP_WIDTH, sidebar_height);
+        egui::Area::new(Id::new("sidebar_strip"))
+            .fixed_pos(sidebar_origin)
+            .constrain(false)
+            .order(Order::Tooltip)
+            .show(ctx, |ui| {
+                let strip_rect = Rect::from_min_size(sidebar_origin, strip_size);
+                let painter = ui.painter_at(strip_rect);
+                painter.rect_filled(strip_rect, CornerRadius::ZERO, theme::BG_ELEVATED());
+                // Subtle accent handle centered vertically, like a grab affordance.
+                let handle_height = (sidebar_height * 0.18).clamp(28.0, 96.0);
+                let handle_rect = Rect::from_center_size(
+                    Pos2::new(strip_rect.center().x, strip_rect.center().y),
+                    Vec2::new(SIDEBAR_STRIP_WIDTH - 2.0, handle_height),
+                );
+                painter.rect_filled(handle_rect, CornerRadius::same(2), theme::alpha(theme::ACCENT(), 150));
+                painter.line_segment(
+                    [
+                        Pos2::new(strip_rect.max.x, strip_rect.min.y),
+                        Pos2::new(strip_rect.max.x, strip_rect.max.y),
+                    ],
+                    Stroke::new(1.0, theme::BORDER_SUBTLE()),
+                );
+                ui.advance_cursor_after_rect(strip_rect);
+                if ui.rect_contains_pointer(strip_rect) {
+                    ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+                }
+            });
     }
 
     fn sidebar_workspace_data(&self) -> Vec<WorkspaceSidebarEntry> {

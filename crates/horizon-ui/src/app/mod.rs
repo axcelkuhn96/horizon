@@ -189,6 +189,8 @@ pub struct HorizonApp {
     fullscreen_panel: Option<PanelId>,
     sidebar_visible: bool,
     sidebar_drag_workspace: Option<WorkspaceId>,
+    sidebar_last_hover: Option<Instant>,
+    sidebar_auto_hide_revealed: bool,
     minimap_visible: bool,
     hud_visible: bool,
     renaming_workspace: Option<WorkspaceId>,
@@ -306,6 +308,8 @@ impl HorizonApp {
         app
     }
 
+    // Flat constructor: one line per field, so the length scales with the struct.
+    #[allow(clippy::too_many_lines)]
     fn initial_state(config: &Config, bootstrap: AppBootstrap) -> Self {
         let AppBootstrap {
             config_path,
@@ -319,7 +323,6 @@ impl HorizonApp {
             shortcuts,
             action_commands_cache,
         } = bootstrap;
-
         Self {
             board,
             panels_to_close: Vec::new(),
@@ -341,6 +344,8 @@ impl HorizonApp {
             fullscreen_panel: None,
             sidebar_visible: true,
             sidebar_drag_workspace: None,
+            sidebar_last_hover: None,
+            sidebar_auto_hide_revealed: false,
             minimap_visible: true,
             hud_visible: false,
             renaming_workspace: None,
