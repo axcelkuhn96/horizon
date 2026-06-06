@@ -32,66 +32,70 @@ struct ThemePalette {
     terminal_palette: [Color32; 16],
 }
 
+// Dark palette: Catppuccin Mocha family, tuned for clear elevation
+// (canvas -> panel -> chrome) and legible foreground tiers.
 const DARK_THEME: ThemePalette = ThemePalette {
-    bg: Color32::from_rgb(7, 10, 16),
-    bg_elevated: Color32::from_rgb(12, 16, 24),
-    panel_bg: Color32::from_rgb(15, 19, 28),
-    panel_bg_alt: Color32::from_rgb(21, 26, 37),
-    fg: Color32::from_rgb(224, 230, 241),
-    fg_soft: Color32::from_rgb(170, 181, 199),
-    fg_dim: Color32::from_rgb(108, 120, 142),
-    cursor: Color32::from_rgb(196, 223, 255),
-    grid_dot: Color32::from_rgb(28, 34, 46),
-    accent: Color32::from_rgb(116, 162, 247),
-    border_subtle: Color32::from_rgb(37, 46, 61),
-    border_strong: Color32::from_rgb(63, 78, 101),
-    titlebar_bg: Color32::from_rgb(8, 11, 17),
-    toolbar_bg: Color32::from_rgb(11, 15, 22),
-    canvas_cool_glow: Color32::from_rgba_unmultiplied_const(77, 112, 220, 20),
-    canvas_warm_glow: Color32::from_rgba_unmultiplied_const(255, 146, 80, 28),
-    btn_close: Color32::from_rgb(235, 96, 88),
+    bg: Color32::from_rgb(24, 24, 37), // Mocha Mantle: canvas, warmer than near-black
+    bg_elevated: Color32::from_rgb(30, 30, 46), // Mocha Base: first elevation step
+    panel_bg: Color32::from_rgb(30, 30, 46), // Mocha Base: terminal body
+    panel_bg_alt: Color32::from_rgb(49, 50, 68), // Mocha Surface0: chrome / titlebars
+    fg: Color32::from_rgb(205, 214, 244), // Mocha Text
+    fg_soft: Color32::from_rgb(166, 173, 200), // Mocha Subtext0
+    fg_dim: Color32::from_rgb(127, 132, 156), // Mocha Overlay1: brighter dim tier
+    cursor: Color32::from_rgb(180, 190, 254), // Mocha Lavender
+    grid_dot: Color32::from_rgb(49, 50, 68), // Mocha Surface0: visible dot grid
+    accent: Color32::from_rgb(137, 180, 250), // Mocha Blue
+    border_subtle: Color32::from_rgb(69, 71, 90), // Mocha Surface1: readable edges
+    border_strong: Color32::from_rgb(88, 91, 112), // Mocha Surface2
+    titlebar_bg: Color32::from_rgb(17, 17, 27), // Mocha Crust: deepest chrome
+    toolbar_bg: Color32::from_rgb(24, 24, 37), // Mocha Mantle
+    canvas_cool_glow: Color32::from_rgba_unmultiplied_const(110, 145, 240, 26),
+    canvas_warm_glow: Color32::from_rgba_unmultiplied_const(250, 179, 135, 30),
+    btn_close: Color32::from_rgb(243, 139, 168), // Mocha Maroon/Red family
     palette_green: Color32::from_rgb(166, 227, 161),
     palette_red: Color32::from_rgb(243, 139, 168),
-    palette_yellow: Color32::from_rgb(233, 190, 109),
-    palette_cyan: Color32::from_rgb(102, 212, 214),
+    palette_yellow: Color32::from_rgb(249, 226, 175),
+    palette_cyan: Color32::from_rgb(148, 226, 213),
     terminal_palette: [
-        Color32::from_rgb(45, 49, 62),
-        Color32::from_rgb(227, 107, 117),
-        Color32::from_rgb(143, 213, 130),
-        Color32::from_rgb(233, 190, 109),
-        Color32::from_rgb(116, 162, 247),
-        Color32::from_rgb(202, 151, 234),
-        Color32::from_rgb(102, 212, 214),
-        Color32::from_rgb(196, 204, 219),
-        Color32::from_rgb(74, 80, 97),
-        Color32::from_rgb(242, 130, 135),
-        Color32::from_rgb(170, 224, 158),
-        Color32::from_rgb(244, 207, 133),
-        Color32::from_rgb(147, 187, 255),
-        Color32::from_rgb(224, 178, 247),
-        Color32::from_rgb(141, 225, 227),
-        Color32::from_rgb(231, 236, 245),
+        Color32::from_rgb(69, 71, 90),    // black (Surface1)
+        Color32::from_rgb(243, 139, 168), // red
+        Color32::from_rgb(166, 227, 161), // green
+        Color32::from_rgb(249, 226, 175), // yellow
+        Color32::from_rgb(137, 180, 250), // blue
+        Color32::from_rgb(245, 194, 231), // magenta (Pink)
+        Color32::from_rgb(148, 226, 213), // cyan (Teal)
+        Color32::from_rgb(186, 194, 222), // white (Subtext1)
+        Color32::from_rgb(88, 91, 112),   // bright black (Surface2)
+        Color32::from_rgb(235, 160, 172), // bright red (Maroon)
+        Color32::from_rgb(166, 227, 161), // bright green
+        Color32::from_rgb(249, 226, 175), // bright yellow
+        Color32::from_rgb(137, 180, 250), // bright blue
+        Color32::from_rgb(245, 194, 231), // bright magenta
+        Color32::from_rgb(148, 226, 213), // bright cyan
+        Color32::from_rgb(205, 214, 244), // bright white (Text)
     ],
 };
 
+// Light palette: Catppuccin Latte family, cohesive with the dark theme's
+// elevation logic (canvas -> panel -> chrome) and Latte Blue accent.
 const LIGHT_THEME: ThemePalette = ThemePalette {
-    bg: Color32::from_rgb(247, 244, 239),
-    bg_elevated: Color32::from_rgb(253, 251, 247),
-    panel_bg: Color32::from_rgb(254, 253, 250),
-    panel_bg_alt: Color32::from_rgb(243, 240, 233),
-    fg: Color32::from_rgb(24, 28, 34),
-    fg_soft: Color32::from_rgb(77, 86, 96),
-    fg_dim: Color32::from_rgb(131, 143, 154),
-    cursor: Color32::from_rgb(94, 106, 210),
-    grid_dot: Color32::from_rgb(222, 216, 204),
-    accent: Color32::from_rgb(94, 106, 210),
-    border_subtle: Color32::from_rgb(229, 224, 213),
-    border_strong: Color32::from_rgb(202, 194, 177),
-    titlebar_bg: Color32::from_rgb(248, 246, 240),
-    toolbar_bg: Color32::from_rgb(248, 246, 240),
-    canvas_cool_glow: Color32::from_rgba_unmultiplied_const(94, 106, 210, 14),
-    canvas_warm_glow: Color32::from_rgba_unmultiplied_const(243, 158, 80, 22),
-    btn_close: Color32::from_rgb(214, 67, 67),
+    bg: Color32::from_rgb(230, 233, 239),            // Latte Mantle: canvas
+    bg_elevated: Color32::from_rgb(239, 241, 245),   // Latte Base
+    panel_bg: Color32::from_rgb(239, 241, 245),      // Latte Base: panel body
+    panel_bg_alt: Color32::from_rgb(204, 208, 218),  // Latte Surface0: chrome
+    fg: Color32::from_rgb(76, 79, 105),              // Latte Text
+    fg_soft: Color32::from_rgb(108, 111, 133),       // Latte Subtext0
+    fg_dim: Color32::from_rgb(140, 143, 161),        // Latte Overlay1
+    cursor: Color32::from_rgb(30, 102, 245),         // Latte Blue
+    grid_dot: Color32::from_rgb(204, 208, 218),      // Latte Surface0
+    accent: Color32::from_rgb(30, 102, 245),         // Latte Blue
+    border_subtle: Color32::from_rgb(188, 192, 204), // Latte Surface1
+    border_strong: Color32::from_rgb(172, 176, 190), // Latte Surface2
+    titlebar_bg: Color32::from_rgb(220, 224, 232),   // Latte Crust
+    toolbar_bg: Color32::from_rgb(230, 233, 239),    // Latte Mantle
+    canvas_cool_glow: Color32::from_rgba_unmultiplied_const(30, 102, 245, 16),
+    canvas_warm_glow: Color32::from_rgba_unmultiplied_const(254, 100, 11, 22),
+    btn_close: Color32::from_rgb(210, 15, 57), // Latte Red
     palette_green: Color32::from_rgb(5, 150, 105),
     palette_red: Color32::from_rgb(210, 15, 57),
     palette_yellow: Color32::from_rgb(217, 119, 6),
@@ -331,9 +335,9 @@ pub fn composite_over(background: Color32, foreground: Color32) -> Color32 {
 #[must_use]
 pub fn panel_border(accent: Color32, focused: bool) -> Color32 {
     if focused {
-        blend(BORDER_STRONG(), accent, 0.78)
+        blend(BORDER_STRONG(), accent, 0.85)
     } else {
-        alpha(blend(BORDER_SUBTLE(), accent, 0.32), 196)
+        alpha(blend(BORDER_SUBTLE(), accent, 0.22), 210)
     }
 }
 
@@ -431,17 +435,19 @@ fn visuals(theme: ResolvedTheme) -> Visuals {
     visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, palette.fg_soft);
     visuals.widgets.inactive.corner_radius = CornerRadius::same(12);
 
-    visuals.widgets.hovered.bg_fill = blend(palette.panel_bg_alt, palette.accent, 0.16);
+    visuals.widgets.hovered.bg_fill = blend(palette.panel_bg_alt, palette.accent, 0.22);
     visuals.widgets.hovered.weak_bg_fill = palette.bg_elevated;
     visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, palette.fg);
+    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, blend(palette.border_strong, palette.accent, 0.45));
     visuals.widgets.hovered.corner_radius = CornerRadius::same(12);
 
-    visuals.widgets.active.bg_fill = blend(palette.panel_bg_alt, palette.accent, 0.22);
+    visuals.widgets.active.bg_fill = blend(palette.panel_bg_alt, palette.accent, 0.32);
     visuals.widgets.active.weak_bg_fill = palette.bg_elevated;
     visuals.widgets.active.fg_stroke = Stroke::new(1.0, palette.fg);
+    visuals.widgets.active.bg_stroke = Stroke::new(1.0, palette.accent);
     visuals.widgets.active.corner_radius = CornerRadius::same(12);
 
-    visuals.selection.bg_fill = alpha(palette.accent, 54);
+    visuals.selection.bg_fill = alpha(palette.accent, 64);
     visuals.selection.stroke = Stroke::new(1.0, palette.accent);
     visuals.popup_shadow = Shadow {
         offset: [0, 6],
