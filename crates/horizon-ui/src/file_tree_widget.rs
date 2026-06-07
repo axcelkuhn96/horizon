@@ -9,8 +9,11 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use egui::{Align, Color32, CornerRadius, FontId, Layout, Rect, RichText, ScrollArea, Vec2};
-use horizon_core::file_tree::{ChangedTreeNode, FileNode, FileTreeState, changed_file_tree, status_for_path};
+use egui::epaint::text::{LayoutJob, TextFormat, TextWrapping};
+use egui::{Align, Align2, Color32, CornerRadius, FontId, Layout, Pos2, Rect, RichText, ScrollArea, Sense, Vec2};
+use horizon_core::file_tree::{
+    ChangedTreeNode, FileNode, FileTreeState, changed_file_tree, dir_contains_changes, status_for_path,
+};
 use horizon_core::{FileStatus, GitStatus, Panel};
 
 use crate::scroll_forward::{forward_scroll_to_scroll_area, scroll_viewport_height};
@@ -23,18 +26,28 @@ const FOOTER_HEIGHT: f32 = 22.0;
 const ROW_HEIGHT: f32 = 22.0;
 const ROW_FONT_SIZE: f32 = 12.0;
 const ICON_FONT_SIZE: f32 = 13.0;
-const INDENT_PER_DEPTH: f32 = 14.0;
+/// Horizontal shift per nesting level. Bumped to 16.0 (from 14.0) so deeply
+/// nested children read as an obvious tree (2026-06-07, user request).
+const INDENT_PER_DEPTH: f32 = 16.0;
 const BASE_INDENT: f32 = 8.0;
 /// Right-edge space reserved for the status letter so long names truncate
 /// with `…` instead of running underneath it.
 const LETTER_RESERVE: f32 = 26.0;
 /// Right-edge padding for rows without a status letter.
 const PLAIN_RESERVE: f32 = 10.0;
-/// Fixed width of the icon column. Icons are painted centered inside this
-/// column (clipped to it) instead of flowing as a label, so glyphs with
-/// paint extents wider than their font advance (Nerd Font / emoji fallback)
-/// can never bleed over the filename that follows.
+/// Fixed width of the icon column. The icon is painted centered (and clipped)
+/// inside this column at an explicit x, so glyphs whose paint extent exceeds
+/// their font advance (Nerd Font / emoji fallback) can never bleed over the
+/// filename that follows.
 const ICON_COL_WIDTH: f32 = 18.0;
+/// Fixed width of the chevron (expand/collapse arrow) column. Constant for
+/// every row — files have no chevron but reserve the same gap so their icon and
+/// name align with directory rows.
+const CHEVRON_COL_WIDTH: f32 = 12.0;
+/// Gap between the icon column and the name text.
+const ICON_NAME_GAP: f32 = 4.0;
+/// Font size of the chevron arrows.
+const CHEVRON_FONT_SIZE: f32 = 9.0;
 
 /// Returns a Nerd Font glyph (Private Use Area) for a path. `is_dir` selects a
 /// folder glyph. Unknown extensions fall back to a generic file glyph.
@@ -315,78 +328,151 @@ fn render_node(
     }
 }
 
+/// The painted appearance of one tree row, resolved by the caller and handed to
+/// [`paint_tree_row`]. Keeping all geometry in one painter pass (instead of
+/// nested `ui.label` scopes) makes row layout robust: every element is placed at
+/// an explicit x, so no glyph-advance / cursor-rewind quirk can stack the name
+/// under the icon.
+struct RowVisual<'a> {
+    depth: usize,
+    /// `Some(is_open)` for directories (draws a chevron), `None` for files.
+    chevron: Option<bool>,
+    icon: &'a str,
+    icon_color: Color32,
+    name: &'a str,
+    name_color: Color32,
+    /// Optional right-aligned status letter and its color.
+    letter: Option<(&'a str, Color32)>,
+}
+
+/// Picks `(icon_color, name_color)` for a normal-tree row.
+///
+/// - A directory that contains uncommitted changes (`dir_changed`) renders both
+///   icon and name in the untracked/added green, propagating change state up the
+///   tree like `VSCode`. Other directories use the accent icon + soft name.
+/// - Files use their git-status color (or the neutral foreground when clean) for
+///   both icon and name.
+fn row_colors(is_dir: bool, dir_changed: bool, decoration: Option<(&str, Color32)>) -> (Color32, Color32) {
+    if is_dir {
+        if dir_changed {
+            (theme::PALETTE_GREEN(), theme::PALETTE_GREEN())
+        } else {
+            (theme::ACCENT(), theme::FG_SOFT())
+        }
+    } else {
+        let c = decoration.map_or_else(theme::FG, |(_, color)| color);
+        (c, c)
+    }
+}
+
 /// Renders one tree row. Returns `true` if the row should toggle (folder) or
 /// open (file) — i.e. clicked for a folder, double-clicked for a file.
 fn render_row(ui: &mut egui::Ui, node: &FileNode, depth: usize, status: Option<&GitStatus>) -> bool {
-    let row_rect = Rect::from_min_size(ui.cursor().min, Vec2::new(ui.available_width(), ROW_HEIGHT));
-    let response = ui.allocate_rect(row_rect, egui::Sense::click());
-
-    if response.hovered() {
-        ui.painter()
-            .rect_filled(row_rect, CornerRadius::ZERO, theme::alpha(theme::FG(), 6));
-    }
-
     let decoration = status.and_then(|s| status_decoration(status_for_path(s, &node.path)));
-    let name_color = decoration.map_or_else(theme::FG, |(_, color)| color);
 
-    #[allow(clippy::cast_precision_loss)]
-    let indent = BASE_INDENT + depth as f32 * INDENT_PER_DEPTH;
+    // Normal-tree folder propagation: a directory that CONTAINS uncommitted
+    // changes tints its icon+name green (VSCode-style), even though the folder
+    // itself has no direct status. Files keep their own status color.
+    let dir_changed = node.is_dir && status.is_some_and(|s| dir_contains_changes(s, &node.path));
+    let (icon_color, name_color) = row_colors(node.is_dir, dir_changed, decoration);
 
-    ui.scope_builder(
-        egui::UiBuilder::new()
-            .max_rect(row_rect)
-            .layout(Layout::left_to_right(Align::Center)),
-        |ui| {
-            ui.add_space(indent);
+    let visual = RowVisual {
+        depth,
+        chevron: node.is_dir.then_some(node.children.is_some()),
+        icon: file_type_icon(&node.path, node.is_dir),
+        icon_color,
+        name: &node.name,
+        name_color,
+        letter: decoration,
+    };
 
-            if node.is_dir {
-                let caret = if node.children.is_some() {
-                    "\u{25bc}"
-                } else {
-                    "\u{25b6}"
-                };
-                ui.label(RichText::new(caret).size(7.0).color(theme::FG_DIM()));
-                ui.add_space(4.0);
-            } else {
-                // Align files with folders that have a caret in front.
-                ui.add_space(11.0);
-            }
-
-            paint_icon_column(
-                ui,
-                file_type_icon(&node.path, node.is_dir),
-                if node.is_dir { theme::ACCENT() } else { name_color },
-            );
-            ui.add_space(2.0);
-
-            // Cap the label at the letter zone so long names truncate with
-            // `…` instead of overflowing the panel / running under the letter.
-            let reserve = if decoration.is_some() {
-                LETTER_RESERVE
-            } else {
-                PLAIN_RESERVE
-            };
-            ui.set_max_width((row_rect.width() - reserve).max(20.0));
-            ui.add(
-                egui::Label::new(
-                    RichText::new(&node.name)
-                        .font(FontId::proportional(ROW_FONT_SIZE))
-                        .color(if node.is_dir { theme::FG_SOFT() } else { name_color }),
-                )
-                .truncate(),
-            );
-        },
-    );
-
-    if let Some((letter, color)) = decoration {
-        paint_status_letter(ui, row_rect, letter, color);
-    }
+    let response = paint_tree_row(ui, &visual);
 
     if node.is_dir {
         response.clicked()
     } else {
         response.double_clicked()
     }
+}
+
+/// Paints one fully-manual tree row at explicit x offsets and returns the row's
+/// click `Response`. Layout: `[indent][chevron col][icon col][gap][name,
+/// ellipsis-truncated before the letter reserve]` with the status letter painted
+/// absolutely at the right edge. No inner `ui.label`/scope is used, so nothing
+/// can rewind the cursor and stack the name under the icon.
+fn paint_tree_row(ui: &mut egui::Ui, v: &RowVisual<'_>) -> egui::Response {
+    let row_rect = Rect::from_min_size(ui.cursor().min, Vec2::new(ui.available_width(), ROW_HEIGHT));
+    let response = ui.allocate_rect(row_rect, Sense::click());
+
+    if response.hovered() {
+        ui.painter()
+            .rect_filled(row_rect, CornerRadius::ZERO, theme::alpha(theme::FG(), 6));
+    }
+
+    let painter = ui.painter();
+    let mid_y = row_rect.center().y;
+
+    #[allow(clippy::cast_precision_loss)]
+    let indent = BASE_INDENT + v.depth as f32 * INDENT_PER_DEPTH;
+    let mut x = row_rect.min.x + indent;
+
+    // Chevron column (constant width for both dirs and files so icons align).
+    if let Some(is_open) = v.chevron {
+        let chevron = if is_open { "\u{25bc}" } else { "\u{25b6}" };
+        painter.text(
+            Pos2::new(x + CHEVRON_COL_WIDTH / 2.0, mid_y),
+            Align2::CENTER_CENTER,
+            chevron,
+            FontId::proportional(CHEVRON_FONT_SIZE),
+            theme::FG_DIM(),
+        );
+    }
+    x += CHEVRON_COL_WIDTH;
+
+    // Icon column: painted centered and clipped so a wide glyph can't bleed out.
+    let icon_rect = Rect::from_min_size(Pos2::new(x, row_rect.min.y), Vec2::new(ICON_COL_WIDTH, ROW_HEIGHT));
+    painter.with_clip_rect(icon_rect).text(
+        icon_rect.center(),
+        Align2::CENTER_CENTER,
+        v.icon,
+        FontId::proportional(ICON_FONT_SIZE),
+        v.icon_color,
+    );
+    x += ICON_COL_WIDTH + ICON_NAME_GAP;
+
+    // Name: laid out as a single-row, ellipsis-truncated galley bounded so it
+    // never reaches the status-letter reserve at the right edge.
+    let reserve = if v.letter.is_some() {
+        LETTER_RESERVE
+    } else {
+        PLAIN_RESERVE
+    };
+    let name_max_x = (row_rect.max.x - reserve).max(x + 8.0);
+    let mut job = LayoutJob::single_section(
+        v.name.to_owned(),
+        TextFormat {
+            font_id: FontId::proportional(ROW_FONT_SIZE),
+            color: v.name_color,
+            ..Default::default()
+        },
+    );
+    job.wrap = TextWrapping::truncate_at_width(name_max_x - x);
+    let galley = painter.layout_job(job);
+    let name_y = mid_y - galley.size().y / 2.0;
+    painter.galley(Pos2::new(x, name_y), galley, v.name_color);
+
+    // Status letter, painted absolutely at the right edge.
+    if let Some((letter, color)) = v.letter {
+        painter.text(
+            Pos2::new(row_rect.max.x - 12.0, mid_y),
+            Align2::RIGHT_CENTER,
+            letter,
+            FontId::monospace(11.0),
+            color,
+        );
+    }
+
+    response
 }
 
 /// Renders the grouped "only uncommitted files" tree. With no git snapshot,
@@ -442,7 +528,11 @@ fn render_changed_nodes(
 }
 
 /// Caret and folder glyph for a directory row of the filtered tree, by
-/// expansion state. Carets mirror the normal tree (`\u{25bc}`/`\u{25b6}`).
+/// expansion state. Carets mirror the normal tree (`\u{25bc}`/`\u{25b6}`); the
+/// folder glyph swaps between closed and open. The chevron is drawn by
+/// [`paint_tree_row`] from `RowVisual.chevron`; this helper remains the single
+/// source of truth for the open/closed folder icon (and its caret pairing is
+/// asserted by tests).
 fn changed_dir_visuals(is_open: bool) -> (&'static str, &'static str) {
     if is_open {
         ("\u{25bc}", "\u{f07c}") // nf-fa-folder_open
@@ -458,95 +548,34 @@ fn changed_dir_visuals(is_open: bool) -> (&'static str, &'static str) {
 /// status letter. Returns `true` when the row should act — click for a
 /// directory (toggle), double-click for a file (open in editor).
 fn render_changed_row(ui: &mut egui::Ui, node: &ChangedTreeNode, depth: usize, is_open: bool) -> bool {
-    let row_rect = Rect::from_min_size(ui.cursor().min, Vec2::new(ui.available_width(), ROW_HEIGHT));
-    let response = ui.allocate_rect(row_rect, egui::Sense::click());
-
-    if response.hovered() {
-        ui.painter()
-            .rect_filled(row_rect, CornerRadius::ZERO, theme::alpha(theme::FG(), 6));
-    }
-
     let decoration = status_decoration(node.status);
-    let name_color = decoration.map_or_else(theme::FG, |(_, color)| color);
 
-    #[allow(clippy::cast_precision_loss)]
-    let indent = BASE_INDENT + depth as f32 * INDENT_PER_DEPTH;
+    let (icon, icon_color, name_color) = if node.is_dir {
+        // Filter-tree dirs are green by construction (they all contain changes).
+        let (_, folder_icon) = changed_dir_visuals(is_open);
+        (folder_icon, theme::PALETTE_GREEN(), theme::PALETTE_GREEN())
+    } else {
+        let c = decoration.map_or_else(theme::FG, |(_, color)| color);
+        (file_type_icon(&node.abs_path, false), c, c)
+    };
 
-    ui.scope_builder(
-        egui::UiBuilder::new()
-            .max_rect(row_rect)
-            .layout(Layout::left_to_right(Align::Center)),
-        |ui| {
-            ui.add_space(indent);
+    let visual = RowVisual {
+        depth,
+        chevron: node.is_dir.then_some(is_open),
+        icon,
+        icon_color,
+        name: &node.name,
+        name_color,
+        letter: decoration,
+    };
 
-            let (icon, icon_color, text_color) = if node.is_dir {
-                let (caret, folder_icon) = changed_dir_visuals(is_open);
-                ui.label(RichText::new(caret).size(7.0).color(theme::FG_DIM()));
-                ui.add_space(4.0);
-                (folder_icon, theme::PALETTE_GREEN(), theme::PALETTE_GREEN())
-            } else {
-                // Align files with folders that have a caret in front.
-                ui.add_space(11.0);
-                (file_type_icon(&node.abs_path, false), name_color, name_color)
-            };
-            paint_icon_column(ui, icon, icon_color);
-            ui.add_space(2.0);
-
-            let reserve = if decoration.is_some() {
-                LETTER_RESERVE
-            } else {
-                PLAIN_RESERVE
-            };
-            ui.set_max_width((row_rect.width() - reserve).max(20.0));
-            ui.add(
-                egui::Label::new(
-                    RichText::new(&node.name)
-                        .font(FontId::proportional(ROW_FONT_SIZE))
-                        .color(text_color),
-                )
-                .truncate(),
-            );
-        },
-    );
-
-    if let Some((letter, color)) = decoration {
-        paint_status_letter(ui, row_rect, letter, color);
-    }
+    let response = paint_tree_row(ui, &visual);
 
     if node.is_dir {
         response.clicked()
     } else {
         response.double_clicked()
     }
-}
-
-/// Paints the status letter right-aligned inside the row, independent of the
-/// row's left-to-right content so truncated names can never collide with it.
-fn paint_status_letter(ui: &egui::Ui, row_rect: Rect, letter: &str, color: Color32) {
-    ui.painter().text(
-        egui::Pos2::new(row_rect.max.x - 12.0, row_rect.center().y),
-        egui::Align2::RIGHT_CENTER,
-        letter,
-        FontId::monospace(11.0),
-        color,
-    );
-}
-
-/// Allocates a fixed-width icon column and paints `icon` centered in it,
-/// clipped to the column rect. Replaces `ui.label(icon)` in row rendering:
-/// a label's width follows the glyph's font advance, which for Nerd Font /
-/// emoji-fallback glyphs is narrower than the painted outline — the next
-/// widget then starts under the glyph. A fixed column sidesteps the metrics
-/// entirely.
-fn paint_icon_column(ui: &mut egui::Ui, icon: &str, color: Color32) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(ICON_COL_WIDTH, ROW_HEIGHT), egui::Sense::empty());
-    ui.painter().with_clip_rect(rect).text(
-        rect.center(),
-        egui::Align2::CENTER_CENTER,
-        icon,
-        FontId::proportional(ICON_FONT_SIZE),
-        color,
-    );
 }
 
 /// Centered, dim status message used for the empty / no-repo filtered states.
@@ -672,6 +701,25 @@ mod tests {
     }
 
     #[test]
+    fn dir_with_changes_inside_renders_green_in_normal_tree() {
+        // Folder propagation: a changed dir tints icon+name green; a clean dir
+        // keeps accent icon + soft name; a clean file uses the neutral fg.
+        let (changed_icon, changed_name) = row_colors(true, true, None);
+        assert_eq!(changed_icon, theme::PALETTE_GREEN());
+        assert_eq!(changed_name, theme::PALETTE_GREEN());
+
+        let (clean_icon, clean_name) = row_colors(true, false, None);
+        assert_eq!(clean_icon, theme::ACCENT());
+        assert_eq!(clean_name, theme::FG_SOFT());
+        assert_ne!(clean_name, theme::PALETTE_GREEN());
+
+        // A file with a status keeps its status color (not the dir-green path).
+        let (file_icon, file_name) = row_colors(false, false, Some(("M", theme::PALETTE_YELLOW())));
+        assert_eq!(file_icon, theme::PALETTE_YELLOW());
+        assert_eq!(file_name, theme::PALETTE_YELLOW());
+    }
+
+    #[test]
     fn missing_binary_sets_flag_and_does_not_panic() {
         let mut code_missing = false;
         // a program name that certainly does not exist on PATH
@@ -681,5 +729,158 @@ mod tests {
         }
         assert!(!ok);
         assert!(code_missing);
+    }
+
+    /// Painted geometry of one row's glyphs, extracted from emitted shapes.
+    struct RowGeom {
+        /// Left ink x of the name galley.
+        name_left: f32,
+        /// Right-most ink x among single-glyph shapes painted to the LEFT of the
+        /// name (chevron + icon column). `None` if no such glyph (e.g. tofu).
+        icon_right: Option<f32>,
+    }
+
+    /// Renders `build` headlessly through the SAME container stack the app uses
+    /// (Area with a transform layer + a bounded child Ui) and with the SAME
+    /// registered fonts, then extracts, for each painted name in `names`, its
+    /// row geometry. GPU-free: `Context::run` lays out and emits paint `Shape`s
+    /// without a renderer. Using the real fonts means the icon glyphs have their
+    /// true paint extents (not tofu), so overlap is measured faithfully.
+    fn row_geoms(names: &[&str], build: impl Fn(&mut egui::Ui)) -> Vec<RowGeom> {
+        use egui::epaint::Shape;
+
+        let ctx = egui::Context::default();
+        ctx.set_fonts(crate::app::configure_fonts());
+        let mut out = ctx.run(egui::RawInput::default(), |_| {});
+        for _ in 0..4 {
+            out = ctx.run(egui::RawInput::default(), |ctx| {
+                egui::Area::new(egui::Id::new("test_panel"))
+                    .fixed_pos(egui::Pos2::new(100.0, 100.0))
+                    .constrain(false)
+                    .interactable(false)
+                    .show(ctx, |ui| {
+                        let t = egui::emath::TSTransform::from_translation(egui::Vec2::new(50.0, 50.0));
+                        ui.ctx().set_transform_layer(ui.layer_id(), t);
+                        let (rect, _) = ui.allocate_exact_size(egui::Vec2::new(280.0, 400.0), egui::Sense::hover());
+                        let mut child_ui = ui.new_child(egui::UiBuilder::new().max_rect(rect));
+                        egui::ScrollArea::vertical()
+                            .auto_shrink([false, false])
+                            .show(&mut child_ui, |ui| build(ui));
+                    });
+            });
+        }
+
+        names
+            .iter()
+            .map(|name| {
+                let name_left = out
+                    .shapes
+                    .iter()
+                    .find_map(|cs| match &cs.shape {
+                        Shape::Text(t) if t.galley.job.text == *name => Some(t.pos.x),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| panic!("name galley '{name}' was painted"));
+
+                let mut icon_right = f32::MIN;
+                for cs in &out.shapes {
+                    if let Shape::Text(t) = &cs.shape {
+                        let text = t.galley.job.text.as_str();
+                        let ink = t.galley.mesh_bounds.translate(t.pos.to_vec2());
+                        // single-glyph shapes (chevron, icon) painted left of the name
+                        if text.chars().count() == 1 && !names.contains(&text) && ink.max.x <= name_left + 1.0 {
+                            icon_right = icon_right.max(ink.max.x);
+                        }
+                    }
+                }
+                RowGeom {
+                    name_left,
+                    icon_right: (icon_right > f32::MIN).then_some(icon_right),
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn render_row_layout_orders_and_indents_by_depth() {
+        use horizon_core::file_tree::FileNode;
+
+        // depth 0 file and a depth-2 file via two nested expanded dirs.
+        let deep_file = FileNode {
+            name: "methods.csv".to_string(),
+            path: std::path::PathBuf::from("/tmp/a/b/methods.csv"),
+            is_dir: false,
+            children: None,
+        };
+        let dir_b = FileNode {
+            name: "bbb".to_string(),
+            path: std::path::PathBuf::from("/tmp/a/b"),
+            is_dir: true,
+            children: Some(vec![deep_file]),
+        };
+        let dir_a = FileNode {
+            name: "aaa".to_string(),
+            path: std::path::PathBuf::from("/tmp/a"),
+            is_dir: true,
+            children: Some(vec![dir_b]),
+        };
+        let top_file = FileNode {
+            name: "bootstrap".to_string(),
+            path: std::path::PathBuf::from("/tmp/bootstrap"),
+            is_dir: false,
+            children: None,
+        };
+
+        let geoms = row_geoms(&["bootstrap", "methods.csv"], |ui| {
+            render_nodes(ui, &[dir_a.clone(), top_file.clone()], 0, None, &mut None);
+        });
+        let depth0 = &geoms[0];
+        let depth2 = &geoms[1];
+
+        // No overlap: name starts at/after the icon ink at both depths.
+        if let Some(r) = depth0.icon_right {
+            assert!(
+                depth0.name_left >= r,
+                "depth-0 name must start right of icon: name={} icon={r}",
+                depth0.name_left
+            );
+        }
+        if let Some(r) = depth2.icon_right {
+            assert!(
+                depth2.name_left >= r,
+                "depth-2 name must start right of icon: name={} icon={r}",
+                depth2.name_left
+            );
+        }
+        // Real per-depth indentation: depth-2 name is further right than depth-0
+        // by about 2 * INDENT_PER_DEPTH (tree is not flat).
+        let delta = depth2.name_left - depth0.name_left;
+        assert!(
+            delta >= 2.0 * INDENT_PER_DEPTH - 1.0,
+            "depth-2 row must indent past depth-0 by ~2 levels: delta={delta}"
+        );
+    }
+
+    #[test]
+    fn render_changed_row_name_does_not_overlap_icon() {
+        use horizon_core::file_tree::ChangedTreeNode;
+
+        let node = ChangedTreeNode {
+            name: "bootstrap".to_string(),
+            abs_path: std::path::PathBuf::from("/tmp/bootstrap"),
+            is_dir: false,
+            status: Some(FileStatus::Modified),
+            children: Vec::new(),
+        };
+        let geoms = row_geoms(&["bootstrap"], |ui| {
+            render_changed_row(ui, &node, 2, false);
+        });
+        if let Some(r) = geoms[0].icon_right {
+            assert!(
+                geoms[0].name_left >= r,
+                "changed-row name must start right of the icon ink: name_left={} icon_right={r}",
+                geoms[0].name_left
+            );
+        }
     }
 }

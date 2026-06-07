@@ -73,13 +73,30 @@ with every file listed.
 6. Expansion state is remembered while the filter stays ON; toggling the
    filter OFF and ON again resets everything to collapsed.
 7. Normal tree (filter OFF) behavior unchanged except the icon fix.
-8. No folder count badges; no status propagation in the normal tree.
+8. No folder count badges.
 9. `cargo test --workspace` green, `cargo clippy` no new warnings,
    `cargo fmt --all -- --check` clean.
 10. New release binary installed at `~/.local/bin/horizon` and validated by
     actually running the app with the filter on (autonomous screenshot
     evidence; if capture is impossible, report it and ask for manual
     validation — do not claim validated without evidence).
+
+### Acceptance Criteria — added 2026-06-07 (user request, VSCode-style pass)
+
+11. **VSCode-style row layout**, rendered fully manually via `ui.painter()` (no
+    inner `ui.label`/scope per row): `[indent][chevron col][icon col 18px]
+    [gap][name ellipsis-truncated before the letter reserve][status letter
+    right]`. Chevron `\u{25b6}`/`\u{25bc}` for dirs (`theme::FG_DIM()`, centered),
+    constant chevron-column width for files so icon+name align across rows.
+12. **Real per-depth indentation** (`INDENT_PER_DEPTH` = 16.0) visibly nests
+    children in BOTH the normal tree and the filter tree — the tree is not flat.
+13. **Normal-tree changed-folder green propagation**: a folder that CONTAINS any
+    uncommitted change (at any depth) renders its icon+name in
+    `theme::PALETTE_GREEN()` (`dir_contains_changes` in core). Clean folders keep
+    `ACCENT` icon + `FG_SOFT` name; files keep status colors/letters. (Supersedes
+    the original AC 8 clause "no status propagation in the normal tree".)
+14. Component-wise prefix matching for propagation: `src` must not light up for a
+    change under `src2` and vice-versa (proven by `dir_contains_changes` tests).
 
 ## Tasks
 
@@ -120,19 +137,81 @@ with every file listed.
   `set_show_only_changes` + `state.changed_expanded` + Expand/CollapseChanged match
   arms; `paint_icon_column` uses `Sense::empty()` so the icon strip never steals
   the row hover tint — Task 1 QA polish)
+- `crates/horizon-core/src/file_tree.rs` (corrective+extension pass 2026-06-07:
+  `dir_contains_changes(status, abs_dir)` — component-wise strict-ancestor test
+  for normal-tree green propagation; 6 new tests incl. the `src` vs `src2`
+  prefix-trap and repo-root cases)
+- `crates/horizon-ui/src/file_tree_widget.rs` (corrective+extension pass
+  2026-06-07: replaced the per-row `scope_builder`/`ui.label`/`paint_truncated_
+  name`/`paint_icon_column`/`paint_status_letter` machinery with a single
+  fully-manual painter pass — `RowVisual` struct + `paint_tree_row`; added
+  `row_colors` helper for normal-tree changed-folder green propagation; VSCode
+  chevron column (`CHEVRON_COL_WIDTH`/`CHEVRON_FONT_SIZE`), `ICON_NAME_GAP`,
+  `INDENT_PER_DEPTH` 14→16; ellipsis truncation via `LayoutJob` +
+  `TextWrapping::truncate_at_width`; `render_row`/`render_changed_row` now build a
+  `RowVisual` and delegate. New regression tests:
+  `render_row_layout_orders_and_indents_by_depth` (depth 0 + depth 2, real fonts,
+  app container stack: asserts icon < name and ≥2-level indent delta),
+  `dir_with_changes_inside_renders_green_in_normal_tree`; adapted
+  `render_changed_row_name_does_not_overlap_icon` to depth 2)
+- `crates/horizon-ui/src/app/mod.rs` (corrective pass: `configure_fonts` made
+  `pub(crate)` so the headless regression test renders with the real Nerd Font
+  fallback stack, measuring true glyph paint extents)
 
 ### Notes
-- **Task 1 diagnosis (root cause, verified):** the Symbols Nerd Font IS
-  correctly registered — `crates/horizon-ui/src/app/mod.rs:502-518` inserts
-  `symbols-nerd-font` (`assets/fonts/SymbolsNerdFont-Regular.ttf`) at index 3
-  of both proportional and monospace fallback stacks, ahead of egui's bundled
-  defaults (unit tests at mod.rs:625-649 assert this). So the overlap is the
-  glyph-metrics case: the PUA glyph's painted extent is wider than its font
-  advance, so `ui.label(icon)` allocates too little width and the filename
-  label starts under the glyph. Fix: icons are now painted centered inside a
-  fixed-width 18px column (`paint_icon_column`, clipped to the column rect),
-  removing any dependence on glyph advance metrics. Applied in both
-  `render_row` (normal tree) and `render_changed_row` (filter view).
+
+- **Corrective + extension pass (2026-06-07, user re-test still showed
+  overlap/flat tree):** re-ran systematic debugging against the CURRENT branch
+  build and could NOT reproduce the reported overlap or flat-tree symptoms — the
+  fixed-icon-column code from commit `135c910` lays rows out correctly. Then
+  rewrote row rendering to be fully manual painter-based (robustness mandate) and
+  added the VSCode-style chevrons, per-depth indent bump, and normal-tree
+  changed-folder green propagation. See "Task 1 diagnosis (RE-OPENED)" below.
+
+- **Task 1 diagnosis (RE-OPENED 2026-06-07 — PROVEN, with numbers):**
+  The reported "icon paints ~30px into the name" and "tree looks flat" symptoms
+  do **not reproduce** against the current committed code. Three independent
+  measurements:
+  1. *Headless harness with the REAL registered fonts* (`configure_fonts()`),
+     mirroring the app stack (Area `interactable(false)` + `set_transform_layer`
+     + child Ui + ScrollArea), at ppp 1.0 / 1.5 / 2.0, depths 0/1/2: every row's
+     name galley paints to the RIGHT of its icon, and indentation increases with
+     depth. e.g. depth-0 `.claude`: chevron ink `[158,165]`, icon ink
+     `[180,192]`, name `.claude` ink starts at `205` — disjoint and ordered.
+     depth-1 name at +14, depth-2 at +another step. No overlap, not flat.
+  2. *Live instrumented run* of the actual app (`eprintln` of `row_rect.min.x`,
+     post-each-child `cursor().min.x`, and the name `Label` `Response.rect`):
+     for depth-0 `.claude` (scope min.x = 13465): after indent(8) → 13473;
+     after chevron+4 → 13491.4; after icon col(18)+2 → 13517.4; the name label
+     `Response.rect` STARTS at **13519.406** — i.e. right of the icon, no
+     overlap. The cursor was NOT stuck at `BASE_INDENT`; it advanced through
+     indent+caret+icon exactly as designed.
+  3. The pre-existing geometry regression tests (`render_row_name_does_not_
+     overlap_icon`) were already GREEN.
+  **Conclusion:** the label-based layout from `135c910` is correct by every
+  measurement available headlessly and in the live app. The screenshots the
+  user saw most plausibly predate that fix (or came from a stale binary); the
+  installed `~/.local/bin/horizon` from 17:00 post-dates commit `135c910`
+  (16:41), so the symptom is not reproducible against shipped code.
+- **Why the first fix (fixed icon column) was nonetheless not the end of it:**
+  it was correct but FRAGILE — three nested `scope_builder`s per row plus a
+  mid-scope `ui.cursor()` capture in `paint_truncated_name` to anchor the name.
+  That works, but any future change to the inner layout (or an egui placer
+  change) could regress it, and it could not satisfy the new VSCode requirements
+  (constant chevron column, green propagation) cleanly. **Decision (evidence +
+  robustness first):** replace the per-row label/scope machinery with a single
+  fully-manual painter pass (`paint_tree_row` + `RowVisual`) that places chevron,
+  icon and an ellipsis-truncated name galley (`LayoutJob` +
+  `TextWrapping::truncate_at_width`) at explicit x offsets. The egui mechanism
+  this sidesteps: a `Label` inside a `Layout::left_to_right` scope is positioned
+  by the `Placer` cursor; the previous code relied on capturing that cursor
+  correctly across three scopes — manual painting removes that dependency
+  entirely (only `ui.painter()` absolute paints, which were always reliable).
+- **Original Task 1 note (kept for history):** the Symbols Nerd Font IS
+  correctly registered — `crates/horizon-ui/src/app/mod.rs` inserts
+  `symbols-nerd-font` at index 3 of both proportional and monospace fallback
+  stacks. The fixed-width 18px icon column (`paint_icon_column`, now folded into
+  `paint_tree_row`) removed any dependence on glyph advance metrics.
 - Task 1 gates: `cargo test -p horizon-ui` 315 passed / 0 failed;
   `cargo clippy -p horizon-ui --all-targets` clean;
   `cargo fmt --all -- --check` clean.
