@@ -29,6 +29,11 @@ const BASE_INDENT: f32 = 8.0;
 const LETTER_RESERVE: f32 = 26.0;
 /// Right-edge padding for rows without a status letter.
 const PLAIN_RESERVE: f32 = 10.0;
+/// Fixed width of the icon column. Icons are painted centered inside this
+/// column (clipped to it) instead of flowing as a label, so glyphs with
+/// paint extents wider than their font advance (Nerd Font / emoji fallback)
+/// can never bleed over the filename that follows.
+const ICON_COL_WIDTH: f32 = 18.0;
 
 /// Returns a Nerd Font glyph (Private Use Area) for a path. `is_dir` selects a
 /// folder glyph. Unknown extensions fall back to a generic file glyph.
@@ -340,12 +345,12 @@ fn render_row(ui: &mut egui::Ui, node: &FileNode, depth: usize, status: Option<&
                 ui.add_space(11.0);
             }
 
-            ui.label(
-                RichText::new(file_type_icon(&node.path, node.is_dir))
-                    .font(FontId::proportional(ICON_FONT_SIZE))
-                    .color(if node.is_dir { theme::ACCENT() } else { name_color }),
+            paint_icon_column(
+                ui,
+                file_type_icon(&node.path, node.is_dir),
+                if node.is_dir { theme::ACCENT() } else { name_color },
             );
-            ui.add_space(6.0);
+            ui.add_space(2.0);
 
             // Cap the label at the letter zone so long names truncate with
             // `…` instead of overflowing the panel / running under the letter.
@@ -438,12 +443,8 @@ fn render_changed_row(ui: &mut egui::Ui, node: &ChangedTreeNode, depth: usize) -
             } else {
                 (file_type_icon(&node.abs_path, false), name_color, name_color)
             };
-            ui.label(
-                RichText::new(icon)
-                    .font(FontId::proportional(ICON_FONT_SIZE))
-                    .color(icon_color),
-            );
-            ui.add_space(6.0);
+            paint_icon_column(ui, icon, icon_color);
+            ui.add_space(2.0);
 
             let reserve = if decoration.is_some() {
                 LETTER_RESERVE
@@ -477,6 +478,23 @@ fn paint_status_letter(ui: &egui::Ui, row_rect: Rect, letter: &str, color: Color
         egui::Align2::RIGHT_CENTER,
         letter,
         FontId::monospace(11.0),
+        color,
+    );
+}
+
+/// Allocates a fixed-width icon column and paints `icon` centered in it,
+/// clipped to the column rect. Replaces `ui.label(icon)` in row rendering:
+/// a label's width follows the glyph's font advance, which for Nerd Font /
+/// emoji-fallback glyphs is narrower than the painted outline — the next
+/// widget then starts under the glyph. A fixed column sidesteps the metrics
+/// entirely.
+fn paint_icon_column(ui: &mut egui::Ui, icon: &str, color: Color32) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ICON_COL_WIDTH, ROW_HEIGHT), egui::Sense::hover());
+    ui.painter().with_clip_rect(rect).text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        icon,
+        FontId::proportional(ICON_FONT_SIZE),
         color,
     );
 }
