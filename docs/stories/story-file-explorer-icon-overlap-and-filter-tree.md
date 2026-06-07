@@ -88,7 +88,7 @@ with every file listed.
       confirm root cause — do NOT guess), then fix both `render_row` and
       `render_changed_row` by reserving fixed icon width. Extract a testable
       geometry helper if needed; TDD where testable without GPU.
-- [ ] Task 2 (core): expansion state for the changed-file filter tree in
+- [x] Task 2 (core): expansion state for the changed-file filter tree in
       `file_tree.rs` — default collapsed at all depths, expand/collapse
       mutations following the `TreeAction` pattern, reset when
       `show_only_changes` is re-enabled. TDD: default-collapsed, expand,
@@ -107,6 +107,10 @@ with every file listed.
 ### File List
 - `crates/horizon-ui/src/file_tree_widget.rs` (Task 1: ICON_COL_WIDTH constant,
   `paint_icon_column` helper, used in `render_row` and `render_changed_row`)
+- `crates/horizon-core/src/file_tree.rs` (Task 2: `FileTreeState.changed_expanded`
+  `HashSet<PathBuf>` + `set_show_only_changes` / `is_changed_expanded` /
+  `expand_changed` / `collapse_changed`; collapsed-by-default filter-tree
+  expansion state, cleared whenever the filter toggle changes value)
 
 ### Notes
 - **Task 1 diagnosis (root cause, verified):** the Symbols Nerd Font IS
@@ -122,6 +126,19 @@ with every file listed.
   `render_row` (normal tree) and `render_changed_row` (filter view).
 - Task 1 gates: `cargo test -p horizon-ui` 315 passed / 0 failed;
   `cargo clippy -p horizon-ui --all-targets` clean;
+  `cargo fmt --all -- --check` clean.
+- **Task 2 (core expansion state, TDD):** added `changed_expanded:
+  HashSet<PathBuf>` to `FileTreeState` (Clone/Debug compatible) keyed by
+  `ChangedTreeNode.abs_path` (works with compacted nodes). Empty = fully
+  collapsed (default). `set_show_only_changes(on)` clears the set only when the
+  value actually changes (re-asserting the same value every frame is a no-op,
+  per AC 6); `is_changed_expanded` / `expand_changed` / `collapse_changed`
+  drive per-dir state. Only additive public API. RED evidence: `cargo test -p
+  horizon-core file_tree` gave E0599 "no method named is_changed_expanded /
+  expand_changed / collapse_changed / set_show_only_changes". GREEN: 14
+  file_tree tests pass (3 new + 11 pre-existing grouping/compaction
+  regressions, AC 5), full `cargo test -p horizon-core` 330 passed / 0 failed.
+- Task 2 gates: `cargo clippy -p horizon-core --all-targets` clean;
   `cargo fmt --all -- --check` clean.
 - Do not touch sidebar, panels, terminal_widget.
 - No public horizon-core contract changes unless strictly needed.

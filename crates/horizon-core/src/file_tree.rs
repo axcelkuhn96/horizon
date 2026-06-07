@@ -1,5 +1,6 @@
 //! Lazy, gitignore-aware project file tree backing the `FileExplorer` panel.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -211,6 +212,10 @@ pub struct FileTreeState {
     /// When true, the view filters to a flat list of only the uncommitted
     /// (pending) files from `git_status` instead of the full project tree.
     pub show_only_changes: bool,
+    /// Directories of the filtered (uncommitted) tree the user expanded,
+    /// keyed by absolute path. Empty = fully collapsed (the default).
+    /// Cleared whenever the filter toggle changes value.
+    pub changed_expanded: HashSet<PathBuf>,
 }
 
 impl FileTreeState {
@@ -223,6 +228,7 @@ impl FileTreeState {
             git_status: None,
             code_missing: false,
             show_only_changes: false,
+            changed_expanded: HashSet::new(),
         }
     }
 
@@ -241,6 +247,29 @@ impl FileTreeState {
 
     pub fn set_git_status(&mut self, status: Arc<GitStatus>) {
         self.git_status = Some(status);
+    }
+
+    /// Flip the uncommitted-files filter. Any change of value resets the
+    /// filtered tree's expansion so re-enabling always starts collapsed.
+    /// Re-asserting the current value (every frame) is a no-op.
+    pub fn set_show_only_changes(&mut self, on: bool) {
+        if self.show_only_changes != on {
+            self.show_only_changes = on;
+            self.changed_expanded.clear();
+        }
+    }
+
+    #[must_use]
+    pub fn is_changed_expanded(&self, path: &Path) -> bool {
+        self.changed_expanded.contains(path)
+    }
+
+    pub fn expand_changed(&mut self, path: PathBuf) {
+        self.changed_expanded.insert(path);
+    }
+
+    pub fn collapse_changed(&mut self, path: &Path) {
+        self.changed_expanded.remove(path);
     }
 }
 
@@ -475,5 +504,44 @@ mod tests {
             timestamp: Instant::now(),
         };
         assert!(changed_file_rows(&status).is_empty());
+    }
+
+    #[test]
+    fn changed_expansion_starts_fully_collapsed() {
+        let state = FileTreeState::new(std::path::PathBuf::from("/repo"));
+        assert!(!state.is_changed_expanded(std::path::Path::new("/repo/src")));
+    }
+
+    #[test]
+    fn expand_and_collapse_changed_dirs_roundtrip() {
+        let mut state = FileTreeState::new(std::path::PathBuf::from("/repo"));
+        let dir = std::path::PathBuf::from("/repo/src/app");
+
+        state.expand_changed(dir.clone());
+        assert!(state.is_changed_expanded(&dir));
+        // unrelated paths stay collapsed
+        assert!(!state.is_changed_expanded(std::path::Path::new("/repo/docs")));
+
+        state.collapse_changed(&dir);
+        assert!(!state.is_changed_expanded(&dir));
+    }
+
+    #[test]
+    fn toggling_filter_resets_changed_expansion() {
+        let mut state = FileTreeState::new(std::path::PathBuf::from("/repo"));
+        let dir = std::path::PathBuf::from("/repo/src");
+
+        state.set_show_only_changes(true);
+        state.expand_changed(dir.clone());
+        assert!(state.is_changed_expanded(&dir));
+
+        // re-asserting the same value must NOT clear (happens every frame)
+        state.set_show_only_changes(true);
+        assert!(state.is_changed_expanded(&dir));
+
+        // turning the filter off clears; turning it back on starts collapsed
+        state.set_show_only_changes(false);
+        state.set_show_only_changes(true);
+        assert!(!state.is_changed_expanded(&dir));
     }
 }
