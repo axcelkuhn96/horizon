@@ -81,6 +81,38 @@ pub fn status_for_path(status: &GitStatus, abs_path: &Path) -> Option<FileStatus
     status.changes.iter().find(|c| c.path == rel).map(|c| c.status)
 }
 
+/// Returns `true` when any pending change in `status` lives strictly inside
+/// `abs_dir` (at any depth). Used to tint a folder green in the normal tree when
+/// it contains uncommitted work, like `VSCode`'s changed-folder propagation.
+///
+/// Matching is **component-wise**, not string-prefix: a change under `src/` does
+/// not count for a directory named `src2` (and vice versa). `abs_dir` equal to
+/// the repo root is "inside" for every change, so the root lights up whenever
+/// any change exists.
+#[must_use]
+pub fn dir_contains_changes(status: &GitStatus, abs_dir: &Path) -> bool {
+    // The directory must itself be within (or equal to) the repo root, else no
+    // repo-relative change can be inside it.
+    let Ok(dir_rel) = abs_dir.strip_prefix(&status.repo_root) else {
+        return false;
+    };
+    let dir_components: Vec<_> = dir_rel.components().collect();
+    status.changes.iter().any(|change| {
+        let change_path = Path::new(&change.path);
+        let mut change_components = change_path.components();
+        // Every component of the directory must be a leading component of the
+        // change path; the change must then have at least one more component
+        // (the file itself) so the directory is a strict ancestor.
+        for dir_comp in &dir_components {
+            match change_components.next() {
+                Some(c) if c == *dir_comp => {}
+                _ => return false,
+            }
+        }
+        change_components.next().is_some()
+    })
+}
+
 /// One row of the "only uncommitted files" filtered view: an absolute path,
 /// its git status, and the repo-relative display path.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -504,6 +536,50 @@ mod tests {
             timestamp: Instant::now(),
         };
         assert!(changed_file_rows(&status).is_empty());
+    }
+
+    #[test]
+    fn dir_contains_changes_true_for_direct_and_nested_children() {
+        let status = status_with(&[("src/app/main.rs", FileStatus::Modified)]);
+        // direct ancestor
+        assert!(dir_contains_changes(&status, Path::new("/repo/src/app")));
+        // grand-ancestor (nested levels up)
+        assert!(dir_contains_changes(&status, Path::new("/repo/src")));
+    }
+
+    #[test]
+    fn dir_contains_changes_false_for_sibling_dir() {
+        let status = status_with(&[("src/main.rs", FileStatus::Modified)]);
+        assert!(!dir_contains_changes(&status, Path::new("/repo/docs")));
+    }
+
+    #[test]
+    fn dir_contains_changes_rejects_string_prefix_trap() {
+        // "src2" must NOT match a change under "src" (component-wise, not string prefix).
+        let status = status_with(&[("src/main.rs", FileStatus::Modified)]);
+        assert!(!dir_contains_changes(&status, Path::new("/repo/src2")));
+        // and the reverse: a change in src2 must not light up src.
+        let status2 = status_with(&[("src2/main.rs", FileStatus::Modified)]);
+        assert!(!dir_contains_changes(&status2, Path::new("/repo/src")));
+    }
+
+    #[test]
+    fn dir_contains_changes_true_for_repo_root_when_any_change() {
+        let status = status_with(&[("a/b.rs", FileStatus::Modified)]);
+        assert!(dir_contains_changes(&status, Path::new("/repo")));
+    }
+
+    #[test]
+    fn dir_contains_changes_false_when_no_changes() {
+        let status = status_with(&[]);
+        assert!(!dir_contains_changes(&status, Path::new("/repo")));
+        assert!(!dir_contains_changes(&status, Path::new("/repo/src")));
+    }
+
+    #[test]
+    fn dir_contains_changes_false_for_dir_outside_repo() {
+        let status = status_with(&[("src/main.rs", FileStatus::Modified)]);
+        assert!(!dir_contains_changes(&status, Path::new("/other/src")));
     }
 
     #[test]
