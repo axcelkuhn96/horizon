@@ -5,7 +5,8 @@
 //! project file tree with live git-status decorations. Mirrors the structure of
 //! `git_changes_widget::GitChangesView` (`new(panel)` + `show(ui, is_focused)`).
 
-use std::path::Path;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use egui::{Align, Color32, CornerRadius, FontId, Layout, Rect, RichText, ScrollArea, Vec2};
@@ -129,6 +130,10 @@ enum TreeAction {
     Collapse(std::path::PathBuf),
     /// Open the file at this path in VS Code.
     Open(std::path::PathBuf),
+    /// Expand a directory of the filtered (uncommitted) tree.
+    ExpandChanged(std::path::PathBuf),
+    /// Collapse a directory of the filtered (uncommitted) tree.
+    CollapseChanged(std::path::PathBuf),
 }
 
 impl<'a> FileExplorerView<'a> {
@@ -155,7 +160,7 @@ impl<'a> FileExplorerView<'a> {
         // flips it in place and we persist it back into `state` afterwards.
         let mut show_only = state.show_only_changes;
         render_header(ui, state, &mut refresh, &mut show_only);
-        state.show_only_changes = show_only;
+        state.set_show_only_changes(show_only);
 
         // Clone the status Arc out before the recursive render so the immutable
         // borrow of `state.git_status` does not conflict with the mutations we
@@ -176,7 +181,7 @@ impl<'a> FileExplorerView<'a> {
             .show(ui, |ui| {
                 ui.add_space(2.0);
                 if show_only {
-                    render_changes_only(ui, status.as_deref(), &mut action);
+                    render_changes_only(ui, status.as_deref(), &state.changed_expanded, &mut action);
                 } else {
                     render_nodes(ui, &state.roots, 0, status.as_deref(), &mut action);
                 }
@@ -202,6 +207,8 @@ impl<'a> FileExplorerView<'a> {
             Some(TreeAction::Expand(path)) => expand_node(&mut state.roots, &path),
             Some(TreeAction::Collapse(path)) => collapse_node(&mut state.roots, &path),
             Some(TreeAction::Open(path)) => open_in_vscode(&path, &mut state.code_missing),
+            Some(TreeAction::ExpandChanged(path)) => state.expand_changed(path),
+            Some(TreeAction::CollapseChanged(path)) => state.collapse_changed(&path),
             None => {}
         }
 
@@ -385,9 +392,15 @@ fn render_row(ui: &mut egui::Ui, node: &FileNode, depth: usize, status: Option<&
 /// Renders the grouped "only uncommitted files" tree. With no git snapshot,
 /// shows a dim "Sem reposit\u{f3}rio git" message; with an empty change set,
 /// shows "Nada para commitar". Changed files are nested under their parent
-/// folders (always expanded, single-child chains compacted VSCode-style).
-/// Double-clicking a file row collects a [`TreeAction::Open`].
-fn render_changes_only(ui: &mut egui::Ui, status: Option<&GitStatus>, action: &mut Option<TreeAction>) {
+/// folders (collapsed by default, single-child chains compacted VSCode-style);
+/// folders render green with a caret and expand on click. Double-clicking a
+/// file row collects a [`TreeAction::Open`].
+fn render_changes_only(
+    ui: &mut egui::Ui,
+    status: Option<&GitStatus>,
+    expanded: &HashSet<PathBuf>,
+    action: &mut Option<TreeAction>,
+) {
     let Some(status) = status else {
         render_centered_dim(ui, "Sem reposit\u{f3}rio git");
         return;
@@ -399,24 +412,52 @@ fn render_changes_only(ui: &mut egui::Ui, status: Option<&GitStatus>, action: &m
         return;
     }
 
-    render_changed_nodes(ui, &tree, 0, action);
+    render_changed_nodes(ui, &tree, 0, expanded, action);
 }
 
-fn render_changed_nodes(ui: &mut egui::Ui, nodes: &[ChangedTreeNode], depth: usize, action: &mut Option<TreeAction>) {
+fn render_changed_nodes(
+    ui: &mut egui::Ui,
+    nodes: &[ChangedTreeNode],
+    depth: usize,
+    expanded: &HashSet<PathBuf>,
+    action: &mut Option<TreeAction>,
+) {
     for node in nodes {
-        if render_changed_row(ui, node, depth) && action.is_none() {
+        if node.is_dir {
+            let is_open = expanded.contains(&node.abs_path);
+            if render_changed_row(ui, node, depth, is_open) && action.is_none() {
+                *action = Some(if is_open {
+                    TreeAction::CollapseChanged(node.abs_path.clone())
+                } else {
+                    TreeAction::ExpandChanged(node.abs_path.clone())
+                });
+            }
+            if is_open {
+                render_changed_nodes(ui, &node.children, depth + 1, expanded, action);
+            }
+        } else if render_changed_row(ui, node, depth, false) && action.is_none() {
             *action = Some(TreeAction::Open(node.abs_path.clone()));
         }
-        render_changed_nodes(ui, &node.children, depth + 1, action);
     }
 }
 
-/// Renders one row of the grouped uncommitted-files tree: folders show an
-/// open-folder icon with a neutral name; files show their type icon, the name
-/// colored by status (truncated with `…` when too wide), and a fixed
-/// right-aligned status letter. Returns `true` when a file row is
-/// double-clicked (open in editor).
-fn render_changed_row(ui: &mut egui::Ui, node: &ChangedTreeNode, depth: usize) -> bool {
+/// Caret and folder glyph for a directory row of the filtered tree, by
+/// expansion state. Carets mirror the normal tree (`\u{25bc}`/`\u{25b6}`).
+fn changed_dir_visuals(is_open: bool) -> (&'static str, &'static str) {
+    if is_open {
+        ("\u{25bc}", "\u{f07c}") // nf-fa-folder_open
+    } else {
+        ("\u{25b6}", "\u{f07b}") // nf-fa-folder
+    }
+}
+
+/// Renders one row of the grouped uncommitted-files tree: directories show a
+/// caret plus a green folder icon and green name (green marks "contains
+/// uncommitted changes"); files show their type icon, the name colored by
+/// status (truncated with `…` when too wide), and a fixed right-aligned
+/// status letter. Returns `true` when the row should act — click for a
+/// directory (toggle), double-click for a file (open in editor).
+fn render_changed_row(ui: &mut egui::Ui, node: &ChangedTreeNode, depth: usize, is_open: bool) -> bool {
     let row_rect = Rect::from_min_size(ui.cursor().min, Vec2::new(ui.available_width(), ROW_HEIGHT));
     let response = ui.allocate_rect(row_rect, egui::Sense::click());
 
@@ -439,8 +480,13 @@ fn render_changed_row(ui: &mut egui::Ui, node: &ChangedTreeNode, depth: usize) -
             ui.add_space(indent);
 
             let (icon, icon_color, text_color) = if node.is_dir {
-                ("\u{f07c}", theme::ACCENT(), theme::FG_SOFT()) // nf-fa-folder_open
+                let (caret, folder_icon) = changed_dir_visuals(is_open);
+                ui.label(RichText::new(caret).size(7.0).color(theme::FG_DIM()));
+                ui.add_space(4.0);
+                (folder_icon, theme::PALETTE_GREEN(), theme::PALETTE_GREEN())
             } else {
+                // Align files with folders that have a caret in front.
+                ui.add_space(11.0);
                 (file_type_icon(&node.abs_path, false), name_color, name_color)
             };
             paint_icon_column(ui, icon, icon_color);
@@ -467,7 +513,11 @@ fn render_changed_row(ui: &mut egui::Ui, node: &ChangedTreeNode, depth: usize) -
         paint_status_letter(ui, row_rect, letter, color);
     }
 
-    !node.is_dir && response.double_clicked()
+    if node.is_dir {
+        response.clicked()
+    } else {
+        response.double_clicked()
+    }
 }
 
 /// Paints the status letter right-aligned inside the row, independent of the
@@ -489,7 +539,7 @@ fn paint_status_letter(ui: &egui::Ui, row_rect: Rect, letter: &str, color: Color
 /// widget then starts under the glyph. A fixed column sidesteps the metrics
 /// entirely.
 fn paint_icon_column(ui: &mut egui::Ui, icon: &str, color: Color32) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(ICON_COL_WIDTH, ROW_HEIGHT), egui::Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ICON_COL_WIDTH, ROW_HEIGHT), egui::Sense::empty());
     ui.painter().with_clip_rect(rect).text(
         rect.center(),
         egui::Align2::CENTER_CENTER,
@@ -606,6 +656,19 @@ mod tests {
             status_decoration(Some(FileStatus::Deleted)),
             Some(("D", theme::PALETTE_RED()))
         );
+    }
+
+    #[test]
+    fn changed_dir_visuals_follow_expansion_state() {
+        let (closed_caret, closed_icon) = changed_dir_visuals(false);
+        let (open_caret, open_icon) = changed_dir_visuals(true);
+        // carets match the normal tree's glyphs
+        assert_eq!(closed_caret, "\u{25b6}");
+        assert_eq!(open_caret, "\u{25bc}");
+        // closed vs open folder icons differ
+        assert_ne!(closed_icon, open_icon);
+        assert_eq!(closed_icon, "\u{f07b}"); // nf-fa-folder
+        assert_eq!(open_icon, "\u{f07c}"); // nf-fa-folder_open
     }
 
     #[test]

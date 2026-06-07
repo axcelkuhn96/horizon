@@ -93,7 +93,7 @@ with every file listed.
       mutations following the `TreeAction` pattern, reset when
       `show_only_changes` is re-enabled. TDD: default-collapsed, expand,
       collapse, reset-on-retoggle, compaction regression.
-- [ ] Task 3 (UI, domínio: frontend-rust-egui — N/A web rulebook): filter view
+- [x] Task 3 (UI, domínio: frontend-rust-egui — N/A web rulebook): filter view
       renders as a collapsible tree — carets like the normal tree, folders
       icon+name in theme green, children only when expanded, files keep
       status letters. Collect actions immutably, apply after render.
@@ -111,6 +111,15 @@ with every file listed.
   `HashSet<PathBuf>` + `set_show_only_changes` / `is_changed_expanded` /
   `expand_changed` / `collapse_changed`; collapsed-by-default filter-tree
   expansion state, cleared whenever the filter toggle changes value)
+- `crates/horizon-ui/src/file_tree_widget.rs` (Task 3: `TreeAction::ExpandChanged`
+  / `CollapseChanged` variants; `changed_dir_visuals` caret/folder-glyph helper;
+  collapsible green filter tree — `render_changes_only` / `render_changed_nodes` /
+  `render_changed_row` take expansion state, render dirs collapsed-by-default with
+  a normal-tree caret and green icon+name, recurse only when expanded, dirs toggle
+  on single click and files open on double click; `show()` wired via
+  `set_show_only_changes` + `state.changed_expanded` + Expand/CollapseChanged match
+  arms; `paint_icon_column` uses `Sense::empty()` so the icon strip never steals
+  the row hover tint — Task 1 QA polish)
 
 ### Notes
 - **Task 1 diagnosis (root cause, verified):** the Symbols Nerd Font IS
@@ -140,6 +149,20 @@ with every file listed.
   regressions, AC 5), full `cargo test -p horizon-core` 330 passed / 0 failed.
 - Task 2 gates: `cargo clippy -p horizon-core --all-targets` clean;
   `cargo fmt --all -- --check` clean.
+- **Task 3 (UI collapsible green filter tree, TDD):** RED — `cargo test -p
+  horizon-ui changed_dir_visuals` gave E0425 "cannot find function
+  `changed_dir_visuals` in this scope" (x2). GREEN — new test passes; the filter
+  view now renders folders COLLAPSED by default at every depth with a normal-tree
+  caret (`\u{25b6}`/`\u{25bc}`) and a green folder icon+name (`theme::PALETTE_GREEN`,
+  the U/A status green), children render only when expanded (single click toggles
+  via Expand/CollapseChanged actions applied after render), files unchanged
+  (status letter/color, double-click opens). `show()` now goes through
+  `set_show_only_changes` (AC 6 reset guard) instead of the direct field write.
+  Normal tree (`render_nodes`/`render_row`) untouched; green confined to the
+  filter view.
+- Task 3 gates: `cargo test -p horizon-ui -p horizon-core` 316 (horizon-ui, +1
+  new) / 330 (horizon-core) passed, 0 failed; `cargo clippy --workspace
+  --all-targets` clean (no warnings); `cargo fmt --all -- --check` clean.
 - Do not touch sidebar, panels, terminal_widget.
 - No public horizon-core contract changes unless strictly needed.
 - No new dependencies.
