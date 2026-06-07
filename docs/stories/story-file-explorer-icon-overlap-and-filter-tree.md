@@ -1,6 +1,6 @@
 # Story: File Explorer — fix icon/text overlap and make git filter a collapsible green tree
 
-**Status:** Draft (awaiting implementation approval)
+**Status:** Done (user-validated visually 2026-06-07; shipped in v0.2.8)
 **Epic:** v1 UX polish
 **Branch:** fix/file-explorer-icons-filter-tree
 **Created:** 2026-06-07
@@ -114,10 +114,14 @@ with every file listed.
       renders as a collapsible tree — carets like the normal tree, folders
       icon+name in theme green, children only when expanded, files keep
       status letters. Collect actions immutably, apply after render.
-- [ ] Task 4 (delivery): full gates (test/clippy/fmt) → release build →
+- [x] Task 4 (delivery): full gates (test/clippy/fmt) → release build →
       install `~/.local/bin/horizon` → open Horizon on a repo with
       uncommitted changes → verify AC 1-4, 6 visually with screenshots →
       conventional commit(s) → push to `fork`.
+      Validation: corrective pass screenshot evidence (chevrons, green
+      folders, no overlap) + USER visual confirmation on 2026-06-07
+      ("agora sim … ficou certo o ícone"). Delivered as merge to main +
+      v0.2.8 release.
 
 ## Dev Agent Record
 
