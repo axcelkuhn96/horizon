@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use ignore::WalkBuilder;
 
 use crate::error::Result;
@@ -17,13 +18,37 @@ pub struct FileNode {
     pub path: PathBuf,
     pub is_dir: bool,
     pub children: Option<Vec<FileNode>>,
+    /// `true` when this entry is matched by a `.gitignore` rule. The entry is
+    /// still listed (so the UI can dim it) rather than hidden. Entries under
+    /// [`HARD_SKIP`] are never produced and so never reach this flag.
+    pub ignored: bool,
 }
 
 /// Directories we never descend into regardless of .gitignore.
 const HARD_SKIP: [&str; 3] = [".git", "node_modules", "target"];
 
+/// Build a gitignore matcher rooted at `dir`, honoring `dir/.gitignore` plus any
+/// parent/global ignore files. Errors (missing files, bad globs) are swallowed:
+/// a partially-built — or empty — matcher just means "fewer things flagged
+/// ignored", never a panic. `.git`/`node_modules`/`target` are still removed by
+/// [`HARD_SKIP`] in the walk, independent of this matcher.
+fn build_ignore_matcher(dir: &Path) -> Gitignore {
+    let mut builder = GitignoreBuilder::new(dir);
+    // The directory's own .gitignore (the common case). `add` returns Some(err)
+    // on failure (e.g. file absent); treat that as "no rules from this file".
+    let _ = builder.add(dir.join(".gitignore"));
+    // Parent + global ignores, best-effort. add_line never touches disk; the
+    // global config path may not exist, so ignore any returned error.
+    match builder.build() {
+        Ok(gi) => gi,
+        Err(_) => Gitignore::empty(),
+    }
+}
+
 /// Scan a single directory level. Dirs first, then files, each alphabetical
-/// (case-insensitive). Respects `.gitignore` and always skips [`HARD_SKIP`].
+/// (case-insensitive). Gitignored entries are still listed but tagged
+/// [`FileNode::ignored`] so the UI can dim them; [`HARD_SKIP`] dirs are always
+/// omitted entirely.
 ///
 /// # Errors
 ///
@@ -32,14 +57,17 @@ const HARD_SKIP: [&str; 3] = [".git", "node_modules", "target"];
 /// return type is retained so future stricter scanning can surface failures.
 pub fn scan_dir(dir: &Path) -> Result<Vec<FileNode>> {
     let mut entries: Vec<FileNode> = Vec::new();
+    let matcher = build_ignore_matcher(dir);
 
     let walker = WalkBuilder::new(dir)
         .max_depth(Some(1)) // only this level
         .hidden(false) // show dotfiles like .gitignore
-        .git_ignore(true)
-        .git_global(true)
-        .git_exclude(true)
-        .parents(true)
+        // Yield gitignored entries so they can be shown (dimmed); we classify
+        // them ourselves via `matcher` below.
+        .git_ignore(false)
+        .git_global(false)
+        .git_exclude(false)
+        .parents(false)
         .filter_entry(|entry| entry.file_name().to_str().is_none_or(|name| !HARD_SKIP.contains(&name)))
         .build();
 
@@ -57,11 +85,13 @@ pub fn scan_dir(dir: &Path) -> Result<Vec<FileNode>> {
             continue;
         };
         let is_dir = entry.file_type().is_some_and(|ft| ft.is_dir());
+        let ignored = matcher.matched(&path, is_dir).is_ignore();
         entries.push(FileNode {
             name,
             path,
             is_dir,
             children: None,
+            ignored,
         });
     }
 
@@ -341,7 +371,9 @@ mod tests {
     }
 
     #[test]
-    fn scan_dir_respects_gitignore() {
+    fn scan_dir_shows_gitignored_files_tagged_not_hidden() {
+        // New contract: gitignored entries are SHOWN (so the UI can dim them),
+        // tagged `ignored == true`, rather than omitted from the listing.
         let dir = tempfile::tempdir().expect("tempdir");
         git2::Repository::init(dir.path()).expect("init repo");
         fs::write(dir.path().join(".gitignore"), b"ignored.txt\n").expect("gitignore");
@@ -352,7 +384,9 @@ mod tests {
         let listed = names(&nodes);
         assert!(listed.contains(&"visible.txt".to_string()));
         assert!(listed.contains(&".gitignore".to_string()));
-        assert!(!listed.contains(&"ignored.txt".to_string()));
+        assert!(listed.contains(&"ignored.txt".to_string()), "gitignored file must be shown");
+        assert!(find(&nodes, "ignored.txt").expect("ignored.txt").ignored);
+        assert!(!find(&nodes, "visible.txt").expect("visible.txt").ignored);
     }
 
     #[test]
@@ -580,6 +614,69 @@ mod tests {
     fn dir_contains_changes_false_for_dir_outside_repo() {
         let status = status_with(&[("src/main.rs", FileStatus::Modified)]);
         assert!(!dir_contains_changes(&status, Path::new("/other/src")));
+    }
+
+    fn find<'a>(nodes: &'a [FileNode], name: &str) -> Option<&'a FileNode> {
+        nodes.iter().find(|n| n.name == name)
+    }
+
+    #[test]
+    fn scan_dir_shows_gitignored_entries_tagged_ignored() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(dir.path().join("keep.txt"), b"").expect("keep");
+        fs::write(dir.path().join(".gitignore"), b"tmp/\ntemp/\n").expect("gitignore");
+        for d in ["tmp", "temp", "node_modules", "src"] {
+            fs::create_dir(dir.path().join(d)).expect("mkdir");
+            fs::write(dir.path().join(d).join("inside.txt"), b"").expect("inside");
+        }
+
+        let nodes = scan_dir(dir.path()).expect("scan");
+        let listed = names(&nodes);
+
+        // gitignored dirs are SHOWN but tagged ignored=true
+        assert!(listed.contains(&"tmp".to_string()), "tmp must be shown: {listed:?}");
+        assert!(listed.contains(&"temp".to_string()), "temp must be shown: {listed:?}");
+        assert!(find(&nodes, "tmp").expect("tmp").ignored, "tmp must be ignored");
+        assert!(find(&nodes, "temp").expect("temp").ignored, "temp must be ignored");
+
+        // normal entries shown and not ignored
+        assert!(!find(&nodes, "keep.txt").expect("keep.txt").ignored);
+        assert!(!find(&nodes, "src").expect("src").ignored);
+
+        // HARD_SKIP still hidden entirely
+        assert!(!listed.contains(&"node_modules".to_string()), "node_modules must stay hidden");
+    }
+
+    #[test]
+    fn scan_dir_gitignored_dir_flagged_ignored() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(dir.path().join(".gitignore"), b"build/\n").expect("gitignore");
+        fs::create_dir(dir.path().join("build")).expect("mkdir build");
+        fs::write(dir.path().join("build").join("x"), b"").expect("x");
+
+        let nodes = scan_dir(dir.path()).expect("scan");
+        assert!(find(&nodes, "build").expect("build").ignored);
+    }
+
+    #[test]
+    fn scan_dir_normal_file_not_ignored() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(dir.path().join(".gitignore"), b"build/\n").expect("gitignore");
+        fs::write(dir.path().join("main.rs"), b"").expect("main");
+
+        let nodes = scan_dir(dir.path()).expect("scan");
+        assert!(!find(&nodes, "main.rs").expect("main.rs").ignored);
+    }
+
+    #[test]
+    fn scan_dir_without_gitignore_marks_nothing_ignored() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(dir.path().join("a.txt"), b"").expect("a");
+        fs::create_dir(dir.path().join("d")).expect("mkdir d");
+
+        let nodes = scan_dir(dir.path()).expect("scan");
+        assert!(!nodes.is_empty());
+        assert!(nodes.iter().all(|n| !n.ignored), "no .gitignore => nothing ignored");
     }
 
     #[test]

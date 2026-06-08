@@ -811,24 +811,28 @@ mod tests {
             path: std::path::PathBuf::from("/tmp/a/b/methods.csv"),
             is_dir: false,
             children: None,
+            ignored: false,
         };
         let dir_b = FileNode {
             name: "bbb".to_string(),
             path: std::path::PathBuf::from("/tmp/a/b"),
             is_dir: true,
             children: Some(vec![deep_file]),
+            ignored: false,
         };
         let dir_a = FileNode {
             name: "aaa".to_string(),
             path: std::path::PathBuf::from("/tmp/a"),
             is_dir: true,
             children: Some(vec![dir_b]),
+            ignored: false,
         };
         let top_file = FileNode {
             name: "bootstrap".to_string(),
             path: std::path::PathBuf::from("/tmp/bootstrap"),
             is_dir: false,
             children: None,
+            ignored: false,
         };
 
         let geoms = row_geoms(&["bootstrap", "methods.csv"], |ui| {
