@@ -352,16 +352,38 @@ struct RowVisual<'a> {
 ///   tree like `VSCode`. Other directories use the accent icon + soft name.
 /// - Files use their git-status color (or the neutral foreground when clean) for
 ///   both icon and name.
-fn row_colors(is_dir: bool, dir_changed: bool, decoration: Option<(&str, Color32)>) -> (Color32, Color32) {
+///
+/// Color precedence (highest first), `VSCode`-style:
+/// 1. Git "changed" coloring (dir-green propagation, or a file's status
+///    decoration) wins — `ignored` is intentionally ignored for these rows, since
+///    "this entry changed" is the stronger signal even when it is also
+///    gitignored. The status letter (drawn elsewhere) is likewise unaffected.
+/// 2. Otherwise, a gitignored entry (`ignored`) is dimmed to `theme::FG_DIM()`
+///    for both icon and name, visually setting temp/ignored files apart from
+///    normal entries.
+/// 3. Otherwise, the normal colors apply (accent icon + soft name for dirs,
+///    neutral fg for files).
+///
+/// Selection is not modeled here: this widget has no per-row selection state
+/// (rows highlight on hover only, painted independently of these colors), so the
+/// selection-always-wins rule has no row to apply to. If selection is added
+/// later, it must override the value returned here at the call site.
+fn row_colors(is_dir: bool, dir_changed: bool, ignored: bool, decoration: Option<(&str, Color32)>) -> (Color32, Color32) {
     if is_dir {
         if dir_changed {
             (theme::PALETTE_GREEN(), theme::PALETTE_GREEN())
+        } else if ignored {
+            (theme::FG_DIM(), theme::FG_DIM())
         } else {
             (theme::ACCENT(), theme::FG_SOFT())
         }
+    } else if let Some((_, color)) = decoration {
+        // Changed file: status color wins over dim.
+        (color, color)
+    } else if ignored {
+        (theme::FG_DIM(), theme::FG_DIM())
     } else {
-        let c = decoration.map_or_else(theme::FG, |(_, color)| color);
-        (c, c)
+        (theme::FG(), theme::FG())
     }
 }
 
@@ -374,7 +396,7 @@ fn render_row(ui: &mut egui::Ui, node: &FileNode, depth: usize, status: Option<&
     // changes tints its icon+name green (VSCode-style), even though the folder
     // itself has no direct status. Files keep their own status color.
     let dir_changed = node.is_dir && status.is_some_and(|s| dir_contains_changes(s, &node.path));
-    let (icon_color, name_color) = row_colors(node.is_dir, dir_changed, decoration);
+    let (icon_color, name_color) = row_colors(node.is_dir, dir_changed, node.ignored, decoration);
 
     let visual = RowVisual {
         depth,
@@ -704,19 +726,51 @@ mod tests {
     fn dir_with_changes_inside_renders_green_in_normal_tree() {
         // Folder propagation: a changed dir tints icon+name green; a clean dir
         // keeps accent icon + soft name; a clean file uses the neutral fg.
-        let (changed_icon, changed_name) = row_colors(true, true, None);
+        let (changed_icon, changed_name) = row_colors(true, true, false, None);
         assert_eq!(changed_icon, theme::PALETTE_GREEN());
         assert_eq!(changed_name, theme::PALETTE_GREEN());
 
-        let (clean_icon, clean_name) = row_colors(true, false, None);
+        let (clean_icon, clean_name) = row_colors(true, false, false, None);
         assert_eq!(clean_icon, theme::ACCENT());
         assert_eq!(clean_name, theme::FG_SOFT());
         assert_ne!(clean_name, theme::PALETTE_GREEN());
 
         // A file with a status keeps its status color (not the dir-green path).
-        let (file_icon, file_name) = row_colors(false, false, Some(("M", theme::PALETTE_YELLOW())));
+        let (file_icon, file_name) = row_colors(false, false, false, Some(("M", theme::PALETTE_YELLOW())));
         assert_eq!(file_icon, theme::PALETTE_YELLOW());
         assert_eq!(file_name, theme::PALETTE_YELLOW());
+    }
+
+    #[test]
+    fn ignored_entries_are_dimmed_when_clean() {
+        // A clean (unchanged) gitignored file dims both icon and name, instead of
+        // the neutral foreground a normal file would get.
+        let (icon, name) = row_colors(false, false, true, None);
+        assert_eq!(icon, theme::FG_DIM());
+        assert_eq!(name, theme::FG_DIM());
+        assert_ne!(name, theme::FG());
+
+        // A clean gitignored directory dims too, instead of accent icon/soft name.
+        let (dir_icon, dir_name) = row_colors(true, false, true, None);
+        assert_eq!(dir_icon, theme::FG_DIM());
+        assert_eq!(dir_name, theme::FG_DIM());
+        assert_ne!(dir_icon, theme::ACCENT());
+    }
+
+    #[test]
+    fn changed_coloring_takes_precedence_over_ignored_dim() {
+        // A gitignored file that ALSO has a git status keeps its status color —
+        // "changed" is the stronger signal, so dim does not apply.
+        let (icon, name) = row_colors(false, false, true, Some(("M", theme::PALETTE_YELLOW())));
+        assert_eq!(icon, theme::PALETTE_YELLOW());
+        assert_eq!(name, theme::PALETTE_YELLOW());
+        assert_ne!(name, theme::FG_DIM());
+
+        // A gitignored directory that contains changes stays green, not dim.
+        let (dir_icon, dir_name) = row_colors(true, true, true, None);
+        assert_eq!(dir_icon, theme::PALETTE_GREEN());
+        assert_eq!(dir_name, theme::PALETTE_GREEN());
+        assert_ne!(dir_name, theme::FG_DIM());
     }
 
     #[test]
