@@ -200,21 +200,7 @@ impl HorizonApp {
             .workspaces
             .iter()
             .flat_map(|workspace| &workspace.panels)
-            .any(Self::panel_state_needs_session_bootstrap)
-    }
-
-    fn panel_state_needs_session_bootstrap(panel: &PanelState) -> bool {
-        if !panel.kind.supports_session_binding() || panel.session_binding.is_some() {
-            return false;
-        }
-        // A panel with PanelResume::Last always needs bootstrap (existing behaviour).
-        // A panel with PanelResume::Fresh needs it only when it had real prior output,
-        // i.e. a session was actually running — had_session_activity is the persisted
-        // evidence.  A truly-fresh panel (had_session_activity=false) is intentionally
-        // excluded to avoid spuriously resuming an unrelated catalog session that merely
-        // shares (kind, cwd).
-        matches!(panel.resume, PanelResume::Last)
-            || (matches!(panel.resume, PanelResume::Fresh) && panel.had_session_activity)
+            .any(PanelState::needs_session_bootstrap)
     }
 
     fn panel_options_need_session_bootstrap(opts: &PanelOptions) -> bool {
