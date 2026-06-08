@@ -11,7 +11,8 @@ use ignore::WalkBuilder;
 use crate::error::Result;
 use crate::file_search::FileSearchOptions;
 use crate::file_search_runner::{SearchRunner, SearchState};
-use crate::git_status::{FileStatus, GitStatus, compute_status};
+use crate::git_refresher::GitRefresher;
+use crate::git_status::{FileStatus, GitStatus};
 
 /// Quiescence window the content-search must observe before dispatching a new
 /// query to the background runner. The runner does NOT debounce itself (see its
@@ -52,7 +53,11 @@ pub fn should_dispatch(
 /// working-tree edit or a new untracked file never touches the index, so the
 /// green/changed decorations would otherwise go stale until a commit. The
 /// explorer therefore recomputes its own snapshot on this cadence while visible.
-/// `git2` status on a normal repo is fast; 1.5s keeps it cheap.
+///
+/// The recompute itself runs OFF the UI thread (via [`GitRefresher`]): `git2`
+/// status with `recurse_untracked_dirs` can take hundreds of ms on a large
+/// working tree, so this cadence only *triggers* a background compute — it never
+/// blocks the egui frame.
 pub const GIT_REFRESH_INTERVAL: Duration = Duration::from_millis(1500);
 
 /// Decide whether to recompute the explorer's git status this frame.
@@ -454,6 +459,10 @@ pub struct FileTreeState {
     /// first refresh. Drives the [`GIT_REFRESH_INTERVAL`] throttle so we never
     /// run `git2` status every frame.
     last_git_refresh: Option<Instant>,
+    /// Off-thread git-status recompute. The throttle/on-focus trigger asks this
+    /// to recompute in the background; the result is applied on a later frame.
+    /// Never computes on the UI thread (see [`GitRefresher`]).
+    git_refresher: GitRefresher,
     /// `is_focused` value observed on the previous frame, so the show path can
     /// detect a focus-regain edge (`!prev && now`) and refresh immediately.
     prev_focus: bool,
@@ -524,6 +533,7 @@ impl FileTreeState {
             changed_expanded: HashSet::new(),
             search: SearchPanelState::default(),
             last_git_refresh: None,
+            git_refresher: GitRefresher::new(),
             prev_focus: false,
             row_hits: Vec::new(),
             selected: None,
@@ -653,14 +663,26 @@ impl FileTreeState {
     /// Per-frame git-status refresh driven from the explorer show path.
     ///
     /// `is_focused` is the panel's current focus state this frame. A focus-regain
-    /// edge (`!prev_focus && is_focused`) forces an immediate refresh; otherwise
-    /// the [`GIT_REFRESH_INTERVAL`] throttle applies (see [`should_refresh_git`]).
-    /// When a refresh is due we recompute the snapshot with the SAME
-    /// [`compute_status`] used by the initial load / watcher, stamp
-    /// `last_git_refresh`, and keep the previous snapshot on error (transient
-    /// git failures must not blank out the decorations). Always records
-    /// `is_focused` as the new previous-focus before returning.
+    /// edge (`!prev_focus && is_focused`) requests an immediate (off-thread)
+    /// refresh; otherwise the [`GIT_REFRESH_INTERVAL`] throttle applies (see
+    /// [`should_refresh_git`]).
+    ///
+    /// CRITICAL: this never computes git status on the UI thread. The actual
+    /// `git2` walk (which can take hundreds of ms on a large working tree) runs
+    /// on a background worker owned by [`GitRefresher`]; here we only (a) apply
+    /// any result a previous background compute has finished, and (b) when a
+    /// refresh is due, *ask* the refresher to recompute. A single-in-flight guard
+    /// means a still-running compute suppresses new requests rather than piling
+    /// up. The previous snapshot is kept on error / while a compute is pending
+    /// (transient git failures must not blank out the decorations). Always
+    /// records `is_focused` as the new previous-focus before returning.
     pub fn maybe_refresh_git_status(&mut self, is_focused: bool) {
+        // Apply any finished background compute first so the UI shows fresh
+        // decorations as soon as the worker delivers them.
+        if let Some(status) = self.git_refresher.poll() {
+            self.git_status = Some(status);
+        }
+
         let focus_regained = is_focused && !self.prev_focus;
         self.prev_focus = is_focused;
 
@@ -669,11 +691,11 @@ impl FileTreeState {
             return;
         }
 
+        // Trigger an OFF-THREAD recompute. If one is already running the request
+        // is suppressed (single-in-flight); stamp the time so the throttle paces
+        // the *next* attempt either way.
         self.last_git_refresh = Some(Instant::now());
-        // Reuse the shared computation; on failure keep the existing snapshot.
-        if let Ok(status) = compute_status(&self.root) {
-            self.git_status = Some(Arc::new(status));
-        }
+        self.git_refresher.request(self.root.clone());
     }
 
     /// Flip the uncommitted-files filter. Any change of value resets the
@@ -1269,16 +1291,38 @@ mod tests {
 
     #[test]
     fn maybe_refresh_git_status_populates_for_modified_file_in_temp_repo() {
-        // Reuse of compute_status via the explorer entry point: a temp repo with
-        // an untracked file must yield a non-empty snapshot after a refresh.
+        // The explorer entry point now computes OFF the UI thread: the first call
+        // only *requests* a background compute (status stays None synchronously);
+        // a later call applies the worker's delivered snapshot. A temp repo with
+        // an untracked file must eventually yield a non-empty snapshot.
         let dir = tempfile::tempdir().expect("tempdir");
         git2::Repository::init(dir.path()).expect("init repo");
         std::fs::write(dir.path().join("new.txt"), b"hello").expect("write file");
 
         let mut state = FileTreeState::new(dir.path().to_path_buf());
         assert!(state.git_status.is_none());
-        // First call: never refreshed => recomputes (focus irrelevant here).
+        // First call: never refreshed => triggers a background recompute. It must
+        // NOT block, so the status is not populated synchronously this frame.
         state.maybe_refresh_git_status(false);
+        assert!(
+            state.git_status.is_none(),
+            "compute must be off-thread, not applied synchronously on the trigger frame"
+        );
+
+        // Subsequent frames apply the worker's result once it lands. Bounded poll
+        // so a wedged worker fails the test instead of hanging.
+        let mut populated = false;
+        for _ in 0..500 {
+            // is_focused=true keeps requesting if the worker errored, but the
+            // single-in-flight guard prevents pile-up; mainly we are draining.
+            state.maybe_refresh_git_status(false);
+            if state.git_status.is_some() {
+                populated = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(populated, "background compute must eventually populate the snapshot");
         let status = state.git_status.as_ref().expect("status populated");
         assert!(
             status.changes.iter().any(|c| c.path == "new.txt"),
