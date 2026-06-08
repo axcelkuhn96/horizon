@@ -15,7 +15,7 @@
 use std::path::{Path, PathBuf};
 
 use egui::{Align, Frame, Layout, Margin, RichText, ScrollArea, Vec2};
-use horizon_core::file_search::{FileSearchResult, SearchOutcome};
+use horizon_core::file_search::SearchOutcome;
 use horizon_core::file_search_runner::SearchState;
 use horizon_core::file_tree::FileTreeState;
 
@@ -38,6 +38,57 @@ pub enum SearchUiAction {
     /// User clicked a match row — reveal this file in the tree (expand its
     /// ancestor directories and scroll it into view).
     Reveal(PathBuf),
+}
+
+/// One flattened, indexable row of the results list. The grouped
+/// [`SearchOutcome`] (files, each with matches) is flattened into a single
+/// `Vec<SearchRow>` so the results [`ScrollArea`] can be virtualized with
+/// [`ScrollArea::show_rows`], which maps a visible index range to rows and only
+/// lays out THOSE rows per frame. Without this, all ~1000 match rows were laid
+/// out every frame, pegging the UI thread on large repos.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SearchRow<'a> {
+    /// A "Results truncated (showing first N)" banner, shown once at the top
+    /// when the engine hit its match cap.
+    TruncationBanner { total: usize },
+    /// A clickable file-path header introducing that file's matches.
+    FileHeader { path: &'a Path },
+    /// A single match line under the preceding [`SearchRow::FileHeader`].
+    /// `path` is duplicated so clicking the row can reveal the file without
+    /// scanning back for its header.
+    Match {
+        path: &'a Path,
+        line_number: usize,
+        line_text: &'a str,
+        span: (usize, usize),
+    },
+}
+
+/// Flatten a successful [`SearchOutcome`] into a single indexable row list:
+/// an optional truncation banner, then, per file, a header row followed by one
+/// row per match. Pure and side-effect free so it can be unit-tested; the order
+/// mirrors the on-screen layout exactly so `show_rows` index ranges map back to
+/// the right items.
+#[must_use]
+pub fn flatten_results(found: &SearchOutcome) -> Vec<SearchRow<'_>> {
+    let total_matches: usize = found.results.iter().map(|r| r.matches.len()).sum();
+    // Pre-size: optional banner + one header per file + one row per match.
+    let mut rows = Vec::with_capacity(found.results.len() + total_matches + 1);
+    if found.truncated {
+        rows.push(SearchRow::TruncationBanner { total: total_matches });
+    }
+    for file in &found.results {
+        rows.push(SearchRow::FileHeader { path: &file.path });
+        for m in &file.matches {
+            rows.push(SearchRow::Match {
+                path: &file.path,
+                line_number: m.line_number,
+                line_text: &m.line_text,
+                span: m.span,
+            });
+        }
+    }
+    rows
 }
 
 /// A matched line prepared for display: an elided string plus the byte span of
@@ -181,31 +232,59 @@ fn show_search_panel_inner(
     // Bound the results to roughly the top third of the panel so the tree below
     // stays visible; it scrolls internally.
     let results_max_h = (ui.available_height() * 0.45).clamp(60.0, 320.0);
-    ScrollArea::vertical()
-        .max_height(results_max_h)
-        .auto_shrink([false, false])
-        .id_salt(("file_search_results", panel_id))
-        .show(ui, |ui| match state.search.state() {
-            SearchState::Idle => {
+
+    // Decide what to render. For the `Done(Ok)` case we flatten into rows and
+    // virtualize so only visible rows are laid out per frame (the fix for the
+    // freeze on large result sets). Non-result states are a single line.
+    match state.search.state() {
+        SearchState::Idle => {
+            results_scroll(results_max_h, panel_id).show(ui, |ui| {
                 if !state.search.query.trim().is_empty() {
                     dim_line(ui, "Type to search\u{2026}");
                 }
-            }
-            SearchState::Searching => {
-                *repaint_requested = true;
+            });
+        }
+        SearchState::Searching => {
+            *repaint_requested = true;
+            results_scroll(results_max_h, panel_id).show(ui, |ui| {
                 dim_line(ui, "Searching\u{2026}");
-            }
-            SearchState::Done(outcome) => match &outcome.result {
-                Err(err) => {
+            });
+        }
+        SearchState::Done(outcome) => match &outcome.result {
+            Err(err) => {
+                results_scroll(results_max_h, panel_id).show(ui, |ui| {
                     ui.add_space(4.0);
                     ui.horizontal(|ui| {
                         ui.add_space(8.0);
                         ui.label(RichText::new(err.to_string()).size(12.0).color(theme::PALETTE_RED()));
                     });
-                }
-                Ok(found) => render_results(ui, found, action),
-            },
-        });
+                });
+            }
+            Ok(found) if found.results.is_empty() => {
+                results_scroll(results_max_h, panel_id).show(ui, |ui| {
+                    dim_line(ui, "No results");
+                });
+            }
+            Ok(found) => {
+                let rows = flatten_results(found);
+                results_scroll(results_max_h, panel_id).show_rows(
+                    ui,
+                    RESULT_ROW_HEIGHT,
+                    rows.len(),
+                    |ui, range| {
+                        // Paint an opaque fill behind the visible viewport so
+                        // results never bleed through to content underneath.
+                        let vp = ui.max_rect();
+                        ui.painter()
+                            .rect_filled(vp, egui::CornerRadius::ZERO, theme::PANEL_BG());
+                        for row in &rows[range] {
+                            render_row(ui, row, action);
+                        }
+                    },
+                );
+            }
+        },
+    }
 
     ui.add_space(4.0);
     // Bottom separator between the search panel and the tree.
@@ -220,33 +299,45 @@ fn show_search_panel_inner(
     ui.add_space(2.0);
 }
 
-/// Renders the grouped `Ok` results: a truncation banner (if any), then each
-/// file as a header row followed by its match rows.
-fn render_results(ui: &mut egui::Ui, found: &SearchOutcome, action: &mut Option<SearchUiAction>) {
-    if found.results.is_empty() {
-        dim_line(ui, "No results");
-        return;
-    }
-    if found.truncated {
-        let total: usize = found.results.iter().map(|r| r.matches.len()).sum();
-        ui.horizontal(|ui| {
-            ui.add_space(8.0);
-            ui.label(
-                RichText::new(format!("Results truncated (showing first {total})"))
-                    .size(11.0)
-                    .color(theme::PALETTE_YELLOW()),
+/// Builds the configured results [`ScrollArea`] (bounded height, no auto-shrink,
+/// salted id). Shared by every result state so they scroll identically.
+fn results_scroll(max_height: f32, panel_id: u64) -> ScrollArea {
+    ScrollArea::vertical()
+        .max_height(max_height)
+        .auto_shrink([false, false])
+        .id_salt(("file_search_results", panel_id))
+}
+
+/// Renders a single flattened [`SearchRow`] at the current cursor. Called only
+/// for rows in the visible viewport range (virtualized), so per-frame cost is
+/// bounded by what's on screen, not by the total result count.
+fn render_row(ui: &mut egui::Ui, row: &SearchRow<'_>, action: &mut Option<SearchUiAction>) {
+    match *row {
+        SearchRow::TruncationBanner { total } => {
+            let resp = ui.allocate_response(
+                Vec2::new(ui.available_width(), RESULT_ROW_HEIGHT),
+                egui::Sense::hover(),
             );
-        });
-        ui.add_space(2.0);
-    }
-    for file in &found.results {
-        render_file_group(ui, file, action);
+            ui.painter().text(
+                egui::Pos2::new(resp.rect.min.x + 8.0, resp.rect.center().y),
+                egui::Align2::LEFT_CENTER,
+                format!("Results truncated (showing first {total})"),
+                egui::FontId::proportional(11.0),
+                theme::PALETTE_YELLOW(),
+            );
+        }
+        SearchRow::FileHeader { path } => render_file_header(ui, path, action),
+        SearchRow::Match {
+            path,
+            line_number,
+            line_text,
+            span,
+        } => render_match_row(ui, path, line_number, line_text, span, action),
     }
 }
 
-/// Renders one file's group: a clickable path header, then its match rows.
-fn render_file_group(ui: &mut egui::Ui, file: &FileSearchResult, action: &mut Option<SearchUiAction>) {
-    // File header row (path + icon). Clicking reveals it in the tree.
+/// Renders a clickable file-path header row (icon + compact path).
+fn render_file_header(ui: &mut egui::Ui, path: &Path, action: &mut Option<SearchUiAction>) {
     let header = ui.allocate_response(
         Vec2::new(ui.available_width(), RESULT_ROW_HEIGHT),
         egui::Sense::click(),
@@ -258,7 +349,7 @@ fn render_file_group(ui: &mut egui::Ui, file: &FileSearchResult, action: &mut Op
     }
     let painter = ui.painter();
     let mid_y = header_rect.center().y;
-    let icon = file_type_icon(&file.path, false);
+    let icon = file_type_icon(path, false);
     painter.text(
         egui::Pos2::new(header_rect.min.x + 12.0, mid_y),
         egui::Align2::LEFT_CENTER,
@@ -269,42 +360,50 @@ fn render_file_group(ui: &mut egui::Ui, file: &FileSearchResult, action: &mut Op
     painter.text(
         egui::Pos2::new(header_rect.min.x + 28.0, mid_y),
         egui::Align2::LEFT_CENTER,
-        display_path(&file.path),
+        display_path(path),
         egui::FontId::proportional(12.0),
         theme::FG_SOFT(),
     );
     if header.clicked() && action.is_none() {
-        *action = Some(SearchUiAction::Reveal(file.path.clone()));
+        *action = Some(SearchUiAction::Reveal(path.to_path_buf()));
     }
+}
 
-    // Match rows.
-    for m in &file.matches {
-        let display = format_match_line(&m.line_text, m.span, MAX_LINE_CHARS);
-        let row = ui.allocate_response(
-            Vec2::new(ui.available_width(), RESULT_ROW_HEIGHT),
-            egui::Sense::click(),
-        );
-        let row_rect = row.rect;
-        if row.hovered() {
-            ui.painter()
-                .rect_filled(row_rect, egui::CornerRadius::ZERO, theme::alpha(theme::FG(), 6));
-        }
-        let painter = ui.painter();
-        let mid_y = row_rect.center().y;
-        // Line number gutter.
-        painter.text(
-            egui::Pos2::new(row_rect.min.x + 28.0, mid_y),
-            egui::Align2::LEFT_CENTER,
-            format!("{}", m.line_number),
-            egui::FontId::monospace(11.0),
-            theme::FG_DIM(),
-        );
-        // Line text (highlighting the matched span when visible).
-        let text_x = row_rect.min.x + 64.0;
-        paint_match_text(painter, egui::Pos2::new(text_x, mid_y), &display);
-        if row.clicked() && action.is_none() {
-            *action = Some(SearchUiAction::Reveal(file.path.clone()));
-        }
+/// Renders a single match row (line-number gutter + highlighted line). Clicking
+/// reveals the owning file in the tree.
+fn render_match_row(
+    ui: &mut egui::Ui,
+    path: &Path,
+    line_number: usize,
+    line_text: &str,
+    span: (usize, usize),
+    action: &mut Option<SearchUiAction>,
+) {
+    let display = format_match_line(line_text, span, MAX_LINE_CHARS);
+    let row = ui.allocate_response(
+        Vec2::new(ui.available_width(), RESULT_ROW_HEIGHT),
+        egui::Sense::click(),
+    );
+    let row_rect = row.rect;
+    if row.hovered() {
+        ui.painter()
+            .rect_filled(row_rect, egui::CornerRadius::ZERO, theme::alpha(theme::FG(), 6));
+    }
+    let painter = ui.painter();
+    let mid_y = row_rect.center().y;
+    // Line number gutter.
+    painter.text(
+        egui::Pos2::new(row_rect.min.x + 28.0, mid_y),
+        egui::Align2::LEFT_CENTER,
+        format!("{line_number}"),
+        egui::FontId::monospace(11.0),
+        theme::FG_DIM(),
+    );
+    // Line text (highlighting the matched span when visible).
+    let text_x = row_rect.min.x + 64.0;
+    paint_match_text(painter, egui::Pos2::new(text_x, mid_y), &display);
+    if row.clicked() && action.is_none() {
+        *action = Some(SearchUiAction::Reveal(path.to_path_buf()));
     }
 }
 
@@ -366,6 +465,85 @@ fn display_path(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use horizon_core::file_search::{FileSearchResult, SearchMatch};
+
+    fn file(path: &str, matches: Vec<(usize, &str, (usize, usize))>) -> FileSearchResult {
+        FileSearchResult {
+            path: PathBuf::from(path),
+            matches: matches
+                .into_iter()
+                .map(|(line_number, line_text, span)| SearchMatch {
+                    line_number,
+                    line_text: line_text.to_owned(),
+                    span,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn flatten_results_empty_outcome_is_no_rows() {
+        let outcome = SearchOutcome {
+            results: Vec::new(),
+            truncated: false,
+        };
+        assert!(flatten_results(&outcome).is_empty());
+    }
+
+    #[test]
+    fn flatten_results_header_then_matches_in_order() {
+        let outcome = SearchOutcome {
+            results: vec![
+                file("a.rs", vec![(1, "one", (0, 1)), (2, "two", (0, 1))]),
+                file("b.rs", vec![(3, "three", (0, 1))]),
+            ],
+            truncated: false,
+        };
+        let rows = flatten_results(&outcome);
+        // 2 headers + 3 matches = 5 rows, no banner.
+        assert_eq!(rows.len(), 5);
+        assert!(matches!(rows[0], SearchRow::FileHeader { path } if path == Path::new("a.rs")));
+        assert!(matches!(rows[1], SearchRow::Match { line_number: 1, .. }));
+        assert!(matches!(rows[2], SearchRow::Match { line_number: 2, .. }));
+        assert!(matches!(rows[3], SearchRow::FileHeader { path } if path == Path::new("b.rs")));
+        assert!(matches!(rows[4], SearchRow::Match { line_number: 3, .. }));
+    }
+
+    #[test]
+    fn flatten_results_truncation_banner_is_first_row_with_total() {
+        let outcome = SearchOutcome {
+            results: vec![file("a.rs", vec![(1, "x", (0, 1)), (2, "y", (0, 1))])],
+            truncated: true,
+        };
+        let rows = flatten_results(&outcome);
+        // banner + 1 header + 2 matches = 4 rows.
+        assert_eq!(rows.len(), 4);
+        assert!(matches!(rows[0], SearchRow::TruncationBanner { total: 2 }));
+        assert!(matches!(rows[1], SearchRow::FileHeader { .. }));
+    }
+
+    #[test]
+    fn flatten_results_match_carries_owning_path() {
+        let outcome = SearchOutcome {
+            results: vec![file("dir/a.rs", vec![(7, "hit", (0, 3))])],
+            truncated: false,
+        };
+        let rows = flatten_results(&outcome);
+        match rows[1] {
+            SearchRow::Match {
+                path,
+                line_number,
+                line_text,
+                span,
+            } => {
+                assert_eq!(path, Path::new("dir/a.rs"));
+                assert_eq!(line_number, 7);
+                assert_eq!(line_text, "hit");
+                assert_eq!(span, (0, 3));
+            }
+            ref other => panic!("expected Match, got {other:?}"),
+        }
+    }
 
     #[test]
     fn format_match_line_trims_indentation_and_shifts_span() {

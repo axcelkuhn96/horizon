@@ -7,9 +7,15 @@
 //! here — a later task wires this engine to a background thread and the egui
 //! panel.
 //!
-//! Visibility mirrors [`crate::file_tree`]: the same [`HARD_SKIP`] directories
-//! (`.git`, `node_modules`, `target`) are always pruned, gitignored files ARE
-//! searched (`git_ignore(false)`), and dotfiles are visible (`hidden(false)`).
+//! Visibility for SEARCH deliberately diverges from the tree's "show
+//! everything" rule: the same [`HARD_SKIP`] directories (`.git`,
+//! `node_modules`, `target`) are always pruned, dotfiles are visible
+//! (`hidden(false)`), but gitignored entries are NOT walked
+//! (`git_ignore(true)`). This matches VS Code's default ("search in files"
+//! excludes gitignored content) and — crucially — stops the walk descending
+//! huge gitignored dirs like `vendor/` on a PHP/Laravel repo, which on a large
+//! tree would re-walk gigabytes on every debounced keystroke. The File
+//! Explorer tree still *shows* gitignored entries; only search skips them.
 //!
 //! ## Assumptions
 //! - **ASCII case-folding** for the substring matcher. Case-insensitive
@@ -208,7 +214,8 @@ pub fn search_files(
 
     let walker = WalkBuilder::new(root)
         .hidden(false) // show dotfiles, mirroring the tree
-        .git_ignore(false) // search gitignored files too
+        .git_ignore(true) // skip gitignored entries (e.g. vendor/) for search speed
+        .require_git(false) // honor .gitignore even outside a git repo
         .git_global(false)
         .git_exclude(false)
         .parents(false)
@@ -517,17 +524,44 @@ mod tests {
     }
 
     #[test]
-    fn gitignored_file_is_still_searched() {
+    fn gitignored_entries_are_not_walked() {
+        // SEARCH respects .gitignore (unlike the tree, which shows ignored
+        // entries) so the walk does not descend heavy gitignored dirs like
+        // vendor/. The non-ignored file is still found.
         let dir = TempDir::new().expect("tempdir");
-        write(dir.path(), ".gitignore", b"ignored.txt\n");
+        write(dir.path(), ".gitignore", b"vendor/\nignored.txt\n");
+        write(dir.path(), "vendor/lib.php", b"needle\n");
         write(dir.path(), "ignored.txt", b"needle\n");
+        write(dir.path(), "src/main.rs", b"needle\n");
 
         let outcome = search_files(dir.path(), "needle", &opts()).expect("search");
         let paths: Vec<&PathBuf> = outcome.results.iter().map(|r| &r.path).collect();
         assert!(
-            paths.contains(&&dir.path().join("ignored.txt")),
-            "gitignored file should still be searched, got {paths:?}"
+            !paths.contains(&&dir.path().join("vendor/lib.php")),
+            "gitignored vendor/ dir must not be walked, got {paths:?}"
         );
+        assert!(
+            !paths.contains(&&dir.path().join("ignored.txt")),
+            "gitignored file must not be walked, got {paths:?}"
+        );
+        assert!(
+            paths.contains(&&dir.path().join("src/main.rs")),
+            "non-ignored file must still be searched, got {paths:?}"
+        );
+    }
+
+    #[test]
+    fn hard_skip_dirs_target_and_dotgit_are_not_searched() {
+        // HARD_SKIP prunes .git/node_modules/target even when not gitignored.
+        let dir = TempDir::new().expect("tempdir");
+        write(dir.path(), "target/debug/build.rs", b"needle\n");
+        write(dir.path(), ".git/config", b"needle\n");
+        write(dir.path(), "node_modules/pkg/i.js", b"needle\n");
+        write(dir.path(), "src/main.rs", b"needle\n");
+
+        let outcome = search_files(dir.path(), "needle", &opts()).expect("search");
+        let paths: Vec<&PathBuf> = outcome.results.iter().map(|r| &r.path).collect();
+        assert_eq!(paths, vec![&dir.path().join("src/main.rs")], "only src/ should be searched");
     }
 
     #[test]
