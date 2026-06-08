@@ -147,12 +147,6 @@ enum TreeAction {
     ExpandChanged(std::path::PathBuf),
     /// Collapse a directory of the filtered (uncommitted) tree.
     CollapseChanged(std::path::PathBuf),
-    /// The user single-clicked this row — record it as the selection so
-    /// Ctrl+V can compute the paste target.  Coexists with Expand/Collapse/Open:
-    /// a single click on a directory both selects AND toggles it; a double click
-    /// on a file both selects AND opens it (the open fires on double-click, the
-    /// select fires on the same single-click frame).
-    Select(std::path::PathBuf, bool),
 }
 
 impl<'a> FileExplorerView<'a> {
@@ -213,6 +207,9 @@ impl<'a> FileExplorerView<'a> {
         // apply afterwards (mirrors GitChangesView cloning `viewer.status`).
         let status = state.git_status.clone();
         let mut action: Option<TreeAction> = None;
+        // Row selection collected this frame (the single source of truth for
+        // which row is selected); applied to `state.selected` after the render.
+        let mut selection: Option<(PathBuf, bool)> = None;
         // Screen-space hit boxes for the visible rows, rebuilt every frame so the
         // OS-file-drop handler can resolve the folder under the cursor. Only the
         // normal (on-disk) tree records hits; the filtered changes-only view is
@@ -237,15 +234,12 @@ impl<'a> FileExplorerView<'a> {
                 if show_only {
                     render_changes_only(ui, status.as_deref(), &state.changed_expanded, &mut action);
                 } else {
-                    render_nodes(
-                        ui,
-                        &state.roots,
-                        0,
-                        status.as_deref(),
-                        &mut action,
-                        &mut row_hits,
-                        selected_path.as_deref(),
-                    );
+                    let mut sink = RenderSink {
+                        action: &mut action,
+                        selection: &mut selection,
+                        row_hits: &mut row_hits,
+                    };
+                    render_nodes(ui, &state.roots, 0, status.as_deref(), &mut sink, selected_path.as_deref());
                 }
                 ui.add_space(4.0);
             });
@@ -269,22 +263,17 @@ impl<'a> FileExplorerView<'a> {
             state.reload_root();
         }
 
+        // Apply the row selection collected this frame (single source of truth).
+        // Done before reload-aware actions below; a refresh above already cleared
+        // any stale selection, and a fresh click re-sets it here.
+        if let Some((path, is_dir)) = selection {
+            state.select_row(path, is_dir);
+        }
+
         match action {
-            Some(TreeAction::Expand(path)) => {
-                state.select_row(path.clone(), true);
-                expand_node(&mut state.roots, &path);
-            }
-            Some(TreeAction::Collapse(path)) => {
-                state.select_row(path.clone(), true);
-                collapse_node(&mut state.roots, &path);
-            }
-            Some(TreeAction::Open(path)) => {
-                state.select_row(path.clone(), false);
-                open_in_vscode(&path, &mut state.code_missing);
-            }
-            Some(TreeAction::Select(path, is_dir)) => {
-                state.select_row(path, is_dir);
-            }
+            Some(TreeAction::Expand(path)) => expand_node(&mut state.roots, &path),
+            Some(TreeAction::Collapse(path)) => collapse_node(&mut state.roots, &path),
+            Some(TreeAction::Open(path)) => open_in_vscode(&path, &mut state.code_missing),
             Some(TreeAction::ExpandChanged(path)) => state.expand_changed(path),
             Some(TreeAction::CollapseChanged(path)) => state.collapse_changed(&path),
             None => {}
@@ -351,17 +340,28 @@ fn render_header(ui: &mut egui::Ui, state: &FileTreeState, refresh: &mut bool, s
     );
 }
 
+/// Per-frame output sinks collected while rendering the normal (on-disk) tree.
+/// Bundling these mutable borrows keeps the recursive render functions to a sane
+/// argument count and groups the three things one row can produce.
+struct RenderSink<'a> {
+    /// The primary action (expand/collapse/open) for the first interacted row.
+    action: &'a mut Option<TreeAction>,
+    /// The row selected this frame (single source of truth for selection).
+    selection: &'a mut Option<(PathBuf, bool)>,
+    /// Screen-space hit boxes for the OS-file-drop handler.
+    row_hits: &'a mut Vec<RowHit>,
+}
+
 fn render_nodes(
     ui: &mut egui::Ui,
     nodes: &[FileNode],
     depth: usize,
     status: Option<&GitStatus>,
-    action: &mut Option<TreeAction>,
-    row_hits: &mut Vec<RowHit>,
+    sink: &mut RenderSink<'_>,
     selected: Option<&Path>,
 ) {
     for node in nodes {
-        render_node(ui, node, depth, status, action, row_hits, selected);
+        render_node(ui, node, depth, status, sink, selected);
     }
 }
 
@@ -370,29 +370,27 @@ fn render_node(
     node: &FileNode,
     depth: usize,
     status: Option<&GitStatus>,
-    action: &mut Option<TreeAction>,
-    row_hits: &mut Vec<RowHit>,
+    sink: &mut RenderSink<'_>,
     selected: Option<&Path>,
 ) {
     let is_dir = node.is_dir;
     let is_open = node.children.is_some();
     let is_selected = selected.is_some_and(|s| s == node.path.as_path());
 
-    let response = render_row(ui, node, depth, status, row_hits, is_selected);
+    let response = render_row(ui, node, depth, status, sink.row_hits, is_selected);
 
-    // Single click: record selection (coexists with the expand/open action below).
-    // This runs before the toggle check so the row is always selected on click,
-    // even on the same click that also expands/collapses the directory.
+    // Selection is the SINGLE source of truth here: any single click selects the
+    // row (file or folder), recorded independently of the primary action below.
+    // This is the only place selection is set, so folder selection works on the
+    // same click that also expands/collapses — no reliance on the action arms.
     if response.clicked {
-        *action = Some(TreeAction::Select(node.path.clone(), is_dir));
+        *sink.selection = Some((node.path.clone(), is_dir));
     }
 
-    // Primary action: toggle folder or open file (first click wins for toggle,
-    // double-click wins for files — see render_row return value).
+    // Primary action: toggle folder (single click) or open file (double click).
+    // Orthogonal to selection — it never touches `*sink.selection`.
     if response.primary_action {
-        // Only override Select if we need to — Select is set above; now emit the
-        // full primary action (it also carries selection).
-        *action = Some(if is_dir {
+        *sink.action = Some(if is_dir {
             if is_open {
                 TreeAction::Collapse(node.path.clone())
             } else {
@@ -404,7 +402,7 @@ fn render_node(
     }
 
     if let Some(children) = &node.children {
-        render_nodes(ui, children, depth + 1, status, action, row_hits, selected);
+        render_nodes(ui, children, depth + 1, status, sink, selected);
     }
 }
 
@@ -1051,7 +1049,12 @@ mod tests {
         };
 
         let geoms = row_geoms(&["bootstrap", "methods.csv"], |ui| {
-            render_nodes(ui, &[dir_a.clone(), top_file.clone()], 0, None, &mut None, &mut Vec::new(), None);
+            let mut sink = RenderSink {
+                action: &mut None,
+                selection: &mut None,
+                row_hits: &mut Vec::new(),
+            };
+            render_nodes(ui, &[dir_a.clone(), top_file.clone()], 0, None, &mut sink, None);
         });
         let depth0 = &geoms[0];
         let depth2 = &geoms[1];

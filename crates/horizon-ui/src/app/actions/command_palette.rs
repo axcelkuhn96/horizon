@@ -94,6 +94,9 @@ impl HorizonApp {
         }
 
         // Refresh the destination dir so the copied files appear immediately.
+        // If `dest` is a collapsed/unexpanded subdir the visual refresh is a
+        // no-op (the files still land on disk; the tree picks them up on the
+        // next expand) — same behavior as the OS file-drop handler.
         state.refresh_dir(&dest);
     }
 
