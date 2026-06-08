@@ -14,7 +14,7 @@
 
 use std::path::{Path, PathBuf};
 
-use egui::{Align, Layout, Margin, RichText, ScrollArea, Vec2};
+use egui::{Align, Frame, Layout, Margin, RichText, ScrollArea, Vec2};
 use horizon_core::file_search::{FileSearchResult, SearchOutcome};
 use horizon_core::file_search_runner::SearchState;
 use horizon_core::file_tree::FileTreeState;
@@ -104,6 +104,28 @@ pub fn show_search_panel(
 ) -> Option<SearchUiAction> {
     let mut action: Option<SearchUiAction> = None;
 
+    // Opaque background so the search panel doesn't bleed through to whatever
+    // is rendered behind the explorer (other panels, terminals on the canvas).
+    Frame::new()
+        .fill(theme::PANEL_BG())
+        .inner_margin(Margin::ZERO)
+        .show(ui, |ui| {
+            show_search_panel_inner(ui, state, panel_id, repaint_requested, &mut action);
+        });
+
+    action
+}
+
+/// Inner render: query input + separator + results scroll area. Extracted so
+/// the outer [`show_search_panel`] can wrap everything in an opaque
+/// [`egui::Frame`] without nesting the whole function.
+fn show_search_panel_inner(
+    ui: &mut egui::Ui,
+    state: &mut FileTreeState,
+    panel_id: u64,
+    repaint_requested: &mut bool,
+    action: &mut Option<SearchUiAction>,
+) {
     // --- Query input row -------------------------------------------------
     ui.add_space(4.0);
     ui.allocate_ui_with_layout(
@@ -139,7 +161,7 @@ pub fn show_search_panel(
             // Esc closes the panel (only honored while the input has focus so it
             // doesn't swallow a global Esc).
             if response.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                action = Some(SearchUiAction::Close);
+                *action = Some(SearchUiAction::Close);
             }
         },
     );
@@ -181,7 +203,7 @@ pub fn show_search_panel(
                         ui.label(RichText::new(err.to_string()).size(12.0).color(theme::PALETTE_RED()));
                     });
                 }
-                Ok(found) => render_results(ui, found, &mut action),
+                Ok(found) => render_results(ui, found, action),
             },
         });
 
@@ -196,8 +218,6 @@ pub fn show_search_panel(
         egui::Stroke::new(1.0, theme::BORDER_SUBTLE()),
     );
     ui.add_space(2.0);
-
-    action
 }
 
 /// Renders the grouped `Ok` results: a truncation banner (if any), then each
