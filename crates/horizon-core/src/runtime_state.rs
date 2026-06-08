@@ -168,10 +168,7 @@ impl RuntimeState {
 
         let mut pending_by_group: HashMap<(PanelKind, String), Vec<&mut PanelState>> = HashMap::new();
         for panel in self.workspaces.iter_mut().flat_map(|workspace| &mut workspace.panels) {
-            if !panel.kind.supports_session_binding()
-                || panel.session_binding.is_some()
-                || !matches!(panel.resume, PanelResume::Last)
-            {
+            if !panel.needs_session_bootstrap() {
                 continue;
             }
             let cwd = normalize_cwd(panel.cwd.as_deref()).unwrap_or_default();
@@ -244,6 +241,10 @@ impl RuntimeState {
                                 .filter(|editor| editor.file_path.is_none() && !editor.text.is_empty())
                                 .map(|editor| editor.text.clone()),
                             collapsed: panel.collapsed,
+                            // NOTE: captured from live board state at save time. A respawned
+                            // panel that has not produced any output yet saves `false`.
+                            had_session_activity: panel.kind.supports_session_binding()
+                                && panel.last_output_at_millis.is_some(),
                         }
                     })
                     .collect();
@@ -414,6 +415,13 @@ pub struct PanelState {
     /// Whether the panel is collapsed to titlebar-only. Persists across relaunch.
     #[serde(default)]
     pub collapsed: bool,
+    /// The panel's agent process produced at least one byte of output before the
+    /// app was closed.  Used at cold-start to distinguish a panel that was
+    /// genuinely active (and whose session is worth trying to recover) from one
+    /// that was opened but never used.  Only meaningful for agent panels
+    /// (`kind.supports_session_binding()`); always `false` for others.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub had_session_activity: bool,
 }
 
 impl PanelState {
@@ -460,7 +468,29 @@ impl PanelState {
             }),
             editor_content: None,
             collapsed: panel.collapsed,
+            had_session_activity: false,
         }
+    }
+
+    /// Whether this panel needs its agent session recovered at cold-start.
+    ///
+    /// True when the panel is an agent that has no captured binding yet and
+    /// either was explicitly asked to resume the last session
+    /// (`PanelResume::Last`) or had real prior activity while running fresh
+    /// (`PanelResume::Fresh` + `had_session_activity`).  A truly-fresh panel
+    /// (opened but never used) is excluded to avoid spuriously resuming an
+    /// unrelated catalog session that merely shares (kind, cwd).
+    ///
+    /// This single predicate is the source of truth for both the startup
+    /// spinner gate (`runtime_state_needs_session_bootstrap`) and the binding
+    /// worker (`bootstrap_missing_agent_bindings`); they must never disagree.
+    #[must_use]
+    pub fn needs_session_bootstrap(&self) -> bool {
+        if !self.kind.supports_session_binding() || self.session_binding.is_some() {
+            return false;
+        }
+        matches!(self.resume, PanelResume::Last)
+            || (matches!(self.resume, PanelResume::Fresh) && self.had_session_activity)
     }
 
     #[must_use]
@@ -510,6 +540,7 @@ impl Default for PanelState {
             template: None,
             editor_content: None,
             collapsed: false,
+            had_session_activity: false,
         }
     }
 }
@@ -579,6 +610,70 @@ mod tests {
     use crate::config::{TerminalConfig, WorkspaceConfig};
 
     use super::*;
+
+    fn agent_panel(resume: PanelResume, had_session_activity: bool) -> PanelState {
+        PanelState {
+            local_id: "panel".to_string(),
+            name: "Claude".to_string(),
+            kind: PanelKind::Claude,
+            resume,
+            had_session_activity,
+            ..PanelState::default()
+        }
+    }
+
+    #[test]
+    fn needs_session_bootstrap_for_unbound_last_agent_panel() {
+        assert!(agent_panel(PanelResume::Last, false).needs_session_bootstrap());
+    }
+
+    #[test]
+    fn needs_session_bootstrap_for_unbound_fresh_agent_panel_with_activity() {
+        assert!(agent_panel(PanelResume::Fresh, true).needs_session_bootstrap());
+    }
+
+    #[test]
+    fn skips_session_bootstrap_for_truly_fresh_agent_panel() {
+        assert!(!agent_panel(PanelResume::Fresh, false).needs_session_bootstrap());
+    }
+
+    #[test]
+    fn skips_session_bootstrap_for_bound_agent_panel() {
+        let mut panel = agent_panel(PanelResume::Last, true);
+        panel.session_binding = Some(AgentSessionBinding::new(
+            PanelKind::Claude,
+            "session-1".to_string(),
+            None,
+            None,
+            None,
+        ));
+        assert!(
+            !panel.needs_session_bootstrap(),
+            "a panel that already has a binding never needs bootstrap, regardless of resume/activity"
+        );
+    }
+
+    #[test]
+    fn skips_session_bootstrap_for_non_agent_panels() {
+        let shell = PanelState {
+            local_id: "shell".to_string(),
+            name: "Shell".to_string(),
+            kind: PanelKind::Shell,
+            resume: PanelResume::Last,
+            had_session_activity: true,
+            ..PanelState::default()
+        };
+        let ssh = PanelState {
+            local_id: "ssh".to_string(),
+            name: "Remote".to_string(),
+            kind: PanelKind::Ssh,
+            resume: PanelResume::Last,
+            had_session_activity: true,
+            ..PanelState::default()
+        };
+        assert!(!shell.needs_session_bootstrap());
+        assert!(!ssh.needs_session_bootstrap());
+    }
 
     #[test]
     fn from_board_preserves_window_view_focus_and_bindings() {
