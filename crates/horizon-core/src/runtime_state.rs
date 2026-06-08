@@ -1206,6 +1206,48 @@ workspaces:
     }
 
     #[test]
+    fn running_agent_session_id_survives_yaml_round_trip() {
+        // Core invariant of the shell-resume fix: the captured session_id must
+        // survive save -> restore. Guards against a future serde change (rename
+        // or skip) silently breaking the resume-the-exact-session behavior.
+        let state = RuntimeState {
+            workspaces: vec![WorkspaceState {
+                local_id: "workspace".to_string(),
+                name: "alpha".to_string(),
+                panels: vec![PanelState {
+                    local_id: "panel".to_string(),
+                    name: "Shell".to_string(),
+                    kind: PanelKind::Shell,
+                    running_agent: Some(RunningAgent {
+                        binary: "claude2".to_string(),
+                        config_dir: std::path::PathBuf::from("/home/x/.claude-conta2"),
+                        session_id: Some("f054f32b-7840-4c95-9f84-e61f37db5f5c".to_string()),
+                    }),
+                    ..PanelState::default()
+                }],
+                ..WorkspaceState::default()
+            }],
+            ..RuntimeState::default()
+        };
+
+        let yaml = state.to_yaml().expect("serialize runtime state");
+        let reloaded: RuntimeState =
+            serde_yaml::from_str(&yaml).expect("deserialize runtime state");
+
+        let agent = reloaded.workspaces[0].panels[0]
+            .running_agent
+            .as_ref()
+            .expect("running_agent must survive round-trip");
+        assert_eq!(
+            agent.session_id.as_deref(),
+            Some("f054f32b-7840-4c95-9f84-e61f37db5f5c"),
+            "session_id must survive yaml round-trip"
+        );
+        assert_eq!(agent.binary, "claude2");
+        assert_eq!(agent.config_dir, std::path::PathBuf::from("/home/x/.claude-conta2"));
+    }
+
+    #[test]
     fn load_preserves_detached_workspaces() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("runtime.yaml");
