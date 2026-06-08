@@ -66,6 +66,46 @@ impl AgentSessionRecord {
     }
 }
 
+/// Return the `session_id` of the most-recent Claude session that was run in
+/// `cwd`, scanning `<config_dir>/projects/**/*.jsonl`.
+///
+/// `config_dir` is e.g. `~/.claude` or `~/.claude-conta2`; the function
+/// appends `/projects` itself.
+///
+/// Newest (by file mtime) wins; on equal mtimes the file path (the session
+/// `uuid`) is the deterministic tie-break. Returns `None` when no matching
+/// session exists.
+#[must_use]
+pub fn most_recent_session_for(config_dir: &Path, cwd: &str) -> Option<String> {
+    let projects_dir = config_dir.join("projects");
+    if !projects_dir.exists() {
+        return None;
+    }
+
+    let normalized = normalize_cwd(Some(cwd))?;
+
+    let mut session_paths = Vec::new();
+    if collect_claude_project_files(&projects_dir, &mut session_paths).is_err() {
+        return None;
+    }
+    // Newest first; the path (session uuid) is a deterministic tie-break for
+    // equal mtimes. Mirror the memory/parse bound used by `load_claude_sessions`.
+    session_paths.sort_by(|(left_path, left_ts), (right_path, right_ts)| {
+        right_ts.cmp(left_ts).then_with(|| left_path.cmp(right_path))
+    });
+    session_paths.truncate(super::MAX_CLAUDE_SESSION_FILES);
+
+    // session_paths is sorted newest-first, so the first cwd match is the newest.
+    for (path, updated_at) in session_paths {
+        if let Ok(Some(session)) = load_claude_project_session_summary(&path, updated_at)
+            && session.cwd.as_deref() == Some(normalized.as_str())
+        {
+            return Some(session.session_id);
+        }
+    }
+    None
+}
+
 fn load_claude_sessions() -> Result<Vec<AgentSessionRecord>> {
     let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
         return Ok(Vec::new());
@@ -607,7 +647,7 @@ mod tests {
     use super::{
         AgentSessionCatalog, AgentSessionRecord, ClaudeSessionSummary, PanelKind, PiSessionSummary,
         load_claude_project_session_summary, load_opencode_sessions_from_path, load_pi_sessions_from_dir,
-        scan_claude_session_reader, scan_pi_session_reader,
+        most_recent_session_for, scan_claude_session_reader, scan_pi_session_reader,
     };
 
     fn parse_claude_project_session<R: std::io::BufRead>(
@@ -930,6 +970,98 @@ INSERT INTO session (id, title, directory, parent_id, time_updated, time_archive
         assert!(
             state.workspaces[0].panels[0].session_binding.is_none(),
             "Truly-fresh panel (had_session_activity=false) must not receive a binding"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // most_recent_session_for — Task 3 TDD tests
+    // -----------------------------------------------------------------------
+
+    /// Helper: write a minimal Claude JSONL session file that records the given
+    /// cwd and `session_id`, then set its mtime to `mtime_secs` seconds since
+    /// the Unix epoch so recency is deterministic.
+    fn write_claude_session(dir: &std::path::Path, session_id: &str, cwd: &str, mtime_secs: u64) {
+        let line = format!(
+            "{{\"type\":\"user\",\"cwd\":\"{cwd}\",\"sessionId\":\"{session_id}\"}}\n"
+        );
+        let path = dir.join(format!("{session_id}.jsonl"));
+        std::fs::write(&path, line).expect("write session jsonl");
+        // Adjust mtime so recency ordering is deterministic.
+        let mtime = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(mtime_secs);
+        filetime::set_file_mtime(&path, filetime::FileTime::from_system_time(mtime))
+            .expect("set mtime");
+    }
+
+    /// (a) `most_recent_session_for` returns the `session_id` when there is exactly
+    /// one session for the requested cwd.
+    #[test]
+    fn most_recent_session_for_returns_session_for_matching_cwd() {
+        let config_dir = tempfile::tempdir().expect("temp dir");
+        let encoded_cwd = "-home-user-repo";
+        let project_dir = config_dir.path().join("projects").join(encoded_cwd);
+        std::fs::create_dir_all(&project_dir).expect("create project dir");
+        write_claude_session(&project_dir, "session-abc", "/home/user/repo", 1_000_000);
+
+        let result = most_recent_session_for(config_dir.path(), "/home/user/repo");
+        assert_eq!(result.as_deref(), Some("session-abc"));
+    }
+
+    /// (b) `most_recent_session_for` returns `None` when no session exists for the
+    /// requested cwd.
+    #[test]
+    fn most_recent_session_for_returns_none_for_unmatched_cwd() {
+        let config_dir = tempfile::tempdir().expect("temp dir");
+        let project_dir = config_dir.path().join("projects").join("-home-user-repo");
+        std::fs::create_dir_all(&project_dir).expect("create project dir");
+        write_claude_session(&project_dir, "session-abc", "/home/user/repo", 1_000_000);
+
+        let result = most_recent_session_for(config_dir.path(), "/home/user/other");
+        assert_eq!(result, None);
+    }
+
+    /// (c) When two sessions exist for the same cwd, the newer one (higher
+    /// mtime) wins.
+    #[test]
+    fn most_recent_session_for_returns_newest_when_multiple_exist() {
+        let config_dir = tempfile::tempdir().expect("temp dir");
+        let project_dir = config_dir.path().join("projects").join("-home-user-repo");
+        std::fs::create_dir_all(&project_dir).expect("create project dir");
+        // older session written first; newer session has a later mtime
+        write_claude_session(&project_dir, "session-old", "/home/user/repo", 1_000_000);
+        write_claude_session(&project_dir, "session-new", "/home/user/repo", 2_000_000);
+
+        let result = most_recent_session_for(config_dir.path(), "/home/user/repo");
+        assert_eq!(result.as_deref(), Some("session-new"));
+    }
+
+    /// (M2) A config dir with NO `projects` subdir returns None without panic.
+    #[test]
+    fn most_recent_session_for_returns_none_for_missing_projects_dir() {
+        let config_dir = tempfile::tempdir().expect("temp dir");
+        // Deliberately do not create `<config_dir>/projects`.
+        let result = most_recent_session_for(config_dir.path(), "/home/user/repo");
+        assert_eq!(result, None);
+    }
+
+    /// (M4) Two sessions with DIFFERENT cwd values in the SAME project
+    /// sub-directory: the filter is per-record, so querying cwd A returns A's
+    /// session and never B's.
+    #[test]
+    fn most_recent_session_for_filters_per_record_within_one_dir() {
+        let config_dir = tempfile::tempdir().expect("temp dir");
+        let project_dir = config_dir.path().join("projects").join("mixed-cwds");
+        std::fs::create_dir_all(&project_dir).expect("create project dir");
+        // Give B the newer mtime to prove the cwd filter (not recency) decides.
+        write_claude_session(&project_dir, "session-a", "/home/user/repo-a", 1_000_000);
+        write_claude_session(&project_dir, "session-b", "/home/user/repo-b", 2_000_000);
+
+        assert_eq!(
+            most_recent_session_for(config_dir.path(), "/home/user/repo-a").as_deref(),
+            Some("session-a")
+        );
+        assert_eq!(
+            most_recent_session_for(config_dir.path(), "/home/user/repo-b").as_deref(),
+            Some("session-b")
         );
     }
 }

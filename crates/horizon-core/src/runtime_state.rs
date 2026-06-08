@@ -16,7 +16,7 @@ use crate::ssh::SshConnection;
 use crate::terminal::Terminal;
 use crate::view::CanvasViewState;
 
-pub use agent_sessions::{AgentSessionCatalog, AgentSessionRecord};
+pub use agent_sessions::{AgentSessionCatalog, AgentSessionRecord, most_recent_session_for};
 
 const RUNTIME_STATE_VERSION: u32 = 2;
 const DEFAULT_ROWS: u16 = 24;
