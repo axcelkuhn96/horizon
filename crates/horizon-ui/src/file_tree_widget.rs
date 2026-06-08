@@ -181,10 +181,13 @@ impl<'a> FileExplorerView<'a> {
         render_header(ui, state, &mut refresh, &mut show_only);
         state.set_show_only_changes(show_only);
 
-        // Content-search panel (Ctrl+Shift+F). When active it renders above the
-        // tree; its background runner is pumped every frame and finished results
-        // (or an in-flight spinner) are painted by the widget. The reveal action
-        // is applied after the panel render so we can mutate the tree.
+        // Content-search panel (Ctrl+Shift+F). When active it takes over the
+        // entire explorer body: we render ONLY the search panel (a dedicated,
+        // opaque full-panel surface) and skip the tree ScrollArea below, so the
+        // two views never overlap. Its background runner is pumped every frame
+        // and finished results (or an in-flight spinner) are painted by the
+        // widget. The reveal action is applied after the panel render so we can
+        // mutate the tree; the tree returns the moment search is closed.
         if state.search.active {
             let mut repaint = false;
             state.tick_search();
@@ -200,6 +203,9 @@ impl<'a> FileExplorerView<'a> {
                 }
                 None => {}
             }
+            // No stale row hit-map while searching: drops resolve to the root.
+            state.row_hits = Vec::new();
+            return clicked;
         }
 
         // Clone the status Arc out before the recursive render so the immutable

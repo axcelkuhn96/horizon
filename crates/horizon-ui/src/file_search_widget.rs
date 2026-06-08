@@ -24,9 +24,15 @@ use crate::theme;
 
 /// Reserved height (px) for the search box header row inside the panel.
 const INPUT_HEIGHT: f32 = 26.0;
-/// Max characters of a matched line shown before elision. Long lines are
-/// trimmed of leading indentation and clipped so results stay readable.
-const MAX_LINE_CHARS: usize = 160;
+/// Absolute safety cap on the characters of a matched line we will ever lay out,
+/// regardless of how wide the panel is. The real limit is computed per-row from
+/// the available pixel WIDTH (see [`chars_budget_for_width`]); this is only a
+/// guard so a pathologically wide panel can't ask us to render a 100k-char line.
+const MAX_LINE_CHARS: usize = 400;
+/// Approximate width (px) of one monospace glyph at the 11px font used for match
+/// lines. Used to convert the available pixel width of a row into a character
+/// budget so lines elide to the panel width instead of a fixed char count.
+const MONO_CHAR_WIDTH: f32 = 7.0;
 /// Height of one results row (file header or match line).
 const RESULT_ROW_HEIGHT: f32 = 20.0;
 
@@ -100,6 +106,29 @@ pub struct MatchLineDisplay {
     /// Byte span of the match within `text`, if the match is still visible
     /// after trimming. `None` when elision dropped the matched region.
     pub highlight: Option<(usize, usize)>,
+}
+
+/// Converts the available pixel width of a match line into a character budget
+/// (how many monospace glyphs fit), so lines are elided to the panel WIDTH
+/// rather than a fixed char count. This is what keeps a long code line from
+/// painting past the narrow Files panel and over the neighbouring terminal.
+///
+/// Pure and side-effect free so it can be unit-tested. `available_px` is the
+/// horizontal room left for the text (panel width minus the gutter); the result
+/// is clamped to `[1, MAX_LINE_CHARS]` so we always keep at least one glyph and
+/// never exceed the absolute safety cap.
+#[must_use]
+#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+pub fn chars_budget_for_width(available_px: f32) -> usize {
+    if !available_px.is_finite() || available_px <= 0.0 {
+        return 1;
+    }
+    // Leave one glyph of room for the trailing ellipsis. Clamp in f32 space to
+    // [1, MAX_LINE_CHARS] (so the cast back to usize is always in range), then
+    // round down to whole glyphs. `MAX_LINE_CHARS` is tiny, so the precision
+    // loss on the bound is irrelevant.
+    let glyphs = (available_px / MONO_CHAR_WIDTH - 1.0).clamp(1.0, MAX_LINE_CHARS as f32);
+    glyphs.floor() as usize
 }
 
 /// Prepares a matched line for display: strips leading whitespace (tracking how
@@ -177,6 +206,11 @@ fn show_search_panel_inner(
     repaint_requested: &mut bool,
     action: &mut Option<SearchUiAction>,
 ) {
+    // Clip ALL search-panel painting to the panel's own rect: combined with the
+    // per-row width elision, a hard guarantee no glyph paints past the panel's
+    // right edge and over the neighbouring terminal, however narrow the panel is.
+    ui.set_clip_rect(ui.clip_rect().intersect(ui.max_rect()));
+
     // --- Query input row -------------------------------------------------
     ui.add_space(4.0);
     ui.allocate_ui_with_layout(
@@ -229,9 +263,10 @@ fn show_search_panel_inner(
     ui.add_space(4.0);
 
     // --- Results ---------------------------------------------------------
-    // Bound the results to roughly the top third of the panel so the tree below
-    // stays visible; it scrolls internally.
-    let results_max_h = (ui.available_height() * 0.45).clamp(60.0, 320.0);
+    // The search panel now takes over the whole explorer body (the tree is not
+    // rendered while searching), so results get the full remaining height and
+    // scroll internally. Reserve a little room for the bottom separator.
+    let results_max_h = (ui.available_height() - 8.0).max(60.0);
 
     // Decide what to render. For the `Done(Ok)` case we flatten into rows and
     // virtualize so only visible rows are laid out per frame (the fix for the
@@ -379,17 +414,25 @@ fn render_match_row(
     span: (usize, usize),
     action: &mut Option<SearchUiAction>,
 ) {
-    let display = format_match_line(line_text, span, MAX_LINE_CHARS);
     let row = ui.allocate_response(
         Vec2::new(ui.available_width(), RESULT_ROW_HEIGHT),
         egui::Sense::click(),
     );
     let row_rect = row.rect;
+    // Text starts after the line-number gutter; elide to the pixel width that
+    // remains up to the row's right edge so the line can never paint past the
+    // panel (and over the neighbouring terminal).
+    let text_x = row_rect.min.x + 64.0;
+    let avail_px = (row_rect.max.x - text_x).max(0.0);
+    let budget = chars_budget_for_width(avail_px);
+    let display = format_match_line(line_text, span, budget);
     if row.hovered() {
         ui.painter()
             .rect_filled(row_rect, egui::CornerRadius::ZERO, theme::alpha(theme::FG(), 6));
     }
-    let painter = ui.painter();
+    // Clip all painting for this row to the row rect so no glyph spills past the
+    // panel's right edge even if width estimation is off by a glyph.
+    let painter = ui.painter().with_clip_rect(row_rect);
     let mid_y = row_rect.center().y;
     // Line number gutter.
     painter.text(
@@ -400,8 +443,7 @@ fn render_match_row(
         theme::FG_DIM(),
     );
     // Line text (highlighting the matched span when visible).
-    let text_x = row_rect.min.x + 64.0;
-    paint_match_text(painter, egui::Pos2::new(text_x, mid_y), &display);
+    paint_match_text(&painter, egui::Pos2::new(text_x, mid_y), &display);
     if row.clicked() && action.is_none() {
         *action = Some(SearchUiAction::Reveal(path.to_path_buf()));
     }
@@ -593,6 +635,47 @@ mod tests {
         let out = format_match_line(&line, (50, 56), 10);
         assert!(out.text.ends_with('\u{2026}'));
         assert_eq!(out.highlight, None);
+    }
+
+    #[test]
+    fn chars_budget_scales_with_width_and_is_clamped() {
+        // Zero / non-positive / non-finite widths keep at least one glyph.
+        assert_eq!(chars_budget_for_width(0.0), 1);
+        assert_eq!(chars_budget_for_width(-50.0), 1);
+        assert_eq!(chars_budget_for_width(f32::NAN), 1);
+        // A wider budget fits more glyphs than a narrower one.
+        let narrow = chars_budget_for_width(70.0);
+        let wide = chars_budget_for_width(700.0);
+        assert!(wide > narrow, "wider panel must allow more chars: {wide} > {narrow}");
+        // Never exceeds the absolute safety cap, even for an enormous width.
+        assert!(chars_budget_for_width(1.0e6) <= MAX_LINE_CHARS);
+    }
+
+    #[test]
+    fn width_based_elision_drops_highlight_when_match_is_off_screen() {
+        // A long line whose match sits far to the right. With a small pixel
+        // budget (a narrow panel) the line must elide and the now-off-screen
+        // highlight must be dropped — i.e. nothing to paint past the panel edge.
+        let mut line = "a".repeat(80);
+        line.push_str("needle");
+        let budget = chars_budget_for_width(70.0); // ~9 glyphs
+        assert!(budget < 80, "test assumes the match is past the budget");
+        let out = format_match_line(&line, (80, 86), budget);
+        assert!(out.text.chars().count() <= budget + 1); // kept glyphs + ellipsis
+        assert!(out.text.ends_with('\u{2026}'));
+        assert_eq!(out.highlight, None);
+    }
+
+    #[test]
+    fn width_based_elision_keeps_highlight_when_match_fits() {
+        // The match is near the start, so a generous width budget keeps it.
+        let mut line = "needle".to_owned();
+        line.push_str(&"x".repeat(500));
+        let budget = chars_budget_for_width(700.0);
+        let out = format_match_line(&line, (0, 6), budget);
+        assert_eq!(out.highlight, Some((0, 6)));
+        let (s, e) = out.highlight.expect("highlight");
+        assert_eq!(&out.text[s..e], "needle");
     }
 
     #[test]
