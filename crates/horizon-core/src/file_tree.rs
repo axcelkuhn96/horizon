@@ -462,6 +462,10 @@ pub struct FileTreeState {
     /// The OS-file-drop handler reads these to map a global pointer position to
     /// the drop target directory; see [`row_hit_at`] / [`drop_target_dir`].
     pub row_hits: Vec<RowHit>,
+    /// The currently selected row, set by a single click on any tree row.
+    /// Carries `(absolute_path, is_dir)`. Cleared to `None` on root reload.
+    /// Used by [`FileTreeState::paste_target`] to resolve the Ctrl+V destination.
+    pub selected: Option<(PathBuf, bool)>,
 }
 
 /// State for the File Explorer's content-search panel (the VSCode-style "search
@@ -522,6 +526,7 @@ impl FileTreeState {
             last_git_refresh: None,
             prev_focus: false,
             row_hits: Vec::new(),
+            selected: None,
         }
     }
 
@@ -532,6 +537,26 @@ impl FileTreeState {
     #[must_use]
     pub fn drop_target_for(&self, x: f32, y: f32) -> PathBuf {
         drop_target_dir(row_hit_at(&self.row_hits, x, y), &self.root)
+    }
+
+    /// Resolve the Ctrl+V paste destination using the current row selection.
+    ///
+    /// Delegates to [`drop_target_dir`] with the same semantics used for OS
+    /// file drops:
+    /// - Selected **folder** → paste INTO that folder.
+    /// - Selected **file** → paste into its parent directory.
+    /// - Nothing selected → paste into the explorer `root`.
+    #[must_use]
+    pub fn paste_target(&self) -> PathBuf {
+        let hit = self.selected.as_ref().map(|(p, is_dir)| (p.as_path(), *is_dir));
+        drop_target_dir(hit, &self.root)
+    }
+
+    /// Record that the user clicked `path` (with `is_dir`). Called by the widget
+    /// on every single click; toggling expand/collapse is handled separately and
+    /// can coexist — we just remember which row was last touched.
+    pub fn select_row(&mut self, path: PathBuf, is_dir: bool) {
+        self.selected = Some((path, is_dir));
     }
 
     /// Open (or re-focus) the content-search panel. Requests input focus on the
@@ -586,9 +611,11 @@ impl FileTreeState {
     }
 
     /// (Re)scan the root level. Safe to call repeatedly (refresh button).
+    /// Also clears any row selection so a stale path is never used as a paste target.
     pub fn reload_root(&mut self) {
         self.roots = scan_dir(&self.root).unwrap_or_default();
         self.loaded = true;
+        self.selected = None;
     }
 
     /// Lazily scan a directory node's children (called on first expand).
@@ -1404,5 +1431,62 @@ mod tests {
         state.set_show_only_changes(false);
         state.set_show_only_changes(true);
         assert!(!state.is_changed_expanded(&dir));
+    }
+
+    // ── paste_target wiring ──────────────────────────────────────────────────
+
+    #[test]
+    fn paste_target_selected_folder_is_that_folder() {
+        let root = std::path::PathBuf::from("/repo");
+        let mut state = FileTreeState::new(root.clone());
+        let folder = std::path::PathBuf::from("/repo/src");
+        state.select_row(folder.clone(), true);
+        assert_eq!(state.paste_target(), folder);
+    }
+
+    #[test]
+    fn paste_target_selected_file_is_its_parent() {
+        let root = std::path::PathBuf::from("/repo");
+        let mut state = FileTreeState::new(root);
+        let file = std::path::PathBuf::from("/repo/src/main.rs");
+        state.select_row(file, false);
+        assert_eq!(state.paste_target(), std::path::PathBuf::from("/repo/src"));
+    }
+
+    #[test]
+    fn paste_target_nothing_selected_is_root() {
+        let root = std::path::PathBuf::from("/repo");
+        let state = FileTreeState::new(root.clone());
+        // selected is None by default
+        assert_eq!(state.paste_target(), root);
+    }
+
+    #[test]
+    fn select_row_records_path_and_is_dir() {
+        let mut state = FileTreeState::new(std::path::PathBuf::from("/repo"));
+        assert!(state.selected.is_none());
+
+        state.select_row(std::path::PathBuf::from("/repo/src"), true);
+        assert_eq!(
+            state.selected,
+            Some((std::path::PathBuf::from("/repo/src"), true))
+        );
+
+        // Selecting a file overwrites the previous selection.
+        state.select_row(std::path::PathBuf::from("/repo/main.rs"), false);
+        assert_eq!(
+            state.selected,
+            Some((std::path::PathBuf::from("/repo/main.rs"), false))
+        );
+    }
+
+    #[test]
+    fn reload_root_clears_selection() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut state = FileTreeState::new(dir.path().to_path_buf());
+        state.select_row(dir.path().join("something.rs"), false);
+        assert!(state.selected.is_some());
+        state.reload_root();
+        assert!(state.selected.is_none(), "reload_root must clear selection");
     }
 }

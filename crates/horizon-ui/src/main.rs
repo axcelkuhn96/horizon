@@ -11,6 +11,7 @@ mod file_tree_widget;
 mod git_changes_widget;
 mod image_paste;
 mod input;
+mod paste_files;
 mod loading_spinner;
 mod native_app;
 mod plugin_install;

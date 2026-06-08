@@ -36,6 +36,10 @@ pub enum CommandId {
     /// Search across file contents in the focused File Explorer panel.
     SearchFileContents,
 
+    // File Explorer
+    /// Paste clipboard files into the focused File Explorer's selected/root dir.
+    PasteIntoExplorer,
+
     // Input
     /// Flip whether 2-finger scroll over a panel pans the canvas or scrolls
     /// the terminal scrollback.

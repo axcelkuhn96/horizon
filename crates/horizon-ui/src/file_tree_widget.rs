@@ -147,6 +147,12 @@ enum TreeAction {
     ExpandChanged(std::path::PathBuf),
     /// Collapse a directory of the filtered (uncommitted) tree.
     CollapseChanged(std::path::PathBuf),
+    /// The user single-clicked this row — record it as the selection so
+    /// Ctrl+V can compute the paste target.  Coexists with Expand/Collapse/Open:
+    /// a single click on a directory both selects AND toggles it; a double click
+    /// on a file both selects AND opens it (the open fires on double-click, the
+    /// select fires on the same single-click frame).
+    Select(std::path::PathBuf, bool),
 }
 
 impl<'a> FileExplorerView<'a> {
@@ -219,6 +225,9 @@ impl<'a> FileExplorerView<'a> {
         let footer_h = if state.code_missing { FOOTER_HEIGHT } else { 0.0 };
         let max_h = scroll_viewport_height(ui.max_rect().bottom(), ui.cursor().top(), footer_h);
 
+        // Snapshot the selected path before the immutable borrow in render_nodes.
+        let selected_path: Option<PathBuf> = state.selected.as_ref().map(|(p, _)| p.clone());
+
         let scroll_output = ScrollArea::vertical()
             .max_height(max_h)
             .auto_shrink([false, false])
@@ -228,7 +237,15 @@ impl<'a> FileExplorerView<'a> {
                 if show_only {
                     render_changes_only(ui, status.as_deref(), &state.changed_expanded, &mut action);
                 } else {
-                    render_nodes(ui, &state.roots, 0, status.as_deref(), &mut action, &mut row_hits);
+                    render_nodes(
+                        ui,
+                        &state.roots,
+                        0,
+                        status.as_deref(),
+                        &mut action,
+                        &mut row_hits,
+                        selected_path.as_deref(),
+                    );
                 }
                 ui.add_space(4.0);
             });
@@ -253,9 +270,21 @@ impl<'a> FileExplorerView<'a> {
         }
 
         match action {
-            Some(TreeAction::Expand(path)) => expand_node(&mut state.roots, &path),
-            Some(TreeAction::Collapse(path)) => collapse_node(&mut state.roots, &path),
-            Some(TreeAction::Open(path)) => open_in_vscode(&path, &mut state.code_missing),
+            Some(TreeAction::Expand(path)) => {
+                state.select_row(path.clone(), true);
+                expand_node(&mut state.roots, &path);
+            }
+            Some(TreeAction::Collapse(path)) => {
+                state.select_row(path.clone(), true);
+                collapse_node(&mut state.roots, &path);
+            }
+            Some(TreeAction::Open(path)) => {
+                state.select_row(path.clone(), false);
+                open_in_vscode(&path, &mut state.code_missing);
+            }
+            Some(TreeAction::Select(path, is_dir)) => {
+                state.select_row(path, is_dir);
+            }
             Some(TreeAction::ExpandChanged(path)) => state.expand_changed(path),
             Some(TreeAction::CollapseChanged(path)) => state.collapse_changed(&path),
             None => {}
@@ -329,9 +358,10 @@ fn render_nodes(
     status: Option<&GitStatus>,
     action: &mut Option<TreeAction>,
     row_hits: &mut Vec<RowHit>,
+    selected: Option<&Path>,
 ) {
     for node in nodes {
-        render_node(ui, node, depth, status, action, row_hits);
+        render_node(ui, node, depth, status, action, row_hits, selected);
     }
 }
 
@@ -342,27 +372,39 @@ fn render_node(
     status: Option<&GitStatus>,
     action: &mut Option<TreeAction>,
     row_hits: &mut Vec<RowHit>,
+    selected: Option<&Path>,
 ) {
     let is_dir = node.is_dir;
     let is_open = node.children.is_some();
+    let is_selected = selected.is_some_and(|s| s == node.path.as_path());
 
-    if render_row(ui, node, depth, status, row_hits) {
-        // First interaction in the frame wins; later ones are ignored.
-        if action.is_none() {
-            *action = Some(if is_dir {
-                if is_open {
-                    TreeAction::Collapse(node.path.clone())
-                } else {
-                    TreeAction::Expand(node.path.clone())
-                }
+    let response = render_row(ui, node, depth, status, row_hits, is_selected);
+
+    // Single click: record selection (coexists with the expand/open action below).
+    // This runs before the toggle check so the row is always selected on click,
+    // even on the same click that also expands/collapses the directory.
+    if response.clicked {
+        *action = Some(TreeAction::Select(node.path.clone(), is_dir));
+    }
+
+    // Primary action: toggle folder or open file (first click wins for toggle,
+    // double-click wins for files — see render_row return value).
+    if response.primary_action {
+        // Only override Select if we need to — Select is set above; now emit the
+        // full primary action (it also carries selection).
+        *action = Some(if is_dir {
+            if is_open {
+                TreeAction::Collapse(node.path.clone())
             } else {
-                TreeAction::Open(node.path.clone())
-            });
-        }
+                TreeAction::Expand(node.path.clone())
+            }
+        } else {
+            TreeAction::Open(node.path.clone())
+        });
     }
 
     if let Some(children) = &node.children {
-        render_nodes(ui, children, depth + 1, status, action, row_hits);
+        render_nodes(ui, children, depth + 1, status, action, row_hits, selected);
     }
 }
 
@@ -425,15 +467,27 @@ fn row_colors(is_dir: bool, dir_changed: bool, ignored: bool, decoration: Option
     }
 }
 
-/// Renders one tree row. Returns `true` if the row should toggle (folder) or
-/// open (file) — i.e. clicked for a folder, double-clicked for a file.
+/// Return value from [`render_row`].
+struct RowResponse {
+    /// The user single-clicked this row (also fires when a directory is clicked
+    /// to expand/collapse, and on the first click of a double-click sequence for
+    /// files). Used to record the selection.
+    clicked: bool,
+    /// The primary action should fire: clicked for a directory (toggle), or
+    /// double-clicked for a file (open in editor).
+    primary_action: bool,
+}
+
+/// Renders one tree row. Returns a [`RowResponse`] indicating whether the row
+/// was clicked (selection) and/or triggered its primary action (toggle/open).
 fn render_row(
     ui: &mut egui::Ui,
     node: &FileNode,
     depth: usize,
     status: Option<&GitStatus>,
     row_hits: &mut Vec<RowHit>,
-) -> bool {
+    is_selected: bool,
+) -> RowResponse {
     let decoration = status.and_then(|s| status_decoration(status_for_path(s, &node.path)));
 
     // Normal-tree folder propagation: a directory that CONTAINS uncommitted
@@ -452,7 +506,7 @@ fn render_row(
         letter: decoration,
     };
 
-    let response = paint_tree_row(ui, &visual);
+    let response = paint_tree_row(ui, &visual, is_selected);
 
     // Record the row's screen-space hit box for the OS-file-drop handler. The
     // tree paints inside a transform-layer Area, so map the local rect to global
@@ -470,10 +524,14 @@ fn render_row(
         is_dir: node.is_dir,
     });
 
-    if node.is_dir {
+    let primary_action = if node.is_dir {
         response.clicked()
     } else {
         response.double_clicked()
+    };
+    RowResponse {
+        clicked: response.clicked(),
+        primary_action,
     }
 }
 
@@ -482,10 +540,18 @@ fn render_row(
 /// ellipsis-truncated before the letter reserve]` with the status letter painted
 /// absolutely at the right edge. No inner `ui.label`/scope is used, so nothing
 /// can rewind the cursor and stack the name under the icon.
-fn paint_tree_row(ui: &mut egui::Ui, v: &RowVisual<'_>) -> egui::Response {
+///
+/// `is_selected` draws a subtle selection background using the accent token so
+/// the Ctrl+V target is always visible. Hover and selection can coexist.
+fn paint_tree_row(ui: &mut egui::Ui, v: &RowVisual<'_>, is_selected: bool) -> egui::Response {
     let row_rect = Rect::from_min_size(ui.cursor().min, Vec2::new(ui.available_width(), ROW_HEIGHT));
     let response = ui.allocate_rect(row_rect, Sense::click());
 
+    // Selection background (subtle accent) rendered below the hover highlight.
+    if is_selected {
+        ui.painter()
+            .rect_filled(row_rect, CornerRadius::ZERO, theme::alpha(theme::ACCENT(), 20));
+    }
     if response.hovered() {
         ui.painter()
             .rect_filled(row_rect, CornerRadius::ZERO, theme::alpha(theme::FG(), 6));
@@ -651,7 +717,9 @@ fn render_changed_row(ui: &mut egui::Ui, node: &ChangedTreeNode, depth: usize, i
         letter: decoration,
     };
 
-    let response = paint_tree_row(ui, &visual);
+    // The filtered tree has no persistent selection model — selection only tracks
+    // rows in the normal (on-disk) tree, so `is_selected` is always false here.
+    let response = paint_tree_row(ui, &visual, false);
 
     if node.is_dir {
         response.clicked()
@@ -983,7 +1051,7 @@ mod tests {
         };
 
         let geoms = row_geoms(&["bootstrap", "methods.csv"], |ui| {
-            render_nodes(ui, &[dir_a.clone(), top_file.clone()], 0, None, &mut None, &mut Vec::new());
+            render_nodes(ui, &[dir_a.clone(), top_file.clone()], 0, None, &mut None, &mut Vec::new(), None);
         });
         let depth0 = &geoms[0];
         let depth2 = &geoms[1];

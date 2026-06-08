@@ -5,6 +5,7 @@ use crate::app::HorizonApp;
 use crate::app::shortcuts::shortcut_pressed;
 use crate::command_palette::{CommandPalette, PaletteAction};
 use crate::command_registry::CommandId;
+use crate::paste_files::{paste_targets_explorer, read_clipboard_file_list};
 use crate::search_overlay::SearchOverlay;
 
 use super::align_attached_workspaces;
@@ -49,6 +50,51 @@ impl HorizonApp {
         if let Some(state) = panel.content.file_explorer_mut() {
             state.open_search();
         }
+    }
+
+    /// Paste clipboard files into the focused File Explorer's selected directory
+    /// (or the explorer root when nothing is selected).
+    ///
+    /// Reads `text/uri-list` from the OS clipboard via arboard, copies each
+    /// file/directory into the resolved destination with [`copy_into_dir`], then
+    /// calls [`refresh_dir`] so the new entries appear immediately.
+    ///
+    /// Errors from individual copy operations are logged at `debug` level (via
+    /// [`CopyReport::errors`]) but never surfaced to the user — a partial failure
+    /// still shows whatever succeeded. No-op when the clipboard holds no file list
+    /// or when no explorer panel is focused.
+    fn paste_files_into_explorer(&mut self) {
+        use horizon_core::file_ops::copy_into_dir;
+
+        let Some(id) = self.board.focused else {
+            return;
+        };
+        let Some(panel) = self.board.panel_mut(id) else {
+            return;
+        };
+        let Some(state) = panel.content.file_explorer_mut() else {
+            return;
+        };
+
+        let Some(paths) = read_clipboard_file_list() else {
+            tracing::debug!("Ctrl+V on explorer: clipboard holds no file list, nothing to paste");
+            return;
+        };
+
+        let dest = state.paste_target();
+        tracing::debug!(
+            dest = %dest.display(),
+            count = paths.len(),
+            "pasting clipboard files into explorer"
+        );
+
+        let report = copy_into_dir(&paths, &dest);
+        for err in &report.errors {
+            tracing::debug!(src = %err.source.display(), "paste copy error: {}", err.message);
+        }
+
+        // Refresh the destination dir so the copied files appear immediately.
+        state.refresh_dir(&dest);
     }
 
     pub(in crate::app) fn render_command_palette(&mut self, ctx: &Context) {
@@ -165,6 +211,7 @@ impl HorizonApp {
                 }
             }
             CommandId::SearchFileContents => self.open_explorer_search(),
+            CommandId::PasteIntoExplorer => self.paste_files_into_explorer(),
             CommandId::ToggleScrollPan => {
                 self.scroll_pans_over_panels = !self.scroll_pans_over_panels;
                 tracing::info!(
@@ -240,15 +287,23 @@ impl HorizonApp {
         // The search shortcut (Ctrl+Shift+F) is handled separately so it can be
         // contextual: explorer focused -> content search, otherwise the terminal
         // search toggle. Every other binding keeps its existing behavior.
+        //
+        // Ctrl+V (paste) is also contextual: when the focused panel is a
+        // FileExplorer, we intercept the paste and copy clipboard files into the
+        // explorer's selected/root directory; otherwise the event flows through
+        // unchanged so the terminal's native paste behaviour is untouched.
         let search_binding = self.shortcuts.search;
-        let (toggle_palette, search_pressed, triggered_command) = ctx.input(|input| {
+        let (toggle_palette, search_pressed, paste_for_explorer, triggered_command) = ctx.input(|input| {
             let palette = shortcut_pressed(input, self.shortcuts.command_palette);
             let search = shortcut_pressed(input, search_binding);
+            // Detect a paste event (egui emits Event::Paste for Ctrl+V /
+            // Ctrl+Shift+V / Shift+Insert).
+            let has_paste = input.events.iter().any(|event| matches!(event, egui::Event::Paste(_)));
             let command = shortcut_bindings
                 .iter()
                 .find(|(binding, _)| shortcut_pressed(input, *binding))
                 .map(|(_, id)| id.clone());
-            (palette, search, command)
+            (palette, search, has_paste, command)
         });
 
         if toggle_palette {
@@ -263,6 +318,24 @@ impl HorizonApp {
             let command_id = search_shortcut_command(focused_kind);
             self.execute_command(ctx, &command_id);
         }
+
+        // Ctrl+V: intercept for the explorer ONLY; consume the paste event so it
+        // does not also reach any terminal panel that happens to be in the layout.
+        if paste_for_explorer {
+            let focused_kind = self
+                .board
+                .focused
+                .and_then(|id| self.board.panel(id))
+                .map(|panel| panel.kind);
+            if paste_targets_explorer(focused_kind) {
+                // Consume the egui paste event so terminals do not see it.
+                ctx.input_mut(|input| {
+                    input.events.retain(|event| !matches!(event, egui::Event::Paste(_)));
+                });
+                self.execute_command(ctx, &CommandId::PasteIntoExplorer);
+            }
+        }
+
         if let Some(command_id) = triggered_command {
             self.execute_command(ctx, &command_id);
         }
