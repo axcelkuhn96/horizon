@@ -3,7 +3,9 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
 use egui::Context;
-use horizon_core::{AgentSessionBinding, AgentSessionCatalog, Board, PanelId, PanelKind, PanelOptions, PanelResume, PanelState};
+use horizon_core::{
+    AgentSessionBinding, AgentSessionCatalog, Board, PanelId, PanelKind, PanelOptions, PanelResume, PanelState,
+};
 
 /// Build a `<binary> --resume <session_id>` command string.
 ///
@@ -229,15 +231,21 @@ impl HorizonApp {
 
     /// A panel triggers the startup bootstrap when either:
     /// - it is an agent panel needing its session recovered (Story-6 binding), or
-    /// - it is a Shell panel that had a Claude agent running at save time (Task 4
-    ///   shell-resume injection).
+    /// - it is a Shell panel that had a Claude agent running at save time AND that
+    ///   agent has a captured `session_id` (Task 3/4 shell-resume injection).
+    ///
+    /// The Shell arm requires `session_id.is_some()` so we don't spin up bootstrap
+    /// for a Shell whose claude had no resumable id — there would be nothing to inject.
     ///
     /// The Shell arm is additive: it only ADDS a reason to spawn bootstrap and
     /// does not affect the per-panel `needs_session_bootstrap()` invariant shared
     /// by the agent binding worker (which still gates on `supports_session_binding()`).
     fn panel_state_needs_bootstrap(panel: &PanelState) -> bool {
         panel.needs_session_bootstrap()
-            || (panel.kind == PanelKind::Shell && panel.running_agent.is_some())
+            || panel
+                .running_agent
+                .as_ref()
+                .is_some_and(|agent| panel.kind == PanelKind::Shell && agent.session_id.is_some())
     }
 
     fn panel_options_need_session_bootstrap(opts: &PanelOptions) -> bool {
@@ -313,30 +321,35 @@ impl HorizonApp {
                 // panel that had a running Claude agent at save time.  This re-launches
                 // claude/claude2 inside the fresh zsh that the restored panel opened.
                 //
+                // The session_id comes exclusively from the agent process's argv
+                // (`--resume <uuid>` captured at save time).  If no id was captured
+                // (agent.session_id is None) we inject nothing — never fall back to a
+                // cwd-newest scan which would cause two shells in the same directory to
+                // resume the same session.
+                //
                 // Inject-once is guaranteed structurally: this `Ok(bootstrap)` arm fires
                 // exactly once (the receiver is taken and never put back), so the loop
                 // below can never run a second time.
                 for workspace in &bootstrap.runtime_state.workspaces {
                     for panel_state in &workspace.panels {
-                        let Some(ref agent) = panel_state.running_agent else { continue };
-                        let Some(ref cwd) = panel_state.cwd else { continue };
                         if panel_state.kind != PanelKind::Shell {
                             continue;
                         }
-                        let Some(session_id) =
-                            horizon_core::most_recent_session_for(&agent.config_dir, cwd)
-                        else {
+                        let Some(ref agent) = panel_state.running_agent else {
                             continue;
                         };
-                        let Some(cmd) = resume_command(&agent.binary, &session_id) else {
+                        let Some(ref session_id) = agent.session_id else {
+                            continue;
+                        };
+                        let Some(cmd) = resume_command(&agent.binary, session_id) else {
                             tracing::warn!(
                                 binary = %agent.binary,
+                                session_id = %session_id,
                                 "skipping shell resume: session_id failed safety check"
                             );
                             continue;
                         };
-                        let Some(panel_id) = self.board.panel_id_by_local_id(&panel_state.local_id)
-                        else {
+                        let Some(panel_id) = self.board.panel_id_by_local_id(&panel_state.local_id) else {
                             continue;
                         };
                         if let Some(panel) = self.board.panel_mut(panel_id) {
@@ -563,7 +576,10 @@ pub(super) fn render_loading_view(ctx: &Context) {
 mod tests {
     use std::collections::HashSet;
 
-    use super::{DynamicPanelBindingState, HorizonApp, collect_dynamic_binding_updates, resume_command, select_panel_launch_binding};
+    use super::{
+        DynamicPanelBindingState, HorizonApp, collect_dynamic_binding_updates, resume_command,
+        select_panel_launch_binding,
+    };
 
     // ── resume_command ────────────────────────────────────────────────────────
 
@@ -680,10 +696,45 @@ mod tests {
         assert!(HorizonApp::runtime_state_needs_session_bootstrap(&state));
     }
 
-    /// Task 4: a workspace whose only panel is a Shell that had a Claude agent
-    /// running at save time must trigger bootstrap, so the Ok-arm inject loop runs.
+    /// Task 3/4: a Shell panel with a running agent that HAS a captured `session_id`
+    /// must trigger bootstrap so the Ok-arm inject loop can write the resume command.
     #[test]
-    fn runtime_state_needs_bootstrap_for_shell_with_running_agent() {
+    fn runtime_state_needs_bootstrap_for_shell_with_running_agent_and_session_id() {
+        let state = RuntimeState {
+            workspaces: vec![WorkspaceState {
+                local_id: "workspace".to_string(),
+                name: "alpha".to_string(),
+                cwd: None,
+                position: None,
+                template: None,
+                layout: None,
+                sidebar_collapsed: false,
+                panels: vec![PanelState {
+                    local_id: "shell".to_string(),
+                    name: "Shell".to_string(),
+                    kind: PanelKind::Shell,
+                    resume: PanelResume::Fresh,
+                    running_agent: Some(horizon_core::agent_detect::RunningAgent {
+                        binary: "claude".to_string(),
+                        config_dir: std::path::PathBuf::from("/home/user/.claude"),
+                        session_id: Some("550e8400-e29b-41d4-a716-446655440000".to_string()),
+                    }),
+                    ..PanelState::default()
+                }],
+            }],
+            ..RuntimeState::default()
+        };
+
+        assert!(
+            HorizonApp::runtime_state_needs_session_bootstrap(&state),
+            "Shell panel with running_agent.session_id=Some must trigger bootstrap"
+        );
+    }
+
+    /// A Shell panel with a running agent but NO captured `session_id` must NOT
+    /// trigger bootstrap — there is nothing to inject, so bootstrap is wasteful.
+    #[test]
+    fn runtime_state_skips_bootstrap_for_shell_with_running_agent_but_no_session_id() {
         let state = RuntimeState {
             workspaces: vec![WorkspaceState {
                 local_id: "workspace".to_string(),
@@ -710,8 +761,8 @@ mod tests {
         };
 
         assert!(
-            HorizonApp::runtime_state_needs_session_bootstrap(&state),
-            "Shell panel with running_agent=Some must trigger bootstrap"
+            !HorizonApp::runtime_state_needs_session_bootstrap(&state),
+            "Shell panel with running_agent.session_id=None must not trigger bootstrap"
         );
     }
 
