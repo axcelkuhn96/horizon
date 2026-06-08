@@ -500,9 +500,13 @@ fn handle_scrollbar_drag(ui: &mut egui::Ui, panel: &mut Panel, interaction: &Ter
     let clicked = interaction.scrollbar.clicked();
 
     // Release: discard the stored grab offset so the next press starts fresh.
+    // Only take a write lock on egui's global data map when an offset was
+    // actually stored — the common idle path takes the cheaper read lock.
     if !is_down && !clicked {
-        ui.ctx()
-            .data_mut(|d| d.remove::<ScrollbarGrabOffset>(interaction.scrollbar.id));
+        if ui.ctx().data(|d| d.get_temp::<ScrollbarGrabOffset>(interaction.scrollbar.id).is_some()) {
+            ui.ctx()
+                .data_mut(|d| d.remove::<ScrollbarGrabOffset>(interaction.scrollbar.id));
+        }
         return;
     }
 

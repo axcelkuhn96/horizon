@@ -88,7 +88,9 @@ pub(super) fn scrollbar_pointer_to_scrollback(
 
 #[cfg(test)]
 mod tests {
-    use super::{scrollbar_pointer_to_scrollback, scrollbar_thumb_height};
+    use super::{
+        scrollbar_pointer_to_scrollback, scrollbar_thumb_height, scrollbar_thumb_rect, scrollbar_thumb_top,
+    };
     use egui::{Pos2, Rect, Vec2};
 
     #[test]
@@ -99,6 +101,26 @@ mod tests {
 
         assert!(thumb_height >= 18.0);
         assert!(thumb_height <= 120.0);
+    }
+
+    #[test]
+    fn thumb_top_matches_rendered_thumb_rect() {
+        let track_rect = Rect::from_min_size(Pos2::new(10.0, 20.0), Vec2::new(12.0, 100.0));
+        let thumb_height = 20.0;
+
+        // scrollback = 0 → thumb pinned to the bottom of the track.
+        let top_at_bottom = scrollbar_thumb_top(track_rect, thumb_height, 0, 200);
+        assert!((top_at_bottom - scrollbar_thumb_rect(track_rect, thumb_height, 0, 200).min.y).abs() <= f32::EPSILON);
+        assert!((top_at_bottom - (track_rect.max.y - thumb_height)).abs() <= f32::EPSILON);
+
+        // scrollback = limit → thumb pinned to the top of the track.
+        let top_at_top = scrollbar_thumb_top(track_rect, thumb_height, 200, 200);
+        assert!((top_at_top - scrollbar_thumb_rect(track_rect, thumb_height, 200, 200).min.y).abs() <= f32::EPSILON);
+        assert!((top_at_top - track_rect.min.y).abs() <= f32::EPSILON);
+
+        // A midway position must also agree with the rendered thumb rect.
+        let top_mid = scrollbar_thumb_top(track_rect, thumb_height, 100, 200);
+        assert!((top_mid - scrollbar_thumb_rect(track_rect, thumb_height, 100, 200).min.y).abs() <= f32::EPSILON);
     }
 
     #[test]
