@@ -13,7 +13,7 @@ use crate::app::shortcuts::shortcut_event_matches;
 
 use super::ime::{prepare_terminal_keyboard_events, store_terminal_ime_enabled, terminal_ime_enabled};
 use super::layout::{GridMetrics, TerminalInteraction, cell_side, grid_point_from_position};
-use super::scrollbar::{scrollbar_pointer_to_scrollback, scrollbar_thumb_height};
+use super::scrollbar::{scrollbar_pointer_to_scrollback, scrollbar_thumb_height, scrollbar_thumb_top};
 
 pub(crate) const SSH_RECONNECT_SHORTCUT: ShortcutBinding =
     ShortcutBinding::new(ShortcutModifiers::PRIMARY_SHIFT, ShortcutKey::Letter('R'));
@@ -479,22 +479,73 @@ fn should_request_primary_paste(button: egui::PointerButton, pressed: bool, modi
         && !modifiers.command
 }
 
+/// Key for the per-panel grab-offset stored in egui's temporary data map.
+///
+/// When the user first presses the scrollbar thumb we record how far the
+/// pointer is from the thumb's top edge.  Every subsequent frame while the
+/// button is held we subtract that offset before computing the target
+/// scrollback, so the thumb tracks the pointer without teleporting.
+#[derive(Clone, Copy)]
+struct ScrollbarGrabOffset(f32);
+
 fn handle_scrollbar_drag(ui: &mut egui::Ui, panel: &mut Panel, interaction: &TerminalInteraction, visible_rows: u16) {
     let from_global = ui.ctx().layer_transform_from_global(ui.layer_id());
-    if (interaction.scrollbar.dragged() || interaction.scrollbar.clicked())
-        && let Some(pointer_position) = ui
-            .input(|input| input.pointer.interact_pos())
-            .map(|position| transform_pos(from_global, position))
-    {
-        let history_size = panel.terminal().map_or(0, horizon_core::Terminal::history_size);
-        let target_scrollback = scrollbar_pointer_to_scrollback(
-            pointer_position,
-            interaction.scrollbar.rect.shrink2(Vec2::new(2.0, 2.0)),
-            scrollbar_thumb_height(interaction.scrollbar.rect.height() - 4.0, visible_rows, history_size),
-            history_size,
-        );
-        panel.set_scrollback(target_scrollback);
+
+    // `Sense::click_and_drag` delays `dragged()` until `is_decidedly_dragging`
+    // (pointer moved > a few pixels).  To make the scrollbar respond
+    // immediately on press — matching the behaviour users expect — we use
+    // `is_pointer_button_down_on`, which is true from the very first frame the
+    // pointer is pressed over the widget.
+    let is_down = interaction.scrollbar.is_pointer_button_down_on();
+    let clicked = interaction.scrollbar.clicked();
+
+    // Release: discard the stored grab offset so the next press starts fresh.
+    if !is_down && !clicked {
+        ui.ctx()
+            .data_mut(|d| d.remove::<ScrollbarGrabOffset>(interaction.scrollbar.id));
+        return;
     }
+
+    let Some(pointer_position) = interaction
+        .scrollbar
+        .interact_pointer_pos()
+        .or_else(|| ui.input(|i| i.pointer.interact_pos()).map(|p| transform_pos(from_global, p)))
+    else {
+        return;
+    };
+
+    let history_size = panel.terminal().map_or(0, horizon_core::Terminal::history_size);
+    let track_rect = interaction.scrollbar.rect.shrink2(Vec2::new(2.0, 2.0));
+    let thumb_h = scrollbar_thumb_height(track_rect.height(), visible_rows, history_size);
+
+    // Compute or retrieve the grab offset.
+    // On the first press frame (`drag_started` is true, or no offset stored yet)
+    // we record pointer_y − thumb_top so the thumb follows the pointer smoothly.
+    let grab_offset = if is_down && !clicked {
+        if let Some(stored) = ui.ctx().data(|d| d.get_temp::<ScrollbarGrabOffset>(interaction.scrollbar.id)) {
+            stored.0
+        } else {
+            // First press frame: measure where on the thumb the pointer landed.
+            let current_scrollback = panel.terminal().map_or(0, horizon_core::Terminal::scrollback);
+            let thumb_top = scrollbar_thumb_top(track_rect, thumb_h, current_scrollback, history_size);
+            let offset = pointer_position.y - thumb_top;
+            ui.ctx()
+                .data_mut(|d| d.insert_temp(interaction.scrollbar.id, ScrollbarGrabOffset(offset)));
+            offset
+        }
+    } else {
+        // Plain click: no grab offset — point to the clicked position directly.
+        ui.ctx()
+            .data_mut(|d| d.remove::<ScrollbarGrabOffset>(interaction.scrollbar.id));
+        0.0
+    };
+
+    let effective_pos = Pos2::new(pointer_position.x, pointer_position.y - grab_offset);
+    let target_scrollback =
+        scrollbar_pointer_to_scrollback(effective_pos, track_rect, thumb_h, history_size);
+
+    panel.set_scrollback(target_scrollback);
+    ui.ctx().request_repaint();
 }
 
 fn transform_pos(from_global: Option<TSTransform>, pos: Pos2) -> Pos2 {
