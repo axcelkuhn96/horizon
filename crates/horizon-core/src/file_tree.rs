@@ -27,22 +27,62 @@ pub struct FileNode {
 /// Directories we never descend into regardless of .gitignore.
 const HARD_SKIP: [&str; 3] = [".git", "node_modules", "target"];
 
-/// Build a gitignore matcher rooted at `dir`, honoring `dir/.gitignore` plus any
-/// parent/global ignore files. Errors (missing files, bad globs) are swallowed:
-/// a partially-built — or empty — matcher just means "fewer things flagged
-/// ignored", never a panic. `.git`/`node_modules`/`target` are still removed by
-/// [`HARD_SKIP`] in the walk, independent of this matcher.
-fn build_ignore_matcher(dir: &Path) -> Gitignore {
-    let mut builder = GitignoreBuilder::new(dir);
-    // The directory's own .gitignore (the common case). `add` returns Some(err)
-    // on failure (e.g. file absent); treat that as "no rules from this file".
-    let _ = builder.add(dir.join(".gitignore"));
-    // Parent + global ignores, best-effort. add_line never touches disk; the
-    // global config path may not exist, so ignore any returned error.
-    match builder.build() {
-        Ok(gi) => gi,
-        Err(_) => Gitignore::empty(),
+/// A stack of per-directory `.gitignore` matchers, ordered nearest-first
+/// (the scanned dir's own `.gitignore`, then each ancestor up to the repo root).
+/// Each matcher is rooted at the directory whose `.gitignore` it came from, so
+/// anchored patterns like `dist/` resolve relative to that directory.
+struct IgnoreMatchers {
+    /// Nearest-first: `matchers[0]` is `dir`'s own `.gitignore`.
+    matchers: Vec<Gitignore>,
+}
+
+impl IgnoreMatchers {
+    /// Returns `true` if `path` is ignored. The nearest matcher with a decisive
+    /// rule wins, mirroring git: a closer `.gitignore` can whitelist (`!foo`)
+    /// something an ancestor ignored, so we stop at the first non-`None` match.
+    fn is_ignored(&self, path: &Path, is_dir: bool) -> bool {
+        for matcher in &self.matchers {
+            let m = matcher.matched(path, is_dir);
+            if m.is_ignore() {
+                return true;
+            }
+            if m.is_whitelist() {
+                return false;
+            }
+        }
+        false
     }
+}
+
+/// Build the ancestor-aware ignore matcher for `dir`: collect `dir/.gitignore`
+/// and every ancestor `.gitignore` walking UP to (and including) the repo root
+/// — the first ancestor containing a `.git` entry — or the filesystem root if
+/// no repo is found. Matchers are returned nearest-first so closer rules win.
+///
+/// Errors (missing files, bad globs) are swallowed: a missing `.gitignore` or a
+/// failed build simply contributes no rules, never a panic. `.git` /
+/// `node_modules` / `target` are still removed by [`HARD_SKIP`] in the walk,
+/// independent of this matcher.
+fn build_ignore_matcher(dir: &Path) -> IgnoreMatchers {
+    let mut matchers = Vec::new();
+    let mut current = Some(dir);
+    while let Some(d) = current {
+        let mut builder = GitignoreBuilder::new(d);
+        // `add` returns Some(err) on failure (e.g. the file is absent); that
+        // just means this directory contributes no ignore rules.
+        if builder.add(d.join(".gitignore")).is_none()
+            && let Ok(gi) = builder.build()
+        {
+            matchers.push(gi);
+        }
+        // Stop after the repo root (the dir holding `.git`); patterns above the
+        // repo do not apply to paths inside it.
+        if d.join(".git").exists() {
+            break;
+        }
+        current = d.parent();
+    }
+    IgnoreMatchers { matchers }
 }
 
 /// Scan a single directory level. Dirs first, then files, each alphabetical
@@ -85,7 +125,7 @@ pub fn scan_dir(dir: &Path) -> Result<Vec<FileNode>> {
             continue;
         };
         let is_dir = entry.file_type().is_some_and(|ft| ft.is_dir());
-        let ignored = matcher.matched(&path, is_dir).is_ignore();
+        let ignored = matcher.is_ignored(&path, is_dir);
         entries.push(FileNode {
             name,
             path,
@@ -666,6 +706,24 @@ mod tests {
 
         let nodes = scan_dir(dir.path()).expect("scan");
         assert!(!find(&nodes, "main.rs").expect("main.rs").ignored);
+    }
+
+    #[test]
+    fn scan_dir_honors_ancestor_gitignore() {
+        // root/.gitignore ignores `dist/`. Scanning root/app/ (fresh scan_dir,
+        // as lazy subdir expansion does) must still flag app/dist as ignored
+        // because the rule lives in an ANCESTOR .gitignore.
+        let root = tempfile::tempdir().expect("tempdir");
+        fs::write(root.path().join(".gitignore"), b"dist/\n").expect("root gitignore");
+        let app = root.path().join("app");
+        fs::create_dir(&app).expect("mkdir app");
+        fs::create_dir(app.join("dist")).expect("mkdir dist");
+        fs::write(app.join("dist").join("bundle.js"), b"").expect("bundle");
+        fs::write(app.join("keep.ts"), b"").expect("keep");
+
+        let nodes = scan_dir(&app).expect("scan");
+        assert!(find(&nodes, "dist").expect("dist").ignored, "ancestor rule must apply");
+        assert!(!find(&nodes, "keep.ts").expect("keep.ts").ignored);
     }
 
     #[test]
