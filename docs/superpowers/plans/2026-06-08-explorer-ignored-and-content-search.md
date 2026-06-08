@@ -112,6 +112,43 @@ Source prompt: refined via /piloto on 2026-06-08. No `_bmad/` in this repo → B
 
 > OPEN QUESTION (user): preferred refresh trigger — (a) throttled timer poll (e.g. every ~1.5s while visible), (b) on explorer regaining focus, (c) filesystem watch via `notify` crate (heavier, new dep — discouraged per no-new-deps), or (d) combination of a+b. Pending answer.
 
+## Story 5 — Feature: drop external files into an explorer folder to COPY them (added 2026-06-08 mid-execution)
+
+**Reported:** user can't drag files into a folder in the explorer. Want: drop OS files onto the explorer → COPY them into the target folder (decided: copy, non-destructive). Drop target = folder under the cursor (folder row → into it; file row → its parent dir; empty area → explorer root), with the target folder highlighted on hover.
+
+**Foundation exists:** `crates/horizon-ui/src/app/file_drop.rs` already handles `dropped_files`/`hovered_files`, partitions editor vs non-editor drops, has `select_terminal_drop_target`, `native_file_drop_local_pos`, paste-into-terminal. Extend this for the explorer.
+
+### Task 5.1 — Hit-test the explorer drop target
+- Map screen drop position → the file-tree row under it → resolve the destination directory (folder row → that dir; file row → its parent; none/empty → explorer root). Needs row rects from `file_tree_widget.rs` painting (it paints rows manually; capture row rect + path during paint into a per-frame map the drop handler can query). Extract a PURE helper `fn drop_target_dir(hit: Option<(&Path, bool /*is_dir*/)>, root: &Path) -> PathBuf` and unit-test it.
+
+### Task 5.2 — Copy the dropped files into the target dir
+- Core helper in horizon-core (e.g. `fn copy_into_dir(srcs: &[PathBuf], dest_dir: &Path) -> Vec<Result<PathBuf, CopyError>>`): copy each file into dest; recurse for directories; handle name collisions (e.g. append " copy"/" (2)" — pick a rule, test it); never overwrite silently. No panics, strict-clippy clean. Unit-test the name-collision/resolve logic with a pure helper `fn unique_dest_name(dest_dir, file_name) -> PathBuf` or similar.
+- After copy, refresh the affected folder's children in the tree so the new files appear (reuse the tree refresh path).
+
+### Task 5.3 — Wire into file_drop.rs + hover highlight
+- When non-editor OS files are dropped over a FileExplorer panel, route to 5.1+5.2 instead of (or in addition to) the terminal paste path. While files are HOVERED over the explorer, paint a highlight on the target folder row (use theme token).
+- AC: dropping files from the OS file manager onto a folder row copies them in; original untouched; tree shows them; wrong-panel/terminal drop behavior unchanged; live screenshot.
+
+### Task 5.4 — Ctrl+V to paste files from the system clipboard into a folder
+- When the explorer is focused, Ctrl+V should COPY files referenced by the system clipboard into a target folder (same copy/collision logic as 5.2).
+- TARGET (no selection model exists today): introduce a minimal "selected entry" on the explorer (clicking a row marks it selected, painted highlighted). Ctrl+V pastes into the selected folder (or the selected file's parent), falling back to the explorer root if nothing selected. This selection also lets "reveal-in-tree" (Task F) highlight, and the drop highlight, share one concept. Keep it small; pure helper `fn paste_target_dir(selected: Option<(&Path,bool)>, root:&Path)->PathBuf` unit-tested.
+- ✅ SPIKE RESULT (2026-06-08): FEASIBLE, NO NEW DEP. `arboard 3.6.1` (already in the build) exposes a public cross-platform getter `arboard::Clipboard::new()?.get().file_list() -> Result<Vec<PathBuf>>` (lib.rs:205), backed by `text/uri-list` on both Wayland (`WlDataControl::get_file_list`) and X11 (`x11.get_file_list`). Env is Wayland (`wl-paste` + `xclip` present as backup). So Ctrl+V reads copied file paths directly via arboard — implement it.
+- AC: with files copied in the OS file manager, Ctrl+V in the focused explorer copies them into the selected folder (if the platform spike succeeds); original untouched; tree refreshes. If the spike fails, report the limitation honestly and gate this task.
+
+> Note: validate live; do NOT restart the user's running horizon instance (build + swap binary only).
+> Story 5 contains a real platform risk (clipboard file-list on Linux). Drag-and-drop (5.1-5.3) is the reliable core; Ctrl+V (5.4) is best-effort pending the spike.
+
+## Story 6 — Feature: restore running terminal session (e.g. `claude`) across app restart (added 2026-06-08)
+
+**Reported:** if the app is closed while a terminal panel has a process running (e.g. `claude`), reopening the app does NOT restore/resume that session — the running program is gone.
+
+**Status:** NOT YET SCOPED. Meatier than Stories 1-5; needs investigation + a scoping decision with the user before planning. Open questions:
+- Does the fork already persist session state? There's `.horizon/sessions/<id>/runtime.yaml` and terminal `replay_bytes`/scrollback replay (per memory). Map what survives today (scrollback only? cwd? command?) vs what's lost (the live child process).
+- Restoring a *running* foreign process across a real app exit is generally impossible unless the process survives the parent (detached) — true session persistence usually needs a tmux/abduco/dtach-style layer or a persistent backend the PTY reattaches to. Decide: (a) reattach to a still-alive backend (requires running shells under a persistence layer / not killing them on close), (b) re-run the last command on restore (re-launches `claude` fresh, losing in-memory state), or (c) just restore scrollback + cwd (what may already partially exist). Each is a very different scope.
+- Clarify with user what "restore the claude session" must mean: the live conversation/process resumed, or just the panel/command/cwd re-created.
+
+> Tackle AFTER Stories 1-5 land. Likely its own branch.
+
 ## Risks
 1. Replicating WalkBuilder's exact gitignore semantics with a standalone matcher (nested `.gitignore`, parents, global) — mismatch could mis-tag entries. Mitigation: TDD against a temp tree with nested ignores.
 2. Line-count cap (1000) on `file_tree_widget.rs` (already 886). Mitigation: search UI in a NEW module; extract from file_tree.rs if it grows.
