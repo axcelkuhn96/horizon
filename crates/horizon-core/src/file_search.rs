@@ -141,16 +141,19 @@ impl Matcher {
                 if needle.is_empty() {
                     return Vec::new();
                 }
-                let haystack = if *case_sensitive {
-                    line.to_string()
+                // Case-sensitive: search the line directly (no clone). Otherwise
+                // build an ASCII-lowercased copy. ASCII lowercasing never changes
+                // byte length, so offsets into `lowered` line up exactly with the
+                // original line bytes (and stay on UTF-8 char boundaries).
+                let lowered;
+                let haystack: &str = if *case_sensitive {
+                    line
                 } else {
-                    ascii_lowercase(line)
+                    lowered = ascii_lowercase(line);
+                    &lowered
                 };
                 let mut spans = Vec::new();
                 let mut from = 0usize;
-                // `haystack` has the same byte length as `line` because ASCII
-                // lowercasing never changes byte length, so the offsets line up
-                // with the original line bytes.
                 while let Some(rel) = haystack[from..].find(needle.as_str()) {
                     let start = from + rel;
                     let end = start + needle.len();
@@ -219,11 +222,14 @@ pub fn search_files(
 
     let mut results: Vec<FileSearchResult> = Vec::new();
     let mut total_matches: usize = 0;
-    let mut truncated = false;
+
+    // Over-scan by one: collect up to `max_results + 1` matches so we can
+    // distinguish "exactly at the cap with nothing beyond" (NOT truncated) from
+    // "genuinely overflowed" (truncated). The +1 is trimmed off below.
+    let budget = opts.max_results.saturating_add(1);
 
     for entry in walker {
-        if total_matches >= opts.max_results {
-            truncated = true;
+        if total_matches >= budget {
             break;
         }
 
@@ -238,6 +244,8 @@ pub fn search_files(
 
         let path = entry.path();
 
+        // NOTE: this stat + binary-sniff + read path opens the file up to three
+        // times. Left as-is for clarity; the bounded sizes keep it cheap.
         if !file_is_searchable(path, opts.max_file_bytes) {
             continue;
         }
@@ -246,11 +254,8 @@ pub fn search_files(
             continue; // non-UTF8 or IO error: skip
         };
 
-        let remaining = opts.max_results.saturating_sub(total_matches);
-        let (found, hit_cap) = scan_contents(&contents, &matcher, remaining);
-        if hit_cap {
-            truncated = true;
-        }
+        let remaining = budget.saturating_sub(total_matches);
+        let found = scan_contents(&contents, &matcher, remaining);
 
         if !found.is_empty() {
             total_matches += found.len();
@@ -259,15 +264,16 @@ pub fn search_files(
                 matches: found,
             });
         }
-
-        if total_matches >= opts.max_results {
-            truncated = true;
-            break;
-        }
     }
 
-    // WalkBuilder order is not guaranteed stable; sort for determinism.
+    // WalkBuilder order is not guaranteed stable; sort for determinism. Trim any
+    // overflow (matches beyond `max_results`) AFTER sorting, so the omitted
+    // matches are the ones that sort last by path.
     results.sort_by(|a, b| a.path.cmp(&b.path));
+    let truncated = total_matches > opts.max_results;
+    if truncated {
+        trim_to(&mut results, opts.max_results);
+    }
 
     Ok(SearchOutcome { results, truncated })
 }
@@ -301,12 +307,12 @@ fn looks_binary(path: &Path) -> bool {
     }
 }
 
-/// Scan already-loaded file `contents` line by line. Returns the matches found
-/// and whether scanning stopped early because `remaining` was exhausted.
-fn scan_contents(contents: &str, matcher: &Matcher, remaining: usize) -> (Vec<SearchMatch>, bool) {
+/// Scan already-loaded file `contents` line by line, collecting at most
+/// `remaining` matches (in line order, then position within the line).
+fn scan_contents(contents: &str, matcher: &Matcher, remaining: usize) -> Vec<SearchMatch> {
     let mut found = Vec::new();
     if remaining == 0 {
-        return (found, true);
+        return found;
     }
 
     for (idx, line) in contents.lines().enumerate() {
@@ -317,12 +323,32 @@ fn scan_contents(contents: &str, matcher: &Matcher, remaining: usize) -> (Vec<Se
                 span: (start, end),
             });
             if found.len() >= remaining {
-                return (found, true);
+                return found;
             }
         }
     }
 
-    (found, false)
+    found
+}
+
+/// Trim `results` so the total number of matches across all files is at most
+/// `cap`, dropping matches (and then empty files) from the tail. Callers must
+/// sort `results` by path first so the dropped matches are the ones that sort
+/// last.
+fn trim_to(results: &mut Vec<FileSearchResult>, cap: usize) {
+    let mut kept = 0usize;
+    for result in results.iter_mut() {
+        if kept >= cap {
+            result.matches.clear();
+            continue;
+        }
+        let room = cap - kept;
+        if result.matches.len() > room {
+            result.matches.truncate(room);
+        }
+        kept += result.matches.len();
+    }
+    results.retain(|r| !r.matches.is_empty());
 }
 
 #[cfg(test)]
@@ -536,6 +562,39 @@ mod tests {
         let total: usize = outcome.results.iter().map(|r| r.matches.len()).sum();
         assert_eq!(total, 2);
         assert!(outcome.truncated);
+    }
+
+    #[test]
+    fn exact_cap_boundary_is_not_truncated() {
+        let dir = TempDir::new().expect("tempdir");
+        // Exactly 2 matches total with nothing beyond the cap of 2.
+        write(dir.path(), "a.txt", b"needle\nneedle\n");
+
+        let capped = FileSearchOptions {
+            max_results: 2,
+            ..opts()
+        };
+        let outcome = search_files(dir.path(), "needle", &capped).expect("search");
+        let total: usize = outcome.results.iter().map(|r| r.matches.len()).sum();
+        assert_eq!(total, 2, "all matches up to the cap are returned");
+        assert!(
+            !outcome.truncated,
+            "truncated must be false when nothing was actually omitted"
+        );
+    }
+
+    #[test]
+    fn ascii_query_against_non_ascii_line_keeps_char_boundaries() {
+        let dir = TempDir::new().expect("tempdir");
+        // "café" contains a multi-byte UTF-8 char before and after the match.
+        write(dir.path(), "a.txt", "café NEEDLE café\n".as_bytes());
+
+        let outcome = search_files(dir.path(), "NEEDLE", &opts()).expect("search");
+        assert_eq!(outcome.results.len(), 1);
+        let m = &outcome.results[0].matches[0];
+        // Slicing with the reported span must land on UTF-8 char boundaries and
+        // yield exactly the matched text.
+        assert_eq!(&m.line_text[m.span.0..m.span.1], "NEEDLE");
     }
 
     #[test]
