@@ -33,6 +33,8 @@ pub enum CommandId {
 
     // Search
     ToggleSearch,
+    /// Search across file contents in the focused File Explorer panel.
+    SearchFileContents,
 
     // Input
     /// Flip whether 2-finger scroll over a panel pans the canvas or scrolls
@@ -193,6 +195,12 @@ fn global_commands(shortcuts: &AppShortcuts, primary_label: &str) -> Vec<Command
             "Search Terminals",
             shortcuts.search.display_label(primary_label),
             &["find", "search", "grep", "text"],
+        ),
+        command_entry(
+            CommandId::SearchFileContents,
+            "Search File Contents",
+            shortcuts.search.display_label(primary_label),
+            &["find", "search", "grep", "files", "explorer", "contents"],
         ),
     ]
 }

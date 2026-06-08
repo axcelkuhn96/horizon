@@ -1,5 +1,5 @@
 use egui::Context;
-use horizon_core::Direction;
+use horizon_core::{Direction, PanelKind};
 
 use crate::app::HorizonApp;
 use crate::app::shortcuts::shortcut_pressed;
@@ -12,6 +12,16 @@ use super::support::{
     command_palette_panel_entries, command_palette_preset_entries, command_palette_workspace_entries,
     detached_workspace_ids,
 };
+
+/// Returns the command `Ctrl+Shift+F` should trigger given the focused panel
+/// kind. When the File Explorer is focused it maps to a content search across
+/// files; otherwise it keeps the existing terminal search toggle.
+fn search_shortcut_command(focused_kind: Option<PanelKind>) -> CommandId {
+    match focused_kind {
+        Some(PanelKind::FileExplorer) => CommandId::SearchFileContents,
+        _ => CommandId::ToggleSearch,
+    }
+}
 
 impl HorizonApp {
     pub(in crate::app) fn open_command_palette(&mut self) {
@@ -139,6 +149,12 @@ impl HorizonApp {
                     self.search_overlay = Some(SearchOverlay::new());
                 }
             }
+            CommandId::SearchFileContents => {
+                // TODO(search-panel): open the File Explorer content-search UI.
+                // Wired in a later task; kept as a no-op (never panics) so the
+                // contextual Ctrl+Shift+F dispatch and match stay exhaustive.
+                tracing::info!("search file contents requested (explorer focused)");
+            }
             CommandId::ToggleScrollPan => {
                 self.scroll_pans_over_panels = !self.scroll_pans_over_panels;
                 tracing::info!(
@@ -208,24 +224,73 @@ impl HorizonApp {
             (self.shortcuts.open_remote_hosts, CommandId::OpenRemoteHosts),
             (self.shortcuts.toggle_sessions, CommandId::ToggleSessions),
             (self.shortcuts.new_terminal, CommandId::NewPanel),
-            (self.shortcuts.search, CommandId::ToggleSearch),
             (self.shortcuts.toggle_scroll_pan, CommandId::ToggleScrollPan),
         ];
 
-        let (toggle_palette, triggered_command) = ctx.input(|input| {
+        // The search shortcut (Ctrl+Shift+F) is handled separately so it can be
+        // contextual: explorer focused -> content search, otherwise the terminal
+        // search toggle. Every other binding keeps its existing behavior.
+        let search_binding = self.shortcuts.search;
+        let (toggle_palette, search_pressed, triggered_command) = ctx.input(|input| {
             let palette = shortcut_pressed(input, self.shortcuts.command_palette);
+            let search = shortcut_pressed(input, search_binding);
             let command = shortcut_bindings
                 .iter()
                 .find(|(binding, _)| shortcut_pressed(input, *binding))
                 .map(|(_, id)| id.clone());
-            (palette, command)
+            (palette, search, command)
         });
 
         if toggle_palette {
             self.toggle_command_palette();
         }
+        if search_pressed {
+            let focused_kind = self
+                .board
+                .focused
+                .and_then(|id| self.board.panel(id))
+                .map(|panel| panel.kind);
+            let command_id = search_shortcut_command(focused_kind);
+            self.execute_command(ctx, &command_id);
+        }
         if let Some(command_id) = triggered_command {
             self.execute_command(ctx, &command_id);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use horizon_core::PanelKind;
+
+    use super::{CommandId, search_shortcut_command};
+
+    #[test]
+    fn search_shortcut_maps_explorer_to_content_search() {
+        assert_eq!(
+            search_shortcut_command(Some(PanelKind::FileExplorer)),
+            CommandId::SearchFileContents
+        );
+    }
+
+    #[test]
+    fn search_shortcut_maps_editor_to_terminal_search() {
+        assert_eq!(
+            search_shortcut_command(Some(PanelKind::Editor)),
+            CommandId::ToggleSearch
+        );
+    }
+
+    #[test]
+    fn search_shortcut_maps_terminal_to_terminal_search() {
+        assert_eq!(
+            search_shortcut_command(Some(PanelKind::Shell)),
+            CommandId::ToggleSearch
+        );
+    }
+
+    #[test]
+    fn search_shortcut_maps_none_to_terminal_search() {
+        assert_eq!(search_shortcut_command(None), CommandId::ToggleSearch);
     }
 }
