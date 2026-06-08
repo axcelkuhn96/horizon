@@ -4,7 +4,7 @@
 >
 > **O que eu fiz:**
 > - **Navegação por teclado** entre terminais do workspace (`Ctrl+Shift+Setas`) com foco de digitação imediato (sem mexer no zoom).
-> - **File Explorer** (painel "Files"): árvore de arquivos estilo VSCode com ícones por tipo (Nerd Font), cores de status do git (U/M/A/D), filtro "só não-commitados" agrupado por pasta, e duplo clique abre o arquivo no VS Code.
+> - **File Explorer** (painel "Files"): árvore de arquivos estilo VSCode com ícones por tipo (Nerd Font), cores de status do git (U/M/A/D), filtro "só não-commitados" agrupado por pasta, e duplo clique abre o arquivo no VS Code. Agora também: **busca de conteúdo** (`Ctrl+Shift+F` com o painel focado), **arrastar/`Ctrl+V`** pra copiar arquivos pra dentro de uma pasta, **arquivos ignorados** (gitignored, ex.: `temp/`, `tmp/`) aparecem **esmaecidos** em vez de sumir, e as **cores de git atualizam sozinhas** (sem precisar dar refresh).
 > - **Pan no touchpad** configurável (dois dedos / `Tab`+dois dedos / toggle `Ctrl+Shift+P`) movendo o canvas sobre os terminais.
 > - **Auto-hide da barra lateral**, com a área liberada virando canvas usável.
 > - **Collapse** por terminal (titlebar) e por grupo de workspace na barra lateral — persistentes.
@@ -18,6 +18,8 @@
 > | `Ctrl+Shift+←↑↓→` | Foca o terminal vizinho no workspace (só troca o foco, zoom intacto) |
 > | Duplo clique em arquivo (painel Files) | Abre o arquivo no VS Code (`code`) |
 > | Funil 🔽 no cabeçalho do painel Files | Filtra para só arquivos não-commitados, agrupados por pasta |
+> | `Ctrl+Shift+F` (painel Files focado) | Busca por **conteúdo** nos arquivos do projeto (resultados clicáveis) |
+> | Arrastar arquivos do SO / `Ctrl+V` no painel Files | **Copia** os arquivos pra dentro da pasta sob o cursor / selecionada |
 > | `Ctrl+Shift+P` | Liga/desliga "dois dedos movem o canvas" sobre os terminais |
 > | Segurar `Tab` + dois dedos | Move o canvas em 2D (o Tab não vaza pro terminal enquanto move) |
 > | Segurar `Espaço` + scroll | Move o canvas sobre os painéis |
