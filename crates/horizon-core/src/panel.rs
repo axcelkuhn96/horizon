@@ -349,6 +349,13 @@ impl Panel {
         self.content.terminal().is_some_and(Terminal::child_exited)
     }
 
+    /// Returns the PID of the underlying PTY child process, or `None` when the
+    /// panel does not have a terminal or the platform does not expose the PID.
+    #[must_use]
+    pub fn child_pid(&self) -> Option<i32> {
+        self.content.terminal().and_then(Terminal::child_pid)
+    }
+
     /// `true` when this panel's child process died and the panel is NOT an SSH
     /// panel (SSH has its own `SshConnectionStatus::Disconnected` flow).
     /// Editor/GitChanges/Usage panels have no terminal, so this is `false`.

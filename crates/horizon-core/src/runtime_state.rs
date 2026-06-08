@@ -6,6 +6,7 @@ use std::path::Path;
 use serde::{Deserialize, Deserializer, Serialize};
 use uuid::Uuid;
 
+use crate::agent_detect::{RunningAgent, detect_running_agent};
 use crate::board::{Board, WorkspaceLayout};
 use crate::config::{Config, TerminalConfig, WindowConfig, WorkspaceConfig};
 use crate::error::{Error, Result};
@@ -245,6 +246,18 @@ impl RuntimeState {
                             // panel that has not produced any output yet saves `false`.
                             had_session_activity: panel.kind.supports_session_binding()
                                 && panel.last_output_at_millis.is_some(),
+                            // Detect which Claude agent (primary / secondary account) is
+                            // running inside this Shell panel, so the session-resume flow
+                            // can restart the correct binary.  Only attempted for Shell
+                            // panels whose live OSC title contains "claude"
+                            // (case-insensitive; matches e.g. "✳ Claude Code").
+                            running_agent: if panel.kind == PanelKind::Shell
+                                && panel.terminal_title.to_lowercase().contains("claude")
+                            {
+                                panel.child_pid().and_then(detect_running_agent)
+                            } else {
+                                None
+                            },
                         }
                     })
                     .collect();
@@ -422,6 +435,12 @@ pub struct PanelState {
     /// (`kind.supports_session_binding()`); always `false` for others.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub had_session_activity: bool,
+    /// The Claude agent detected as running inside this Shell panel at save time.
+    /// Only set for `kind == Shell` panels whose terminal title contains "claude".
+    /// Omitted from serialized YAML when `None`; old runtime.yaml files without
+    /// this field deserialize to `None` (retro-compatible via `#[serde(default)]`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub running_agent: Option<RunningAgent>,
 }
 
 impl PanelState {
@@ -469,6 +488,7 @@ impl PanelState {
             editor_content: None,
             collapsed: panel.collapsed,
             had_session_activity: false,
+            running_agent: None,
         }
     }
 
@@ -541,6 +561,7 @@ impl Default for PanelState {
             editor_content: None,
             collapsed: false,
             had_session_activity: false,
+            running_agent: None,
         }
     }
 }
@@ -746,6 +767,60 @@ mod tests {
                 .as_ref()
                 .map(|binding| binding.session_id.as_str()),
             Some("session-42")
+        );
+    }
+
+    #[test]
+    fn from_board_skips_running_agent_for_non_shell_panel_with_claude_title() {
+        // The running_agent guard must reject any non-Shell panel, even when its
+        // terminal title contains "claude" — detect_running_agent is never called.
+        let mut board = Board::new();
+        let workspace_id = board.create_workspace_at("alpha", [120.0, 64.0]);
+        let panel_id = board
+            .create_panel(
+                PanelOptions {
+                    name: Some("agent".to_string()),
+                    kind: PanelKind::Codex,
+                    ..PanelOptions::default()
+                },
+                workspace_id,
+            )
+            .expect("panel should spawn");
+        board.panel_mut(panel_id).expect("panel").terminal_title = "✳ Claude Code".to_string();
+
+        let state = RuntimeState::from_board(&board, WindowConfig::default(), CanvasViewState::default());
+        let saved_panel = state.workspaces[0].panels.first().expect("panel state");
+
+        assert!(
+            saved_panel.running_agent.is_none(),
+            "running_agent must stay None for non-Shell panels even with a claude title"
+        );
+    }
+
+    #[test]
+    fn from_board_skips_running_agent_for_shell_panel_without_claude_title() {
+        // A Shell panel with an empty title fails the case-insensitive
+        // contains("claude") check, so detection is never attempted.
+        let mut board = Board::new();
+        let workspace_id = board.create_workspace_at("alpha", [120.0, 64.0]);
+        let panel_id = board
+            .create_panel(
+                PanelOptions {
+                    name: Some("shell".to_string()),
+                    kind: PanelKind::Shell,
+                    ..PanelOptions::default()
+                },
+                workspace_id,
+            )
+            .expect("panel should spawn");
+        board.panel_mut(panel_id).expect("panel").terminal_title = String::new();
+
+        let state = RuntimeState::from_board(&board, WindowConfig::default(), CanvasViewState::default());
+        let saved_panel = state.workspaces[0].panels.first().expect("panel state");
+
+        assert!(
+            saved_panel.running_agent.is_none(),
+            "running_agent must stay None for a Shell panel whose title does not contain 'claude'"
         );
     }
 
@@ -1080,6 +1155,54 @@ workspaces: []
         let yaml = RuntimeState::default().to_yaml().expect("serialize runtime state");
 
         assert!(!yaml.contains("detached_workspaces"));
+    }
+
+    #[test]
+    fn running_agent_defaults_to_none_when_missing_from_runtime_yaml() {
+        // Retro-compat: a runtime.yaml written by an older build that does not
+        // include the `running_agent` key must deserialize to `None` — not fail.
+        let yaml = r"version: 2
+workspaces:
+  - local_id: ws-1
+    name: Dev
+    panels:
+      - local_id: panel-1
+        name: Shell
+        kind: shell
+        had_session_activity: false
+";
+        let state: RuntimeState = serde_yaml::from_str(yaml).expect("deserialize runtime state");
+        assert_eq!(state.workspaces.len(), 1);
+        let panel = &state.workspaces[0].panels[0];
+        assert!(
+            panel.running_agent.is_none(),
+            "running_agent must default to None for old runtime.yaml files that lack the field"
+        );
+    }
+
+    #[test]
+    fn running_agent_omitted_from_yaml_when_none() {
+        let state = RuntimeState {
+            workspaces: vec![WorkspaceState {
+                local_id: "workspace".to_string(),
+                name: "alpha".to_string(),
+                panels: vec![PanelState {
+                    local_id: "panel".to_string(),
+                    name: "Shell".to_string(),
+                    kind: PanelKind::Shell,
+                    running_agent: None,
+                    ..PanelState::default()
+                }],
+                ..WorkspaceState::default()
+            }],
+            ..RuntimeState::default()
+        };
+
+        let yaml = state.to_yaml().expect("serialize runtime state");
+        assert!(
+            !yaml.contains("running_agent"),
+            "running_agent: None must not appear in serialized YAML (skip_serializing_if)"
+        );
     }
 
     #[test]

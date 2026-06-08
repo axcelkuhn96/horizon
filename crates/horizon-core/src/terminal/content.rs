@@ -166,6 +166,14 @@ impl Terminal {
         current_cwd_for_pid(self.child_pid?)
     }
 
+    /// Returns the PID of the child process spawned for this terminal, if known.
+    ///
+    /// On Windows this is always `None`; on Unix it is the PID of the PTY child.
+    #[must_use]
+    pub fn child_pid(&self) -> Option<i32> {
+        self.child_pid.and_then(|pid| i32::try_from(pid).ok())
+    }
+
     #[must_use]
     pub fn child_exited(&self) -> bool {
         self.child_exited
