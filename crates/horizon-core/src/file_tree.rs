@@ -11,7 +11,7 @@ use ignore::WalkBuilder;
 use crate::error::Result;
 use crate::file_search::FileSearchOptions;
 use crate::file_search_runner::{SearchRunner, SearchState};
-use crate::git_status::{FileStatus, GitStatus};
+use crate::git_status::{FileStatus, GitStatus, compute_status};
 
 /// Quiescence window the content-search must observe before dispatching a new
 /// query to the background runner. The runner does NOT debounce itself (see its
@@ -43,6 +43,39 @@ pub fn should_dispatch(
         return false;
     }
     elapsed_since_edit >= debounce
+}
+
+/// Throttle interval for the File Explorer's automatic git-status refresh.
+///
+/// The shared [`crate::git_watcher::GitWatcher`] only recomputes status when the
+/// `.git/index` mtime changes (i.e. on `git add` / `git commit`); a plain
+/// working-tree edit or a new untracked file never touches the index, so the
+/// green/changed decorations would otherwise go stale until a commit. The
+/// explorer therefore recomputes its own snapshot on this cadence while visible.
+/// `git2` status on a normal repo is fast; 1.5s keeps it cheap.
+pub const GIT_REFRESH_INTERVAL: Duration = Duration::from_millis(1500);
+
+/// Decide whether to recompute the explorer's git status this frame.
+///
+/// Pure and clock-free (the caller passes `elapsed_since_last`), so the trigger
+/// logic stays unit-testable. Returns `true` when ANY of:
+/// - `focus_regained` — the panel just became focused this frame (immediate
+///   refresh so the user sees fresh decorations on tab-back);
+/// - `elapsed_since_last` is `None` — status has never been refreshed yet;
+/// - `elapsed_since_last >= interval` — the throttle window has elapsed.
+#[must_use]
+pub fn should_refresh_git(
+    elapsed_since_last: Option<Duration>,
+    interval: Duration,
+    focus_regained: bool,
+) -> bool {
+    if focus_regained {
+        return true;
+    }
+    match elapsed_since_last {
+        None => true,
+        Some(elapsed) => elapsed >= interval,
+    }
 }
 
 /// One node in the file tree. `children == None` means "directory not yet
@@ -359,6 +392,13 @@ pub struct FileTreeState {
     pub changed_expanded: HashSet<PathBuf>,
     /// Content-search ("search in files") panel state, scoped to `root`.
     pub search: SearchPanelState,
+    /// Instant of the last automatic git-status recompute. `None` until the
+    /// first refresh. Drives the [`GIT_REFRESH_INTERVAL`] throttle so we never
+    /// run `git2` status every frame.
+    last_git_refresh: Option<Instant>,
+    /// `is_focused` value observed on the previous frame, so the show path can
+    /// detect a focus-regain edge (`!prev && now`) and refresh immediately.
+    prev_focus: bool,
 }
 
 /// State for the File Explorer's content-search panel (the VSCode-style "search
@@ -416,6 +456,8 @@ impl FileTreeState {
             show_only_changes: false,
             changed_expanded: HashSet::new(),
             search: SearchPanelState::default(),
+            last_git_refresh: None,
+            prev_focus: false,
         }
     }
 
@@ -485,6 +527,32 @@ impl FileTreeState {
 
     pub fn set_git_status(&mut self, status: Arc<GitStatus>) {
         self.git_status = Some(status);
+    }
+
+    /// Per-frame git-status refresh driven from the explorer show path.
+    ///
+    /// `is_focused` is the panel's current focus state this frame. A focus-regain
+    /// edge (`!prev_focus && is_focused`) forces an immediate refresh; otherwise
+    /// the [`GIT_REFRESH_INTERVAL`] throttle applies (see [`should_refresh_git`]).
+    /// When a refresh is due we recompute the snapshot with the SAME
+    /// [`compute_status`] used by the initial load / watcher, stamp
+    /// `last_git_refresh`, and keep the previous snapshot on error (transient
+    /// git failures must not blank out the decorations). Always records
+    /// `is_focused` as the new previous-focus before returning.
+    pub fn maybe_refresh_git_status(&mut self, is_focused: bool) {
+        let focus_regained = is_focused && !self.prev_focus;
+        self.prev_focus = is_focused;
+
+        let elapsed = self.last_git_refresh.map(|t| t.elapsed());
+        if !should_refresh_git(elapsed, GIT_REFRESH_INTERVAL, focus_regained) {
+            return;
+        }
+
+        self.last_git_refresh = Some(Instant::now());
+        // Reuse the shared computation; on failure keep the existing snapshot.
+        if let Ok(status) = compute_status(&self.root) {
+            self.git_status = Some(Arc::new(status));
+        }
     }
 
     /// Flip the uncommitted-files filter. Any change of value resets the
@@ -1020,6 +1088,65 @@ mod tests {
         assert!(
             state.search.last_dispatched().is_empty(),
             "must wait out the debounce after an edit"
+        );
+    }
+
+    #[test]
+    fn should_refresh_git_true_on_focus_regain_even_if_just_refreshed() {
+        // focus_regained wins even when the throttle window has NOT elapsed.
+        assert!(should_refresh_git(
+            Some(Duration::from_millis(0)),
+            GIT_REFRESH_INTERVAL,
+            true,
+        ));
+    }
+
+    #[test]
+    fn should_refresh_git_true_when_never_refreshed() {
+        // None == never refreshed => always refresh (initial load), no focus edge.
+        assert!(should_refresh_git(None, GIT_REFRESH_INTERVAL, false));
+    }
+
+    #[test]
+    fn should_refresh_git_true_when_interval_elapsed() {
+        assert!(should_refresh_git(
+            Some(GIT_REFRESH_INTERVAL),
+            GIT_REFRESH_INTERVAL,
+            false,
+        ));
+        assert!(should_refresh_git(
+            Some(GIT_REFRESH_INTERVAL + Duration::from_millis(1)),
+            GIT_REFRESH_INTERVAL,
+            false,
+        ));
+    }
+
+    #[test]
+    fn should_refresh_git_false_when_recent_and_no_focus_change() {
+        // Within the throttle window and no focus regain => skip.
+        assert!(!should_refresh_git(
+            Some(GIT_REFRESH_INTERVAL - Duration::from_millis(1)),
+            GIT_REFRESH_INTERVAL,
+            false,
+        ));
+    }
+
+    #[test]
+    fn maybe_refresh_git_status_populates_for_modified_file_in_temp_repo() {
+        // Reuse of compute_status via the explorer entry point: a temp repo with
+        // an untracked file must yield a non-empty snapshot after a refresh.
+        let dir = tempfile::tempdir().expect("tempdir");
+        git2::Repository::init(dir.path()).expect("init repo");
+        std::fs::write(dir.path().join("new.txt"), b"hello").expect("write file");
+
+        let mut state = FileTreeState::new(dir.path().to_path_buf());
+        assert!(state.git_status.is_none());
+        // First call: never refreshed => recomputes (focus irrelevant here).
+        state.maybe_refresh_git_status(false);
+        let status = state.git_status.as_ref().expect("status populated");
+        assert!(
+            status.changes.iter().any(|c| c.path == "new.txt"),
+            "untracked file must appear in refreshed status"
         );
     }
 

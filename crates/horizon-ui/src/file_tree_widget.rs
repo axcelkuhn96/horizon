@@ -156,7 +156,7 @@ impl<'a> FileExplorerView<'a> {
 
     /// Renders the file explorer panel. Returns `true` if the pointer is over
     /// the panel (for focus tracking), mirroring `GitChangesView`.
-    pub fn show(&mut self, ui: &mut egui::Ui, _is_focused: bool) -> bool {
+    pub fn show(&mut self, ui: &mut egui::Ui, is_focused: bool) -> bool {
         let clicked = ui.rect_contains_pointer(ui.max_rect());
 
         let panel_id = self.panel.id.0;
@@ -167,6 +167,12 @@ impl<'a> FileExplorerView<'a> {
         if !state.loaded {
             state.reload_root();
         }
+
+        // Auto-refresh the git-status snapshot (throttled while visible, plus an
+        // immediate refresh on focus-regain). The shared GitWatcher only fires on
+        // `.git/index` mtime changes, so plain working-tree edits would otherwise
+        // leave the changed/green decorations stale until a commit.
+        state.maybe_refresh_git_status(is_focused);
 
         let mut refresh = false;
         // Own the toggle value before the immutable borrows below; the header
@@ -181,7 +187,7 @@ impl<'a> FileExplorerView<'a> {
         // is applied after the panel render so we can mutate the tree.
         if state.search.active {
             let mut repaint = false;
-            let _searching = state.tick_search();
+            state.tick_search();
             let search_action =
                 crate::file_search_widget::show_search_panel(ui, state, panel_id, &mut repaint);
             if repaint {
