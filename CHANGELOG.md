@@ -3,6 +3,17 @@
 Fork pessoal do [peters/horizon](https://github.com/peters/horizon) com melhorias de navegação e UX.
 Patch aditivo sobre o upstream **v0.2.6**.
 
+## [0.3.0] — 2026-06-08
+
+### File Explorer
+- **Arquivos/pastas ignorados aparecem esmaecidos** (em vez de sumir): entradas no `.gitignore` (ex.: `temp/`, `tmp/`) agora são listadas em cinza, estilo VSCode, respeitando `.gitignore` aninhado e dos diretórios-pai. `.git`/`node_modules`/`target` seguem sempre ocultos.
+- **Busca de conteúdo (`Ctrl+Shift+F`)**: com o painel Files focado, busca texto **dentro** dos arquivos do projeto. Resultados agrupados por arquivo com a linha que casou, clicáveis (revela o arquivo na árvore). Roda em **thread de background** (não trava a UI), com debounce, e pula binários/`node_modules`/`target`. O atalho é **contextual**: focado num terminal, `Ctrl+Shift+F` segue sendo a busca do terminal.
+- **Arrastar e `Ctrl+V` pra copiar arquivos pra dentro de uma pasta**: soltar arquivos do gerenciador do SO sobre uma pasta (ou colar com `Ctrl+V`) **copia** (não move) pra dentro dela — pasta sob o cursor no drag, pasta selecionada no `Ctrl+V`; cai na raiz se não houver alvo. Resolução de colisão de nome sem sobrescrever (`a.txt` → `a (2).txt`). Highlight da pasta-alvo no hover.
+- **Status do git atualiza sozinho**: as cores de "changed" (verde/`M`/`U`…) agora se reatualizam automaticamente (poll throttled de ~1,5s enquanto o painel está visível + na hora que ele reganha foco), sem depender de refresh manual. Antes só atualizavam em `git add`/`commit`.
+
+### Sessões
+- **Retomada de sessão de agente ao reabrir o app**: se um painel estava rodando um agente (ex.: `claude`) e o app fechou, ao reabrir o painel **religa na mesma sessão** via `--resume <session_id>` (recuperando o id da sessão pelo histórico do agente), em vez de começar do zero. Só acontece pra painéis que de fato rodaram (têm output), pra não retomar uma sessão antiga por engano. *(implementado na branch `feat/restore-agent-session`.)*
+
 ## [feat/v1-navigation] — 2026-06-06
 
 ### Navegação

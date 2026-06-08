@@ -3,11 +3,143 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
+use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use ignore::WalkBuilder;
 
 use crate::error::Result;
+use crate::file_search::FileSearchOptions;
+use crate::file_search_runner::{SearchRunner, SearchState};
+use crate::git_refresher::GitRefresher;
 use crate::git_status::{FileStatus, GitStatus};
+
+/// Quiescence window the content-search must observe before dispatching a new
+/// query to the background runner. The runner does NOT debounce itself (see its
+/// module docs), so the caller must: we only `start` after this much input
+/// silence to avoid spawning one full directory walk per keystroke.
+pub const SEARCH_DEBOUNCE: Duration = Duration::from_millis(150);
+
+/// Decides whether the content-search should dispatch `query` to the background
+/// runner right now. Pure and deterministic (no clock): the caller passes the
+/// elapsed time since the last edit so tests stay timing-free.
+///
+/// Returns `true` only when ALL hold:
+/// - `query` is non-empty after trimming (empty/whitespace never searches);
+/// - `query` differs from `last_dispatched` (no redundant re-dispatch of the
+///   same query);
+/// - the input has been quiescent for at least `debounce` (that is,
+///   `elapsed_since_edit >= debounce`), satisfying the runner's contract.
+#[must_use]
+pub fn should_dispatch(
+    query: &str,
+    last_dispatched: &str,
+    elapsed_since_edit: Duration,
+    debounce: Duration,
+) -> bool {
+    if query.trim().is_empty() {
+        return false;
+    }
+    if query == last_dispatched {
+        return false;
+    }
+    elapsed_since_edit >= debounce
+}
+
+/// Throttle interval for the File Explorer's automatic git-status refresh.
+///
+/// The shared [`crate::git_watcher::GitWatcher`] only recomputes status when the
+/// `.git/index` mtime changes (i.e. on `git add` / `git commit`); a plain
+/// working-tree edit or a new untracked file never touches the index, so the
+/// green/changed decorations would otherwise go stale until a commit. The
+/// explorer therefore recomputes its own snapshot on this cadence while visible.
+///
+/// The recompute itself runs OFF the UI thread (via [`GitRefresher`]): `git2`
+/// status with `recurse_untracked_dirs` can take hundreds of ms on a large
+/// working tree, so this cadence only *triggers* a background compute — it never
+/// blocks the egui frame.
+pub const GIT_REFRESH_INTERVAL: Duration = Duration::from_millis(1500);
+
+/// Decide whether to recompute the explorer's git status this frame.
+///
+/// Pure and clock-free (the caller passes `elapsed_since_last`), so the trigger
+/// logic stays unit-testable. Returns `true` when ANY of:
+/// - `focus_regained` — the panel just became focused this frame (immediate
+///   refresh so the user sees fresh decorations on tab-back);
+/// - `elapsed_since_last` is `None` — status has never been refreshed yet;
+/// - `elapsed_since_last >= interval` — the throttle window has elapsed.
+#[must_use]
+pub fn should_refresh_git(
+    elapsed_since_last: Option<Duration>,
+    interval: Duration,
+    focus_regained: bool,
+) -> bool {
+    if focus_regained {
+        return true;
+    }
+    match elapsed_since_last {
+        None => true,
+        Some(elapsed) => elapsed >= interval,
+    }
+}
+
+/// One visible explorer row's screen-space hit box, recorded each frame so the
+/// app-level OS-file-drop handler can map a global pointer position to the tree
+/// node under the cursor without depending on `egui` types.
+///
+/// `rect` is `(min_x, min_y, max_x, max_y)` in screen (global) coordinates. The
+/// geometry test lives in [`row_hit_at`], kept pure (plain floats) so it can be
+/// unit-tested without a renderer.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RowHit {
+    /// Screen-space rect as `(min_x, min_y, max_x, max_y)`.
+    pub rect: (f32, f32, f32, f32),
+    /// Absolute path of the node this row paints.
+    pub path: PathBuf,
+    /// `true` for directory rows, `false` for files.
+    pub is_dir: bool,
+}
+
+/// Returns the topmost recorded [`RowHit`] whose screen rect contains `(x, y)`,
+/// or `None` when the point hits no row. Rows are tested in reverse
+/// (last-painted-first) so a later row wins when rects overlap.
+///
+/// Pure geometry over plain floats — no `egui`. Callers that need the full row
+/// (path + `is_dir` + rect for a highlight) use this to avoid a second scan;
+/// [`row_hit_at`] is the thin predicate wrapper returning just `(path, is_dir)`.
+#[must_use]
+pub fn row_hit_entry_at(rows: &[RowHit], x: f32, y: f32) -> Option<&RowHit> {
+    rows.iter().rev().find(|row| {
+        let (min_x, min_y, max_x, max_y) = row.rect;
+        x >= min_x && x <= max_x && y >= min_y && y <= max_y
+    })
+}
+
+/// Returns the path + `is_dir` of the topmost recorded row whose screen rect
+/// contains `(x, y)`, or `None` when the point hits no row. Thin wrapper over
+/// [`row_hit_entry_at`] for callers that only need the destination identity.
+///
+/// Pure geometry over plain floats — no `egui`, so it is directly unit-tested.
+#[must_use]
+pub fn row_hit_at(rows: &[RowHit], x: f32, y: f32) -> Option<(&Path, bool)> {
+    row_hit_entry_at(rows, x, y).map(|row| (row.path.as_path(), row.is_dir))
+}
+
+/// Resolve the destination directory for an OS-file drop, given the explorer row
+/// under the cursor (`path` + `is_dir`) and the explorer `root`.
+///
+/// - A folder hit copies INTO that folder.
+/// - A file hit copies into the file's parent directory (falling back to `root`
+///   if the file somehow has no parent).
+/// - No hit (empty area / panel background) copies into `root`.
+#[must_use]
+pub fn drop_target_dir(hit: Option<(&Path, bool)>, root: &Path) -> PathBuf {
+    match hit {
+        Some((path, true)) => path.to_path_buf(),
+        Some((path, false)) => path.parent().map_or_else(|| root.to_path_buf(), Path::to_path_buf),
+        None => root.to_path_buf(),
+    }
+}
 
 /// One node in the file tree. `children == None` means "directory not yet
 /// scanned" (lazy). `children == Some(_)` means scanned (possibly empty).
@@ -17,13 +149,78 @@ pub struct FileNode {
     pub path: PathBuf,
     pub is_dir: bool,
     pub children: Option<Vec<FileNode>>,
+    /// `true` when this entry is matched by a `.gitignore` rule. The entry is
+    /// still listed (so the UI can dim it) rather than hidden. Entries under
+    /// [`HARD_SKIP`] are never produced and so never reach this flag.
+    pub ignored: bool,
 }
 
 /// Directories we never descend into regardless of .gitignore.
 const HARD_SKIP: [&str; 3] = [".git", "node_modules", "target"];
 
+/// A stack of per-directory `.gitignore` matchers, ordered nearest-first
+/// (the scanned dir's own `.gitignore`, then each ancestor up to the repo root).
+/// Each matcher is rooted at the directory whose `.gitignore` it came from, so
+/// anchored patterns like `dist/` resolve relative to that directory.
+struct IgnoreMatchers {
+    /// Nearest-first: `matchers[0]` is `dir`'s own `.gitignore`.
+    matchers: Vec<Gitignore>,
+}
+
+impl IgnoreMatchers {
+    /// Returns `true` if `path` is ignored. The nearest matcher with a decisive
+    /// rule wins, mirroring git: a closer `.gitignore` can whitelist (`!foo`)
+    /// something an ancestor ignored, so we stop at the first non-`None` match.
+    fn is_ignored(&self, path: &Path, is_dir: bool) -> bool {
+        for matcher in &self.matchers {
+            let m = matcher.matched(path, is_dir);
+            if m.is_ignore() {
+                return true;
+            }
+            if m.is_whitelist() {
+                return false;
+            }
+        }
+        false
+    }
+}
+
+/// Build the ancestor-aware ignore matcher for `dir`: collect `dir/.gitignore`
+/// and every ancestor `.gitignore` walking UP to (and including) the repo root
+/// — the first ancestor containing a `.git` entry — or the filesystem root if
+/// no repo is found. Matchers are returned nearest-first so closer rules win.
+///
+/// Errors (missing files, bad globs) are swallowed: a missing `.gitignore` or a
+/// failed build simply contributes no rules, never a panic. `.git` /
+/// `node_modules` / `target` are still removed by [`HARD_SKIP`] in the walk,
+/// independent of this matcher.
+fn build_ignore_matcher(dir: &Path) -> IgnoreMatchers {
+    let mut matchers = Vec::new();
+    let mut current = Some(dir);
+    while let Some(d) = current {
+        let mut builder = GitignoreBuilder::new(d);
+        // `add` returns Some(err) on failure (the file is absent, or present
+        // but unreadable / permission-denied); either way this directory
+        // contributes no ignore rules.
+        if builder.add(d.join(".gitignore")).is_none()
+            && let Ok(gi) = builder.build()
+        {
+            matchers.push(gi);
+        }
+        // Stop after the repo root (the dir holding `.git`); patterns above the
+        // repo do not apply to paths inside it.
+        if d.join(".git").exists() {
+            break;
+        }
+        current = d.parent();
+    }
+    IgnoreMatchers { matchers }
+}
+
 /// Scan a single directory level. Dirs first, then files, each alphabetical
-/// (case-insensitive). Respects `.gitignore` and always skips [`HARD_SKIP`].
+/// (case-insensitive). Gitignored entries are still listed but tagged
+/// [`FileNode::ignored`] so the UI can dim them; [`HARD_SKIP`] dirs are always
+/// omitted entirely.
 ///
 /// # Errors
 ///
@@ -32,14 +229,17 @@ const HARD_SKIP: [&str; 3] = [".git", "node_modules", "target"];
 /// return type is retained so future stricter scanning can surface failures.
 pub fn scan_dir(dir: &Path) -> Result<Vec<FileNode>> {
     let mut entries: Vec<FileNode> = Vec::new();
+    let matcher = build_ignore_matcher(dir);
 
     let walker = WalkBuilder::new(dir)
         .max_depth(Some(1)) // only this level
         .hidden(false) // show dotfiles like .gitignore
-        .git_ignore(true)
-        .git_global(true)
-        .git_exclude(true)
-        .parents(true)
+        // Yield gitignored entries so they can be shown (dimmed); we classify
+        // them ourselves via `matcher` below.
+        .git_ignore(false)
+        .git_global(false)
+        .git_exclude(false)
+        .parents(false)
         .filter_entry(|entry| entry.file_name().to_str().is_none_or(|name| !HARD_SKIP.contains(&name)))
         .build();
 
@@ -57,11 +257,13 @@ pub fn scan_dir(dir: &Path) -> Result<Vec<FileNode>> {
             continue;
         };
         let is_dir = entry.file_type().is_some_and(|ft| ft.is_dir());
+        let ignored = matcher.is_ignored(&path, is_dir);
         entries.push(FileNode {
             name,
             path,
             is_dir,
             children: None,
+            ignored,
         });
     }
 
@@ -233,7 +435,10 @@ fn compact_dir_chains(nodes: &mut [ChangedTreeNode]) {
 }
 
 /// Per-panel file-explorer state. Lives inside `PanelContent::FileExplorer`.
-#[derive(Clone, Debug)]
+///
+/// Not `Clone`/`Debug`: it owns a [`SearchRunner`], which holds a thread
+/// [`std::sync::mpsc::Receiver`] (neither `Clone` nor `Debug`). It is never
+/// cloned — each panel constructs its own with [`FileTreeState::new`].
 pub struct FileTreeState {
     pub root: PathBuf,
     pub roots: Vec<FileNode>,
@@ -248,6 +453,71 @@ pub struct FileTreeState {
     /// keyed by absolute path. Empty = fully collapsed (the default).
     /// Cleared whenever the filter toggle changes value.
     pub changed_expanded: HashSet<PathBuf>,
+    /// Content-search ("search in files") panel state, scoped to `root`.
+    pub search: SearchPanelState,
+    /// Instant of the last automatic git-status recompute. `None` until the
+    /// first refresh. Drives the [`GIT_REFRESH_INTERVAL`] throttle so we never
+    /// run `git2` status every frame.
+    last_git_refresh: Option<Instant>,
+    /// Off-thread git-status recompute. The throttle/on-focus trigger asks this
+    /// to recompute in the background; the result is applied on a later frame.
+    /// Never computes on the UI thread (see [`GitRefresher`]).
+    git_refresher: GitRefresher,
+    /// `is_focused` value observed on the previous frame, so the show path can
+    /// detect a focus-regain edge (`!prev && now`) and refresh immediately.
+    prev_focus: bool,
+    /// Screen-space hit boxes for the visible tree rows, rebuilt every frame by
+    /// the widget's paint pass (cleared at the start of `show`, pushed per row).
+    /// The OS-file-drop handler reads these to map a global pointer position to
+    /// the drop target directory; see [`row_hit_at`] / [`drop_target_dir`].
+    pub row_hits: Vec<RowHit>,
+    /// The currently selected row, set by a single click on any tree row.
+    /// Carries `(absolute_path, is_dir)`. Cleared to `None` on root reload.
+    /// Used by [`FileTreeState::paste_target`] to resolve the Ctrl+V destination.
+    pub selected: Option<(PathBuf, bool)>,
+}
+
+/// State for the File Explorer's content-search panel (the VSCode-style "search
+/// in files" UI bound to Ctrl+Shift+F). Owns the background [`SearchRunner`] so
+/// it survives across frames, plus the debounce bookkeeping the runner requires.
+#[derive(Default)]
+pub struct SearchPanelState {
+    /// Whether the search box is showing above the tree.
+    pub active: bool,
+    /// Current text in the query input.
+    pub query: String,
+    /// Set when the panel was just opened so the view can grab keyboard focus
+    /// for the input on the next frame, then clear it.
+    pub focus_requested: bool,
+    /// The query string last handed to `runner.start`. Guards against
+    /// re-dispatching an unchanged query.
+    last_dispatched: String,
+    /// Wall-clock instant of the most recent query edit, used to measure input
+    /// quiescence for the debounce. `None` until the first edit.
+    last_edit: Option<Instant>,
+    /// Background runner; detached worker threads, non-blocking poll.
+    runner: SearchRunner,
+}
+
+impl SearchPanelState {
+    /// Record that the query was just edited (resets the debounce clock). Called
+    /// by the view whenever the text input reports a change.
+    pub fn mark_edited(&mut self) {
+        self.last_edit = Some(Instant::now());
+    }
+
+    /// The runner's latest observed state, for the view to render.
+    #[must_use]
+    pub fn state(&self) -> &SearchState {
+        self.runner.state()
+    }
+
+    /// The query string that was last dispatched to the runner (for tests and
+    /// for the view to confirm which query a result belongs to).
+    #[must_use]
+    pub fn last_dispatched(&self) -> &str {
+        &self.last_dispatched
+    }
 }
 
 impl FileTreeState {
@@ -261,13 +531,101 @@ impl FileTreeState {
             code_missing: false,
             show_only_changes: false,
             changed_expanded: HashSet::new(),
+            search: SearchPanelState::default(),
+            last_git_refresh: None,
+            git_refresher: GitRefresher::new(),
+            prev_focus: false,
+            row_hits: Vec::new(),
+            selected: None,
         }
     }
 
+    /// Resolve the OS-file-drop destination directory for a global pointer
+    /// position, using the row hit-map recorded by the widget this frame. Folder
+    /// row -> that folder; file row -> its parent; no row (empty area / panel
+    /// background) -> the explorer `root`. See [`row_hit_at`] / [`drop_target_dir`].
+    #[must_use]
+    pub fn drop_target_for(&self, x: f32, y: f32) -> PathBuf {
+        drop_target_dir(row_hit_at(&self.row_hits, x, y), &self.root)
+    }
+
+    /// Resolve the Ctrl+V paste destination using the current row selection.
+    ///
+    /// Delegates to [`drop_target_dir`] with the same semantics used for OS
+    /// file drops:
+    /// - Selected **folder** → paste INTO that folder.
+    /// - Selected **file** → paste into its parent directory.
+    /// - Nothing selected → paste into the explorer `root`.
+    #[must_use]
+    pub fn paste_target(&self) -> PathBuf {
+        let hit = self.selected.as_ref().map(|(p, is_dir)| (p.as_path(), *is_dir));
+        drop_target_dir(hit, &self.root)
+    }
+
+    /// Record that the user clicked `path` (with `is_dir`). Called by the widget
+    /// on every single click; toggling expand/collapse is handled separately and
+    /// can coexist — we just remember which row was last touched.
+    pub fn select_row(&mut self, path: PathBuf, is_dir: bool) {
+        self.selected = Some((path, is_dir));
+    }
+
+    /// Open (or re-focus) the content-search panel. Requests input focus on the
+    /// next frame; never clears an in-progress query, so re-pressing the
+    /// shortcut while open just re-focuses the box.
+    pub fn open_search(&mut self) {
+        self.search.active = true;
+        self.search.focus_requested = true;
+    }
+
+    /// Close the content-search panel and reset the runner to idle. The query
+    /// text is preserved so re-opening shows the previous search; results are
+    /// dropped (the runner is cleared).
+    pub fn close_search(&mut self) {
+        self.search.active = false;
+        self.search.focus_requested = false;
+        self.search.runner.clear();
+        self.search.last_dispatched.clear();
+        self.search.last_edit = None;
+    }
+
+    /// Per-frame search pump. When the panel is active, applies the debounce
+    /// decision (dispatching a fresh search once the query has been quiescent
+    /// for [`SEARCH_DEBOUNCE`]) and drains any finished results.
+    ///
+    /// Quiescence is measured from the `last_edit` instant the view records via
+    /// [`SearchPanelState::mark_edited`]; the pure decision lives in
+    /// [`should_dispatch`] (clock-free, separately tested). Returns `true` while
+    /// a search is in flight, signalling the view to request a repaint.
+    pub fn tick_search(&mut self) -> bool {
+        if !self.search.active {
+            return false;
+        }
+        // Time since the last edit; if there has been no edit yet, treat it as
+        // long-quiescent so a pre-filled query (re-opened panel) can dispatch.
+        let elapsed = self
+            .search
+            .last_edit
+            .map_or(SEARCH_DEBOUNCE, |t| t.elapsed());
+        if should_dispatch(
+            &self.search.query,
+            &self.search.last_dispatched,
+            elapsed,
+            SEARCH_DEBOUNCE,
+        ) {
+            self.search.last_dispatched = self.search.query.clone();
+            self.search
+                .runner
+                .start(self.root.clone(), self.search.query.clone(), FileSearchOptions::default());
+        }
+        matches!(self.search.runner.poll(), SearchState::Searching)
+    }
+
     /// (Re)scan the root level. Safe to call repeatedly (refresh button).
+    /// Also clears any row selection so a stale path is never used as a paste target.
     pub fn reload_root(&mut self) {
         self.roots = scan_dir(&self.root).unwrap_or_default();
         self.loaded = true;
+        self.selected = None;
     }
 
     /// Lazily scan a directory node's children (called on first expand).
@@ -277,8 +635,67 @@ impl FileTreeState {
         }
     }
 
+    /// Re-scan the on-disk children of `dir` so newly-created entries appear.
+    ///
+    /// Used after an OS-file drop copies files into `dir`. When `dir` is the
+    /// explorer root the whole root level is reloaded; otherwise the matching
+    /// directory node is found and its (already-expanded) children are re-scanned
+    /// in place so the copied files show immediately. A collapsed or absent
+    /// target is left untouched — re-expanding it will lazily pick up the new
+    /// files. Never panics.
+    pub fn refresh_dir(&mut self, dir: &Path) {
+        if dir == self.root {
+            self.reload_root();
+            return;
+        }
+        if let Some(node) = find_node_mut(&mut self.roots, dir)
+            && node.is_dir
+            && node.children.is_some()
+        {
+            node.children = Some(scan_dir(dir).unwrap_or_default());
+        }
+    }
+
     pub fn set_git_status(&mut self, status: Arc<GitStatus>) {
         self.git_status = Some(status);
+    }
+
+    /// Per-frame git-status refresh driven from the explorer show path.
+    ///
+    /// `is_focused` is the panel's current focus state this frame. A focus-regain
+    /// edge (`!prev_focus && is_focused`) requests an immediate (off-thread)
+    /// refresh; otherwise the [`GIT_REFRESH_INTERVAL`] throttle applies (see
+    /// [`should_refresh_git`]).
+    ///
+    /// CRITICAL: this never computes git status on the UI thread. The actual
+    /// `git2` walk (which can take hundreds of ms on a large working tree) runs
+    /// on a background worker owned by [`GitRefresher`]; here we only (a) apply
+    /// any result a previous background compute has finished, and (b) when a
+    /// refresh is due, *ask* the refresher to recompute. A single-in-flight guard
+    /// means a still-running compute suppresses new requests rather than piling
+    /// up. The previous snapshot is kept on error / while a compute is pending
+    /// (transient git failures must not blank out the decorations). Always
+    /// records `is_focused` as the new previous-focus before returning.
+    pub fn maybe_refresh_git_status(&mut self, is_focused: bool) {
+        // Apply any finished background compute first so the UI shows fresh
+        // decorations as soon as the worker delivers them.
+        if let Some(status) = self.git_refresher.poll() {
+            self.git_status = Some(status);
+        }
+
+        let focus_regained = is_focused && !self.prev_focus;
+        self.prev_focus = is_focused;
+
+        let elapsed = self.last_git_refresh.map(|t| t.elapsed());
+        if !should_refresh_git(elapsed, GIT_REFRESH_INTERVAL, focus_regained) {
+            return;
+        }
+
+        // Trigger an OFF-THREAD recompute. If one is already running the request
+        // is suppressed (single-in-flight); stamp the time so the throttle paces
+        // the *next* attempt either way.
+        self.last_git_refresh = Some(Instant::now());
+        self.git_refresher.request(self.root.clone());
     }
 
     /// Flip the uncommitted-files filter. Any change of value resets the
@@ -303,6 +720,21 @@ impl FileTreeState {
     pub fn collapse_changed(&mut self, path: &Path) {
         self.changed_expanded.remove(path);
     }
+}
+
+/// Depth-first search for the (unique) loaded node whose `path` matches.
+fn find_node_mut<'n>(nodes: &'n mut [FileNode], path: &Path) -> Option<&'n mut FileNode> {
+    for node in nodes {
+        if node.path == path {
+            return Some(node);
+        }
+        if let Some(children) = &mut node.children
+            && let Some(found) = find_node_mut(children, path)
+        {
+            return Some(found);
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -341,7 +773,9 @@ mod tests {
     }
 
     #[test]
-    fn scan_dir_respects_gitignore() {
+    fn scan_dir_shows_gitignored_files_tagged_not_hidden() {
+        // New contract: gitignored entries are SHOWN (so the UI can dim them),
+        // tagged `ignored == true`, rather than omitted from the listing.
         let dir = tempfile::tempdir().expect("tempdir");
         git2::Repository::init(dir.path()).expect("init repo");
         fs::write(dir.path().join(".gitignore"), b"ignored.txt\n").expect("gitignore");
@@ -352,7 +786,9 @@ mod tests {
         let listed = names(&nodes);
         assert!(listed.contains(&"visible.txt".to_string()));
         assert!(listed.contains(&".gitignore".to_string()));
-        assert!(!listed.contains(&"ignored.txt".to_string()));
+        assert!(listed.contains(&"ignored.txt".to_string()), "gitignored file must be shown");
+        assert!(find(&nodes, "ignored.txt").expect("ignored.txt").ignored);
+        assert!(!find(&nodes, "visible.txt").expect("visible.txt").ignored);
     }
 
     #[test]
@@ -582,6 +1018,108 @@ mod tests {
         assert!(!dir_contains_changes(&status, Path::new("/other/src")));
     }
 
+    fn find<'a>(nodes: &'a [FileNode], name: &str) -> Option<&'a FileNode> {
+        nodes.iter().find(|n| n.name == name)
+    }
+
+    #[test]
+    fn scan_dir_shows_gitignored_entries_tagged_ignored() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(dir.path().join("keep.txt"), b"").expect("keep");
+        fs::write(dir.path().join(".gitignore"), b"tmp/\ntemp/\n").expect("gitignore");
+        for d in ["tmp", "temp", "node_modules", "src"] {
+            fs::create_dir(dir.path().join(d)).expect("mkdir");
+            fs::write(dir.path().join(d).join("inside.txt"), b"").expect("inside");
+        }
+
+        let nodes = scan_dir(dir.path()).expect("scan");
+        let listed = names(&nodes);
+
+        // gitignored dirs are SHOWN but tagged ignored=true
+        assert!(listed.contains(&"tmp".to_string()), "tmp must be shown: {listed:?}");
+        assert!(listed.contains(&"temp".to_string()), "temp must be shown: {listed:?}");
+        assert!(find(&nodes, "tmp").expect("tmp").ignored, "tmp must be ignored");
+        assert!(find(&nodes, "temp").expect("temp").ignored, "temp must be ignored");
+
+        // normal entries shown and not ignored
+        assert!(!find(&nodes, "keep.txt").expect("keep.txt").ignored);
+        assert!(!find(&nodes, "src").expect("src").ignored);
+
+        // HARD_SKIP still hidden entirely
+        assert!(!listed.contains(&"node_modules".to_string()), "node_modules must stay hidden");
+    }
+
+    #[test]
+    fn scan_dir_gitignored_dir_flagged_ignored() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(dir.path().join(".gitignore"), b"build/\n").expect("gitignore");
+        fs::create_dir(dir.path().join("build")).expect("mkdir build");
+        fs::write(dir.path().join("build").join("x"), b"").expect("x");
+
+        let nodes = scan_dir(dir.path()).expect("scan");
+        assert!(find(&nodes, "build").expect("build").ignored);
+    }
+
+    #[test]
+    fn scan_dir_normal_file_not_ignored() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(dir.path().join(".gitignore"), b"build/\n").expect("gitignore");
+        fs::write(dir.path().join("main.rs"), b"").expect("main");
+
+        let nodes = scan_dir(dir.path()).expect("scan");
+        assert!(!find(&nodes, "main.rs").expect("main.rs").ignored);
+    }
+
+    #[test]
+    fn scan_dir_honors_ancestor_gitignore() {
+        // root/.gitignore ignores `dist/`. Scanning root/app/ (fresh scan_dir,
+        // as lazy subdir expansion does) must still flag app/dist as ignored
+        // because the rule lives in an ANCESTOR .gitignore.
+        let root = tempfile::tempdir().expect("tempdir");
+        fs::write(root.path().join(".gitignore"), b"dist/\n").expect("root gitignore");
+        let app = root.path().join("app");
+        fs::create_dir(&app).expect("mkdir app");
+        fs::create_dir(app.join("dist")).expect("mkdir dist");
+        fs::write(app.join("dist").join("bundle.js"), b"").expect("bundle");
+        fs::write(app.join("keep.ts"), b"").expect("keep");
+
+        let nodes = scan_dir(&app).expect("scan");
+        assert!(find(&nodes, "dist").expect("dist").ignored, "ancestor rule must apply");
+        assert!(!find(&nodes, "keep.ts").expect("keep.ts").ignored);
+    }
+
+    #[test]
+    fn scan_dir_nearer_whitelist_overrides_ancestor_ignore() {
+        // Ancestor ignores all *.log; the scanned dir's own .gitignore
+        // whitelists keep.log via `!keep.log`. The nearer rule must win, so
+        // keep.log is NOT ignored while other.log still is.
+        let root = tempfile::tempdir().expect("tempdir");
+        fs::write(root.path().join(".gitignore"), b"*.log\n").expect("root gitignore");
+        let app = root.path().join("app");
+        fs::create_dir(&app).expect("mkdir app");
+        fs::write(app.join(".gitignore"), b"!keep.log\n").expect("app gitignore");
+        fs::write(app.join("keep.log"), b"").expect("keep");
+        fs::write(app.join("other.log"), b"").expect("other");
+
+        let nodes = scan_dir(&app).expect("scan");
+        assert!(
+            !find(&nodes, "keep.log").expect("keep.log").ignored,
+            "nearer !keep.log must un-ignore it"
+        );
+        assert!(find(&nodes, "other.log").expect("other.log").ignored);
+    }
+
+    #[test]
+    fn scan_dir_without_gitignore_marks_nothing_ignored() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(dir.path().join("a.txt"), b"").expect("a");
+        fs::create_dir(dir.path().join("d")).expect("mkdir d");
+
+        let nodes = scan_dir(dir.path()).expect("scan");
+        assert!(!nodes.is_empty());
+        assert!(nodes.iter().all(|n| !n.ignored), "no .gitignore => nothing ignored");
+    }
+
     #[test]
     fn changed_expansion_starts_fully_collapsed() {
         let state = FileTreeState::new(std::path::PathBuf::from("/repo"));
@@ -603,6 +1141,324 @@ mod tests {
     }
 
     #[test]
+    fn should_dispatch_true_when_changed_and_quiescent() {
+        // A new, non-empty query that differs from the last dispatched one and
+        // has been quiescent long enough must dispatch.
+        assert!(should_dispatch(
+            "needle",
+            "",
+            SEARCH_DEBOUNCE,
+            SEARCH_DEBOUNCE
+        ));
+        assert!(should_dispatch(
+            "needle",
+            "old",
+            SEARCH_DEBOUNCE + Duration::from_millis(50),
+            SEARCH_DEBOUNCE,
+        ));
+    }
+
+    #[test]
+    fn should_dispatch_false_when_unchanged() {
+        // Same query already dispatched: no redundant re-dispatch even once quiescent.
+        assert!(!should_dispatch(
+            "needle",
+            "needle",
+            SEARCH_DEBOUNCE,
+            SEARCH_DEBOUNCE
+        ));
+    }
+
+    #[test]
+    fn should_dispatch_false_when_empty_or_whitespace() {
+        assert!(!should_dispatch("", "", SEARCH_DEBOUNCE, SEARCH_DEBOUNCE));
+        assert!(!should_dispatch(
+            "   ",
+            "",
+            SEARCH_DEBOUNCE,
+            SEARCH_DEBOUNCE
+        ));
+    }
+
+    #[test]
+    fn should_dispatch_false_when_changed_but_not_yet_quiescent() {
+        // Query changed but the input is still settling (elapsed < debounce).
+        assert!(!should_dispatch(
+            "needle",
+            "old",
+            SEARCH_DEBOUNCE.saturating_sub(Duration::from_millis(1)),
+            SEARCH_DEBOUNCE,
+        ));
+    }
+
+    #[test]
+    fn open_search_activates_and_requests_focus() {
+        let mut state = FileTreeState::new(std::path::PathBuf::from("/repo"));
+        assert!(!state.search.active);
+        state.open_search();
+        assert!(state.search.active);
+        assert!(state.search.focus_requested);
+    }
+
+    #[test]
+    fn close_search_deactivates_and_resets_runner() {
+        let mut state = FileTreeState::new(std::path::PathBuf::from("/repo"));
+        state.open_search();
+        state.search.query = "needle".to_string();
+        state.search.last_dispatched = "needle".to_string();
+        state.close_search();
+        assert!(!state.search.active);
+        assert!(!state.search.focus_requested);
+        assert!(state.search.last_dispatched().is_empty());
+        assert!(matches!(state.search.state(), SearchState::Idle));
+    }
+
+    #[test]
+    fn tick_search_no_dispatch_while_inactive() {
+        let mut state = FileTreeState::new(std::path::PathBuf::from("/repo"));
+        state.search.query = "needle".to_string();
+        // Not active: must not dispatch regardless of elapsed time.
+        assert!(!state.tick_search());
+        assert!(state.search.last_dispatched().is_empty());
+    }
+
+    #[test]
+    fn tick_search_dispatches_query_once_quiescent() {
+        let mut state = FileTreeState::new(std::path::PathBuf::from("/repo"));
+        state.open_search();
+        state.search.query = "needle".to_string();
+        // No edit recorded yet => treated as long-quiescent, so it dispatches.
+        let _ = state.tick_search();
+        assert_eq!(state.search.last_dispatched(), "needle");
+        // Calling again with the same query does not re-dispatch (idempotent).
+        let _ = state.tick_search();
+        assert_eq!(state.search.last_dispatched(), "needle");
+    }
+
+    #[test]
+    fn tick_search_waits_for_quiescence_after_edit() {
+        let mut state = FileTreeState::new(std::path::PathBuf::from("/repo"));
+        state.open_search();
+        state.search.query = "needle".to_string();
+        // A fresh edit just happened: not yet quiescent, so no dispatch.
+        state.search.mark_edited();
+        let _ = state.tick_search();
+        assert!(
+            state.search.last_dispatched().is_empty(),
+            "must wait out the debounce after an edit"
+        );
+    }
+
+    #[test]
+    fn should_refresh_git_true_on_focus_regain_even_if_just_refreshed() {
+        // focus_regained wins even when the throttle window has NOT elapsed.
+        assert!(should_refresh_git(
+            Some(Duration::from_millis(0)),
+            GIT_REFRESH_INTERVAL,
+            true,
+        ));
+    }
+
+    #[test]
+    fn should_refresh_git_true_when_never_refreshed() {
+        // None == never refreshed => always refresh (initial load), no focus edge.
+        assert!(should_refresh_git(None, GIT_REFRESH_INTERVAL, false));
+    }
+
+    #[test]
+    fn should_refresh_git_true_when_interval_elapsed() {
+        assert!(should_refresh_git(
+            Some(GIT_REFRESH_INTERVAL),
+            GIT_REFRESH_INTERVAL,
+            false,
+        ));
+        assert!(should_refresh_git(
+            Some(GIT_REFRESH_INTERVAL + Duration::from_millis(1)),
+            GIT_REFRESH_INTERVAL,
+            false,
+        ));
+    }
+
+    #[test]
+    fn should_refresh_git_false_when_recent_and_no_focus_change() {
+        // Within the throttle window and no focus regain => skip.
+        assert!(!should_refresh_git(
+            Some(GIT_REFRESH_INTERVAL.saturating_sub(Duration::from_millis(1))),
+            GIT_REFRESH_INTERVAL,
+            false,
+        ));
+    }
+
+    #[test]
+    fn maybe_refresh_git_status_populates_for_modified_file_in_temp_repo() {
+        // The explorer entry point now computes OFF the UI thread: the first call
+        // only *requests* a background compute (status stays None synchronously);
+        // a later call applies the worker's delivered snapshot. A temp repo with
+        // an untracked file must eventually yield a non-empty snapshot.
+        let dir = tempfile::tempdir().expect("tempdir");
+        git2::Repository::init(dir.path()).expect("init repo");
+        std::fs::write(dir.path().join("new.txt"), b"hello").expect("write file");
+
+        let mut state = FileTreeState::new(dir.path().to_path_buf());
+        assert!(state.git_status.is_none());
+        // First call: never refreshed => triggers a background recompute. It must
+        // NOT block, so the status is not populated synchronously this frame.
+        state.maybe_refresh_git_status(false);
+        assert!(
+            state.git_status.is_none(),
+            "compute must be off-thread, not applied synchronously on the trigger frame"
+        );
+
+        // Subsequent frames apply the worker's result once it lands. Bounded poll
+        // so a wedged worker fails the test instead of hanging.
+        let mut populated = false;
+        for _ in 0..500 {
+            // is_focused=true keeps requesting if the worker errored, but the
+            // single-in-flight guard prevents pile-up; mainly we are draining.
+            state.maybe_refresh_git_status(false);
+            if state.git_status.is_some() {
+                populated = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(populated, "background compute must eventually populate the snapshot");
+        let status = state.git_status.as_ref().expect("status populated");
+        assert!(
+            status.changes.iter().any(|c| c.path == "new.txt"),
+            "untracked file must appear in refreshed status"
+        );
+    }
+
+    #[test]
+    fn drop_target_dir_folder_hit_targets_the_folder() {
+        let root = std::path::PathBuf::from("/repo");
+        let folder = std::path::PathBuf::from("/repo/src");
+        assert_eq!(drop_target_dir(Some((folder.as_path(), true)), &root), folder);
+    }
+
+    #[test]
+    fn drop_target_dir_file_hit_targets_parent() {
+        let root = std::path::PathBuf::from("/repo");
+        let file = std::path::PathBuf::from("/repo/src/main.rs");
+        assert_eq!(
+            drop_target_dir(Some((file.as_path(), false)), &root),
+            std::path::PathBuf::from("/repo/src")
+        );
+    }
+
+    #[test]
+    fn drop_target_dir_none_targets_root() {
+        let root = std::path::PathBuf::from("/repo");
+        assert_eq!(drop_target_dir(None, &root), root);
+    }
+
+    #[test]
+    fn drop_target_dir_file_at_root_targets_root() {
+        let root = std::path::PathBuf::from("/repo");
+        let file = std::path::PathBuf::from("/repo/top.txt");
+        assert_eq!(drop_target_dir(Some((file.as_path(), false)), &root), root);
+    }
+
+    #[test]
+    fn row_hit_at_returns_topmost_row_containing_point() {
+        let rows = vec![
+            RowHit {
+                rect: (0.0, 0.0, 100.0, 20.0),
+                path: std::path::PathBuf::from("/repo/a"),
+                is_dir: true,
+            },
+            RowHit {
+                rect: (0.0, 20.0, 100.0, 40.0),
+                path: std::path::PathBuf::from("/repo/b.txt"),
+                is_dir: false,
+            },
+        ];
+        // Point in the first row.
+        assert_eq!(
+            row_hit_at(&rows, 10.0, 10.0),
+            Some((std::path::Path::new("/repo/a"), true))
+        );
+        // Point in the second row.
+        assert_eq!(
+            row_hit_at(&rows, 10.0, 30.0),
+            Some((std::path::Path::new("/repo/b.txt"), false))
+        );
+    }
+
+    #[test]
+    fn row_hit_at_returns_none_outside_all_rows() {
+        let rows = vec![RowHit {
+            rect: (0.0, 0.0, 100.0, 20.0),
+            path: std::path::PathBuf::from("/repo/a"),
+            is_dir: true,
+        }];
+        assert_eq!(row_hit_at(&rows, 200.0, 200.0), None);
+        assert_eq!(row_hit_at(&[], 10.0, 10.0), None);
+    }
+
+    #[test]
+    fn row_hit_entry_at_returns_full_row_with_rect() {
+        // The entry variant exposes the rect (used for the hover highlight) so
+        // callers avoid a second scan to recover it.
+        let rows = vec![RowHit {
+            rect: (5.0, 6.0, 95.0, 26.0),
+            path: std::path::PathBuf::from("/repo/a"),
+            is_dir: true,
+        }];
+        let hit = row_hit_entry_at(&rows, 10.0, 10.0).expect("row under point");
+        assert_eq!(hit.rect, (5.0, 6.0, 95.0, 26.0));
+        assert_eq!(hit.path, std::path::PathBuf::from("/repo/a"));
+        assert!(hit.is_dir);
+        assert!(row_hit_entry_at(&rows, 500.0, 500.0).is_none());
+    }
+
+    #[test]
+    fn row_hit_at_prefers_later_row_when_rects_overlap() {
+        let rows = vec![
+            RowHit {
+                rect: (0.0, 0.0, 100.0, 40.0),
+                path: std::path::PathBuf::from("/repo/under"),
+                is_dir: true,
+            },
+            RowHit {
+                rect: (0.0, 0.0, 100.0, 40.0),
+                path: std::path::PathBuf::from("/repo/over"),
+                is_dir: true,
+            },
+        ];
+        assert_eq!(
+            row_hit_at(&rows, 10.0, 10.0),
+            Some((std::path::Path::new("/repo/over"), true))
+        );
+    }
+
+    #[test]
+    fn refresh_dir_reloads_root_and_expanded_subdir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::create_dir(dir.path().join("sub")).expect("mkdir sub");
+
+        let mut state = FileTreeState::new(dir.path().to_path_buf());
+        state.reload_root();
+        assert!(state.roots.iter().any(|n| n.name == "sub"));
+
+        // A new root-level file appears after refresh_dir(root).
+        fs::write(dir.path().join("new.txt"), b"x").expect("write new");
+        state.refresh_dir(dir.path());
+        assert!(state.roots.iter().any(|n| n.name == "new.txt"));
+
+        // Expand the subdir, then a file created inside it shows after refresh.
+        let sub = state.roots.iter_mut().find(|n| n.name == "sub").expect("sub node");
+        FileTreeState::ensure_children(sub);
+        let sub_path = dir.path().join("sub");
+        fs::write(sub_path.join("inner.txt"), b"y").expect("write inner");
+        state.refresh_dir(&sub_path);
+        let sub = state.roots.iter().find(|n| n.name == "sub").expect("sub node");
+        let children = sub.children.as_ref().expect("loaded children");
+        assert!(children.iter().any(|n| n.name == "inner.txt"));
+    }
+
+    #[test]
     fn toggling_filter_resets_changed_expansion() {
         let mut state = FileTreeState::new(std::path::PathBuf::from("/repo"));
         let dir = std::path::PathBuf::from("/repo/src");
@@ -619,5 +1475,62 @@ mod tests {
         state.set_show_only_changes(false);
         state.set_show_only_changes(true);
         assert!(!state.is_changed_expanded(&dir));
+    }
+
+    // ── paste_target wiring ──────────────────────────────────────────────────
+
+    #[test]
+    fn paste_target_selected_folder_is_that_folder() {
+        let root = std::path::PathBuf::from("/repo");
+        let mut state = FileTreeState::new(root.clone());
+        let folder = std::path::PathBuf::from("/repo/src");
+        state.select_row(folder.clone(), true);
+        assert_eq!(state.paste_target(), folder);
+    }
+
+    #[test]
+    fn paste_target_selected_file_is_its_parent() {
+        let root = std::path::PathBuf::from("/repo");
+        let mut state = FileTreeState::new(root);
+        let file = std::path::PathBuf::from("/repo/src/main.rs");
+        state.select_row(file, false);
+        assert_eq!(state.paste_target(), std::path::PathBuf::from("/repo/src"));
+    }
+
+    #[test]
+    fn paste_target_nothing_selected_is_root() {
+        let root = std::path::PathBuf::from("/repo");
+        let state = FileTreeState::new(root.clone());
+        // selected is None by default
+        assert_eq!(state.paste_target(), root);
+    }
+
+    #[test]
+    fn select_row_records_path_and_is_dir() {
+        let mut state = FileTreeState::new(std::path::PathBuf::from("/repo"));
+        assert!(state.selected.is_none());
+
+        state.select_row(std::path::PathBuf::from("/repo/src"), true);
+        assert_eq!(
+            state.selected,
+            Some((std::path::PathBuf::from("/repo/src"), true))
+        );
+
+        // Selecting a file overwrites the previous selection.
+        state.select_row(std::path::PathBuf::from("/repo/main.rs"), false);
+        assert_eq!(
+            state.selected,
+            Some((std::path::PathBuf::from("/repo/main.rs"), false))
+        );
+    }
+
+    #[test]
+    fn reload_root_clears_selection() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut state = FileTreeState::new(dir.path().to_path_buf());
+        state.select_row(dir.path().join("something.rs"), false);
+        assert!(state.selected.is_some());
+        state.reload_root();
+        assert!(state.selected.is_none(), "reload_root must clear selection");
     }
 }

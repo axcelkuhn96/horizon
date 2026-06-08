@@ -12,7 +12,7 @@ use std::process::Command;
 use egui::epaint::text::{LayoutJob, TextFormat, TextWrapping};
 use egui::{Align, Align2, Color32, CornerRadius, FontId, Layout, Pos2, Rect, RichText, ScrollArea, Sense, Vec2};
 use horizon_core::file_tree::{
-    ChangedTreeNode, FileNode, FileTreeState, changed_file_tree, dir_contains_changes, status_for_path,
+    ChangedTreeNode, FileNode, FileTreeState, RowHit, changed_file_tree, dir_contains_changes, status_for_path,
 };
 use horizon_core::{FileStatus, GitStatus, Panel};
 
@@ -156,7 +156,7 @@ impl<'a> FileExplorerView<'a> {
 
     /// Renders the file explorer panel. Returns `true` if the pointer is over
     /// the panel (for focus tracking), mirroring `GitChangesView`.
-    pub fn show(&mut self, ui: &mut egui::Ui, _is_focused: bool) -> bool {
+    pub fn show(&mut self, ui: &mut egui::Ui, is_focused: bool) -> bool {
         let clicked = ui.rect_contains_pointer(ui.max_rect());
 
         let panel_id = self.panel.id.0;
@@ -168,6 +168,12 @@ impl<'a> FileExplorerView<'a> {
             state.reload_root();
         }
 
+        // Auto-refresh the git-status snapshot (throttled while visible, plus an
+        // immediate refresh on focus-regain). The shared GitWatcher only fires on
+        // `.git/index` mtime changes, so plain working-tree edits would otherwise
+        // leave the changed/green decorations stale until a commit.
+        state.maybe_refresh_git_status(is_focused);
+
         let mut refresh = false;
         // Own the toggle value before the immutable borrows below; the header
         // flips it in place and we persist it back into `state` afterwards.
@@ -175,17 +181,55 @@ impl<'a> FileExplorerView<'a> {
         render_header(ui, state, &mut refresh, &mut show_only);
         state.set_show_only_changes(show_only);
 
+        // Content-search panel (Ctrl+Shift+F). When active it takes over the
+        // entire explorer body: we render ONLY the search panel (a dedicated,
+        // opaque full-panel surface) and skip the tree ScrollArea below, so the
+        // two views never overlap. Its background runner is pumped every frame
+        // and finished results (or an in-flight spinner) are painted by the
+        // widget. The reveal action is applied after the panel render so we can
+        // mutate the tree; the tree returns the moment search is closed.
+        if state.search.active {
+            let mut repaint = false;
+            state.tick_search();
+            let search_action =
+                crate::file_search_widget::show_search_panel(ui, state, panel_id, &mut repaint);
+            if repaint {
+                ui.ctx().request_repaint();
+            }
+            match search_action {
+                Some(crate::file_search_widget::SearchUiAction::Close) => state.close_search(),
+                Some(crate::file_search_widget::SearchUiAction::Reveal(path)) => {
+                    reveal_in_tree(&mut state.roots, &state.root, &path);
+                }
+                None => {}
+            }
+            // No stale row hit-map while searching: drops resolve to the root.
+            state.row_hits = Vec::new();
+            return clicked;
+        }
+
         // Clone the status Arc out before the recursive render so the immutable
         // borrow of `state.git_status` does not conflict with the mutations we
         // apply afterwards (mirrors GitChangesView cloning `viewer.status`).
         let status = state.git_status.clone();
         let mut action: Option<TreeAction> = None;
+        // Row selection collected this frame (the single source of truth for
+        // which row is selected); applied to `state.selected` after the render.
+        let mut selection: Option<(PathBuf, bool)> = None;
+        // Screen-space hit boxes for the visible rows, rebuilt every frame so the
+        // OS-file-drop handler can resolve the folder under the cursor. Only the
+        // normal (on-disk) tree records hits; the filtered changes-only view is
+        // not a drop target.
+        let mut row_hits: Vec<RowHit> = Vec::new();
 
         // Bound the scroll area to the panel body so a tall tree clips and
         // scrolls inside the panel instead of painting over neighbouring
         // panels. Reserve footer space only when the footer is shown.
         let footer_h = if state.code_missing { FOOTER_HEIGHT } else { 0.0 };
         let max_h = scroll_viewport_height(ui.max_rect().bottom(), ui.cursor().top(), footer_h);
+
+        // Snapshot the selected path before the immutable borrow in render_nodes.
+        let selected_path: Option<PathBuf> = state.selected.as_ref().map(|(p, _)| p.clone());
 
         let scroll_output = ScrollArea::vertical()
             .max_height(max_h)
@@ -196,7 +240,12 @@ impl<'a> FileExplorerView<'a> {
                 if show_only {
                     render_changes_only(ui, status.as_deref(), &state.changed_expanded, &mut action);
                 } else {
-                    render_nodes(ui, &state.roots, 0, status.as_deref(), &mut action);
+                    let mut sink = RenderSink {
+                        action: &mut action,
+                        selection: &mut selection,
+                        row_hits: &mut row_hits,
+                    };
+                    render_nodes(ui, &state.roots, 0, status.as_deref(), &mut sink, selected_path.as_deref());
                 }
                 ui.add_space(4.0);
             });
@@ -212,8 +261,19 @@ impl<'a> FileExplorerView<'a> {
 
         render_footer(ui, state.code_missing);
 
+        // Publish this frame's screen-space row hit-map for the OS-file-drop
+        // handler (empty in changes-only mode, so drops resolve to the root).
+        state.row_hits = row_hits;
+
         if refresh {
             state.reload_root();
+        }
+
+        // Apply the row selection collected this frame (single source of truth).
+        // Done before reload-aware actions below; a refresh above already cleared
+        // any stale selection, and a fresh click re-sets it here.
+        if let Some((path, is_dir)) = selection {
+            state.select_row(path, is_dir);
         }
 
         match action {
@@ -286,15 +346,28 @@ fn render_header(ui: &mut egui::Ui, state: &FileTreeState, refresh: &mut bool, s
     );
 }
 
+/// Per-frame output sinks collected while rendering the normal (on-disk) tree.
+/// Bundling these mutable borrows keeps the recursive render functions to a sane
+/// argument count and groups the three things one row can produce.
+struct RenderSink<'a> {
+    /// The primary action (expand/collapse/open) for the first interacted row.
+    action: &'a mut Option<TreeAction>,
+    /// The row selected this frame (single source of truth for selection).
+    selection: &'a mut Option<(PathBuf, bool)>,
+    /// Screen-space hit boxes for the OS-file-drop handler.
+    row_hits: &'a mut Vec<RowHit>,
+}
+
 fn render_nodes(
     ui: &mut egui::Ui,
     nodes: &[FileNode],
     depth: usize,
     status: Option<&GitStatus>,
-    action: &mut Option<TreeAction>,
+    sink: &mut RenderSink<'_>,
+    selected: Option<&Path>,
 ) {
     for node in nodes {
-        render_node(ui, node, depth, status, action);
+        render_node(ui, node, depth, status, sink, selected);
     }
 }
 
@@ -303,28 +376,39 @@ fn render_node(
     node: &FileNode,
     depth: usize,
     status: Option<&GitStatus>,
-    action: &mut Option<TreeAction>,
+    sink: &mut RenderSink<'_>,
+    selected: Option<&Path>,
 ) {
     let is_dir = node.is_dir;
     let is_open = node.children.is_some();
+    let is_selected = selected.is_some_and(|s| s == node.path.as_path());
 
-    if render_row(ui, node, depth, status) {
-        // First interaction in the frame wins; later ones are ignored.
-        if action.is_none() {
-            *action = Some(if is_dir {
-                if is_open {
-                    TreeAction::Collapse(node.path.clone())
-                } else {
-                    TreeAction::Expand(node.path.clone())
-                }
+    let response = render_row(ui, node, depth, status, sink.row_hits, is_selected);
+
+    // Selection is the SINGLE source of truth here: any single click selects the
+    // row (file or folder), recorded independently of the primary action below.
+    // This is the only place selection is set, so folder selection works on the
+    // same click that also expands/collapses — no reliance on the action arms.
+    if response.clicked {
+        *sink.selection = Some((node.path.clone(), is_dir));
+    }
+
+    // Primary action: toggle folder (single click) or open file (double click).
+    // Orthogonal to selection — it never touches `*sink.selection`.
+    if response.primary_action {
+        *sink.action = Some(if is_dir {
+            if is_open {
+                TreeAction::Collapse(node.path.clone())
             } else {
-                TreeAction::Open(node.path.clone())
-            });
-        }
+                TreeAction::Expand(node.path.clone())
+            }
+        } else {
+            TreeAction::Open(node.path.clone())
+        });
     }
 
     if let Some(children) = &node.children {
-        render_nodes(ui, children, depth + 1, status, action);
+        render_nodes(ui, children, depth + 1, status, sink, selected);
     }
 }
 
@@ -352,29 +436,69 @@ struct RowVisual<'a> {
 ///   tree like `VSCode`. Other directories use the accent icon + soft name.
 /// - Files use their git-status color (or the neutral foreground when clean) for
 ///   both icon and name.
-fn row_colors(is_dir: bool, dir_changed: bool, decoration: Option<(&str, Color32)>) -> (Color32, Color32) {
+///
+/// Color precedence (highest first), `VSCode`-style:
+/// 1. Git "changed" coloring (dir-green propagation, or a file's status
+///    decoration) wins — `ignored` is intentionally ignored for these rows, since
+///    "this entry changed" is the stronger signal even when it is also
+///    gitignored. The status letter (drawn elsewhere) is likewise unaffected.
+/// 2. Otherwise, a gitignored entry (`ignored`) is dimmed to `theme::FG_DIM()`
+///    for both icon and name, visually setting temp/ignored files apart from
+///    normal entries.
+/// 3. Otherwise, the normal colors apply (accent icon + soft name for dirs,
+///    neutral fg for files).
+///
+/// Selection is not modeled here: this widget has no per-row selection state
+/// (rows highlight on hover only, painted independently of these colors), so the
+/// selection-always-wins rule has no row to apply to. If selection is added
+/// later, it must override the value returned here at the call site.
+fn row_colors(is_dir: bool, dir_changed: bool, ignored: bool, decoration: Option<(&str, Color32)>) -> (Color32, Color32) {
     if is_dir {
         if dir_changed {
             (theme::PALETTE_GREEN(), theme::PALETTE_GREEN())
+        } else if ignored {
+            (theme::FG_DIM(), theme::FG_DIM())
         } else {
             (theme::ACCENT(), theme::FG_SOFT())
         }
+    } else if let Some((_, color)) = decoration {
+        // Changed file: status color wins over dim.
+        (color, color)
+    } else if ignored {
+        (theme::FG_DIM(), theme::FG_DIM())
     } else {
-        let c = decoration.map_or_else(theme::FG, |(_, color)| color);
-        (c, c)
+        (theme::FG(), theme::FG())
     }
 }
 
-/// Renders one tree row. Returns `true` if the row should toggle (folder) or
-/// open (file) — i.e. clicked for a folder, double-clicked for a file.
-fn render_row(ui: &mut egui::Ui, node: &FileNode, depth: usize, status: Option<&GitStatus>) -> bool {
+/// Return value from [`render_row`].
+struct RowResponse {
+    /// The user single-clicked this row (also fires when a directory is clicked
+    /// to expand/collapse, and on the first click of a double-click sequence for
+    /// files). Used to record the selection.
+    clicked: bool,
+    /// The primary action should fire: clicked for a directory (toggle), or
+    /// double-clicked for a file (open in editor).
+    primary_action: bool,
+}
+
+/// Renders one tree row. Returns a [`RowResponse`] indicating whether the row
+/// was clicked (selection) and/or triggered its primary action (toggle/open).
+fn render_row(
+    ui: &mut egui::Ui,
+    node: &FileNode,
+    depth: usize,
+    status: Option<&GitStatus>,
+    row_hits: &mut Vec<RowHit>,
+    is_selected: bool,
+) -> RowResponse {
     let decoration = status.and_then(|s| status_decoration(status_for_path(s, &node.path)));
 
     // Normal-tree folder propagation: a directory that CONTAINS uncommitted
     // changes tints its icon+name green (VSCode-style), even though the folder
     // itself has no direct status. Files keep their own status color.
     let dir_changed = node.is_dir && status.is_some_and(|s| dir_contains_changes(s, &node.path));
-    let (icon_color, name_color) = row_colors(node.is_dir, dir_changed, decoration);
+    let (icon_color, name_color) = row_colors(node.is_dir, dir_changed, node.ignored, decoration);
 
     let visual = RowVisual {
         depth,
@@ -386,12 +510,32 @@ fn render_row(ui: &mut egui::Ui, node: &FileNode, depth: usize, status: Option<&
         letter: decoration,
     };
 
-    let response = paint_tree_row(ui, &visual);
+    let response = paint_tree_row(ui, &visual, is_selected);
 
-    if node.is_dir {
+    // Record the row's screen-space hit box for the OS-file-drop handler. The
+    // tree paints inside a transform-layer Area, so map the local rect to global
+    // coordinates the app-level pointer position is expressed in.
+    let to_global = ui.ctx().layer_transform_to_global(ui.layer_id()).unwrap_or_default();
+    let screen_rect = to_global * response.rect;
+    row_hits.push(RowHit {
+        rect: (
+            screen_rect.min.x,
+            screen_rect.min.y,
+            screen_rect.max.x,
+            screen_rect.max.y,
+        ),
+        path: node.path.clone(),
+        is_dir: node.is_dir,
+    });
+
+    let primary_action = if node.is_dir {
         response.clicked()
     } else {
         response.double_clicked()
+    };
+    RowResponse {
+        clicked: response.clicked(),
+        primary_action,
     }
 }
 
@@ -400,10 +544,18 @@ fn render_row(ui: &mut egui::Ui, node: &FileNode, depth: usize, status: Option<&
 /// ellipsis-truncated before the letter reserve]` with the status letter painted
 /// absolutely at the right edge. No inner `ui.label`/scope is used, so nothing
 /// can rewind the cursor and stack the name under the icon.
-fn paint_tree_row(ui: &mut egui::Ui, v: &RowVisual<'_>) -> egui::Response {
+///
+/// `is_selected` draws a subtle selection background using the accent token so
+/// the Ctrl+V target is always visible. Hover and selection can coexist.
+fn paint_tree_row(ui: &mut egui::Ui, v: &RowVisual<'_>, is_selected: bool) -> egui::Response {
     let row_rect = Rect::from_min_size(ui.cursor().min, Vec2::new(ui.available_width(), ROW_HEIGHT));
     let response = ui.allocate_rect(row_rect, Sense::click());
 
+    // Selection background (subtle accent) rendered below the hover highlight.
+    if is_selected {
+        ui.painter()
+            .rect_filled(row_rect, CornerRadius::ZERO, theme::alpha(theme::ACCENT(), 20));
+    }
     if response.hovered() {
         ui.painter()
             .rect_filled(row_rect, CornerRadius::ZERO, theme::alpha(theme::FG(), 6));
@@ -569,7 +721,9 @@ fn render_changed_row(ui: &mut egui::Ui, node: &ChangedTreeNode, depth: usize, i
         letter: decoration,
     };
 
-    let response = paint_tree_row(ui, &visual);
+    // The filtered tree has no persistent selection model — selection only tracks
+    // rows in the normal (on-disk) tree, so `is_selected` is always false here.
+    let response = paint_tree_row(ui, &visual, false);
 
     if node.is_dir {
         response.clicked()
@@ -599,6 +753,39 @@ fn render_footer(ui: &mut egui::Ui, code_missing: bool) {
         );
     });
     ui.add_space(4.0);
+}
+
+/// Reveals `target` in the tree by expanding every ancestor directory between
+/// `root` (exclusive) and `target`'s parent (inclusive), lazily scanning each
+/// level so the file's row becomes visible.
+///
+/// Walks the path components from `root` down: at each step it finds the matching
+/// directory node, ensures its children are loaded, then descends. Stops early
+/// (no panic) if a component isn't found — e.g. the file was deleted, lives under
+/// a `HARD_SKIP` dir, or sits outside `root`. There is no persistent selection
+/// model, so this only expands-to-visible; a highlight is a possible Next-Step.
+fn reveal_in_tree(roots: &mut Vec<FileNode>, root: &Path, target: &Path) {
+    let Ok(rel) = target.strip_prefix(root) else {
+        return;
+    };
+    // The components to descend are every ancestor dir of the file (drop the
+    // file name itself).
+    let mut components: Vec<_> = rel.components().collect();
+    components.pop(); // file name — we only expand directories
+
+    let mut abs = root.to_path_buf();
+    let mut level: &mut Vec<FileNode> = roots;
+    for comp in components {
+        abs.push(comp);
+        let Some(idx) = level.iter().position(|n| n.is_dir && n.path == abs) else {
+            return; // ancestor not present in the scanned tree; stop quietly
+        };
+        FileTreeState::ensure_children(&mut level[idx]);
+        match level[idx].children.as_mut() {
+            Some(children) => level = children,
+            None => return,
+        }
+    }
 }
 
 /// Finds the node at `path` and lazily scans its children (expand).
@@ -704,19 +891,51 @@ mod tests {
     fn dir_with_changes_inside_renders_green_in_normal_tree() {
         // Folder propagation: a changed dir tints icon+name green; a clean dir
         // keeps accent icon + soft name; a clean file uses the neutral fg.
-        let (changed_icon, changed_name) = row_colors(true, true, None);
+        let (changed_icon, changed_name) = row_colors(true, true, false, None);
         assert_eq!(changed_icon, theme::PALETTE_GREEN());
         assert_eq!(changed_name, theme::PALETTE_GREEN());
 
-        let (clean_icon, clean_name) = row_colors(true, false, None);
+        let (clean_icon, clean_name) = row_colors(true, false, false, None);
         assert_eq!(clean_icon, theme::ACCENT());
         assert_eq!(clean_name, theme::FG_SOFT());
         assert_ne!(clean_name, theme::PALETTE_GREEN());
 
         // A file with a status keeps its status color (not the dir-green path).
-        let (file_icon, file_name) = row_colors(false, false, Some(("M", theme::PALETTE_YELLOW())));
+        let (file_icon, file_name) = row_colors(false, false, false, Some(("M", theme::PALETTE_YELLOW())));
         assert_eq!(file_icon, theme::PALETTE_YELLOW());
         assert_eq!(file_name, theme::PALETTE_YELLOW());
+    }
+
+    #[test]
+    fn ignored_entries_are_dimmed_when_clean() {
+        // A clean (unchanged) gitignored file dims both icon and name, instead of
+        // the neutral foreground a normal file would get.
+        let (icon, name) = row_colors(false, false, true, None);
+        assert_eq!(icon, theme::FG_DIM());
+        assert_eq!(name, theme::FG_DIM());
+        assert_ne!(name, theme::FG());
+
+        // A clean gitignored directory dims too, instead of accent icon/soft name.
+        let (dir_icon, dir_name) = row_colors(true, false, true, None);
+        assert_eq!(dir_icon, theme::FG_DIM());
+        assert_eq!(dir_name, theme::FG_DIM());
+        assert_ne!(dir_icon, theme::ACCENT());
+    }
+
+    #[test]
+    fn changed_coloring_takes_precedence_over_ignored_dim() {
+        // A gitignored file that ALSO has a git status keeps its status color —
+        // "changed" is the stronger signal, so dim does not apply.
+        let (icon, name) = row_colors(false, false, true, Some(("M", theme::PALETTE_YELLOW())));
+        assert_eq!(icon, theme::PALETTE_YELLOW());
+        assert_eq!(name, theme::PALETTE_YELLOW());
+        assert_ne!(name, theme::FG_DIM());
+
+        // A gitignored directory that contains changes stays green, not dim.
+        let (dir_icon, dir_name) = row_colors(true, true, true, None);
+        assert_eq!(dir_icon, theme::PALETTE_GREEN());
+        assert_eq!(dir_name, theme::PALETTE_GREEN());
+        assert_ne!(dir_name, theme::FG_DIM());
     }
 
     #[test]
@@ -811,28 +1030,37 @@ mod tests {
             path: std::path::PathBuf::from("/tmp/a/b/methods.csv"),
             is_dir: false,
             children: None,
+            ignored: false,
         };
         let dir_b = FileNode {
             name: "bbb".to_string(),
             path: std::path::PathBuf::from("/tmp/a/b"),
             is_dir: true,
             children: Some(vec![deep_file]),
+            ignored: false,
         };
         let dir_a = FileNode {
             name: "aaa".to_string(),
             path: std::path::PathBuf::from("/tmp/a"),
             is_dir: true,
             children: Some(vec![dir_b]),
+            ignored: false,
         };
         let top_file = FileNode {
             name: "bootstrap".to_string(),
             path: std::path::PathBuf::from("/tmp/bootstrap"),
             is_dir: false,
             children: None,
+            ignored: false,
         };
 
         let geoms = row_geoms(&["bootstrap", "methods.csv"], |ui| {
-            render_nodes(ui, &[dir_a.clone(), top_file.clone()], 0, None, &mut None);
+            let mut sink = RenderSink {
+                action: &mut None,
+                selection: &mut None,
+                row_hits: &mut Vec::new(),
+            };
+            render_nodes(ui, &[dir_a.clone(), top_file.clone()], 0, None, &mut sink, None);
         });
         let depth0 = &geoms[0];
         let depth2 = &geoms[1];

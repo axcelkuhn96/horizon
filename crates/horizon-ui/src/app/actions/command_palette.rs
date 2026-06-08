@@ -1,10 +1,11 @@
 use egui::Context;
-use horizon_core::Direction;
+use horizon_core::{Direction, PanelKind};
 
 use crate::app::HorizonApp;
 use crate::app::shortcuts::shortcut_pressed;
 use crate::command_palette::{CommandPalette, PaletteAction};
 use crate::command_registry::CommandId;
+use crate::paste_files::{paste_targets_explorer, read_clipboard_file_list};
 use crate::search_overlay::SearchOverlay;
 
 use super::align_attached_workspaces;
@@ -12,6 +13,16 @@ use super::support::{
     command_palette_panel_entries, command_palette_preset_entries, command_palette_workspace_entries,
     detached_workspace_ids,
 };
+
+/// Returns the command `Ctrl+Shift+F` should trigger given the focused panel
+/// kind. When the File Explorer is focused it maps to a content search across
+/// files; otherwise it keeps the existing terminal search toggle.
+fn search_shortcut_command(focused_kind: Option<PanelKind>) -> CommandId {
+    match focused_kind {
+        Some(PanelKind::FileExplorer) => CommandId::SearchFileContents,
+        _ => CommandId::ToggleSearch,
+    }
+}
 
 impl HorizonApp {
     pub(in crate::app) fn open_command_palette(&mut self) {
@@ -24,6 +35,69 @@ impl HorizonApp {
         } else {
             Some(CommandPalette::new())
         };
+    }
+
+    /// Open (or re-focus) the content-search panel on the focused File Explorer.
+    /// No-op if no panel is focused or the focused panel is not an explorer
+    /// (the Ctrl+Shift+F dispatch already gates this, but stay defensive).
+    fn open_explorer_search(&mut self) {
+        let Some(id) = self.board.focused else {
+            return;
+        };
+        let Some(panel) = self.board.panel_mut(id) else {
+            return;
+        };
+        if let Some(state) = panel.content.file_explorer_mut() {
+            state.open_search();
+        }
+    }
+
+    /// Paste clipboard files into the focused File Explorer's selected directory
+    /// (or the explorer root when nothing is selected).
+    ///
+    /// Reads `text/uri-list` from the OS clipboard via arboard, copies each
+    /// file/directory into the resolved destination with [`copy_into_dir`], then
+    /// calls [`refresh_dir`] so the new entries appear immediately.
+    ///
+    /// Errors from individual copy operations are logged at `debug` level (via
+    /// [`CopyReport::errors`]) but never surfaced to the user — a partial failure
+    /// still shows whatever succeeded. No-op when the clipboard holds no file list
+    /// or when no explorer panel is focused.
+    fn paste_files_into_explorer(&mut self) {
+        use horizon_core::file_ops::copy_into_dir;
+
+        let Some(id) = self.board.focused else {
+            return;
+        };
+        let Some(panel) = self.board.panel_mut(id) else {
+            return;
+        };
+        let Some(state) = panel.content.file_explorer_mut() else {
+            return;
+        };
+
+        let Some(paths) = read_clipboard_file_list() else {
+            tracing::debug!("Ctrl+V on explorer: clipboard holds no file list, nothing to paste");
+            return;
+        };
+
+        let dest = state.paste_target();
+        tracing::debug!(
+            dest = %dest.display(),
+            count = paths.len(),
+            "pasting clipboard files into explorer"
+        );
+
+        let report = copy_into_dir(&paths, &dest);
+        for err in &report.errors {
+            tracing::debug!(src = %err.source.display(), "paste copy error: {}", err.message);
+        }
+
+        // Refresh the destination dir so the copied files appear immediately.
+        // If `dest` is a collapsed/unexpanded subdir the visual refresh is a
+        // no-op (the files still land on disk; the tree picks them up on the
+        // next expand) — same behavior as the OS file-drop handler.
+        state.refresh_dir(&dest);
     }
 
     pub(in crate::app) fn render_command_palette(&mut self, ctx: &Context) {
@@ -139,6 +213,8 @@ impl HorizonApp {
                     self.search_overlay = Some(SearchOverlay::new());
                 }
             }
+            CommandId::SearchFileContents => self.open_explorer_search(),
+            CommandId::PasteIntoExplorer => self.paste_files_into_explorer(),
             CommandId::ToggleScrollPan => {
                 self.scroll_pans_over_panels = !self.scroll_pans_over_panels;
                 tracing::info!(
@@ -208,24 +284,99 @@ impl HorizonApp {
             (self.shortcuts.open_remote_hosts, CommandId::OpenRemoteHosts),
             (self.shortcuts.toggle_sessions, CommandId::ToggleSessions),
             (self.shortcuts.new_terminal, CommandId::NewPanel),
-            (self.shortcuts.search, CommandId::ToggleSearch),
             (self.shortcuts.toggle_scroll_pan, CommandId::ToggleScrollPan),
         ];
 
-        let (toggle_palette, triggered_command) = ctx.input(|input| {
+        // The search shortcut (Ctrl+Shift+F) is handled separately so it can be
+        // contextual: explorer focused -> content search, otherwise the terminal
+        // search toggle. Every other binding keeps its existing behavior.
+        //
+        // Ctrl+V (paste) is also contextual: when the focused panel is a
+        // FileExplorer, we intercept the paste and copy clipboard files into the
+        // explorer's selected/root directory; otherwise the event flows through
+        // unchanged so the terminal's native paste behaviour is untouched.
+        let search_binding = self.shortcuts.search;
+        let (toggle_palette, search_pressed, paste_for_explorer, triggered_command) = ctx.input(|input| {
             let palette = shortcut_pressed(input, self.shortcuts.command_palette);
+            let search = shortcut_pressed(input, search_binding);
+            // Detect a paste event (egui emits Event::Paste for Ctrl+V /
+            // Ctrl+Shift+V / Shift+Insert).
+            let has_paste = input.events.iter().any(|event| matches!(event, egui::Event::Paste(_)));
             let command = shortcut_bindings
                 .iter()
                 .find(|(binding, _)| shortcut_pressed(input, *binding))
                 .map(|(_, id)| id.clone());
-            (palette, command)
+            (palette, search, has_paste, command)
         });
 
         if toggle_palette {
             self.toggle_command_palette();
         }
+        if search_pressed {
+            let focused_kind = self
+                .board
+                .focused
+                .and_then(|id| self.board.panel(id))
+                .map(|panel| panel.kind);
+            let command_id = search_shortcut_command(focused_kind);
+            self.execute_command(ctx, &command_id);
+        }
+
+        // Ctrl+V: intercept for the explorer ONLY; consume the paste event so it
+        // does not also reach any terminal panel that happens to be in the layout.
+        if paste_for_explorer {
+            let focused_kind = self
+                .board
+                .focused
+                .and_then(|id| self.board.panel(id))
+                .map(|panel| panel.kind);
+            if paste_targets_explorer(focused_kind) {
+                // Consume the egui paste event so terminals do not see it.
+                ctx.input_mut(|input| {
+                    input.events.retain(|event| !matches!(event, egui::Event::Paste(_)));
+                });
+                self.execute_command(ctx, &CommandId::PasteIntoExplorer);
+            }
+        }
+
         if let Some(command_id) = triggered_command {
             self.execute_command(ctx, &command_id);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use horizon_core::PanelKind;
+
+    use super::{CommandId, search_shortcut_command};
+
+    #[test]
+    fn search_shortcut_maps_explorer_to_content_search() {
+        assert_eq!(
+            search_shortcut_command(Some(PanelKind::FileExplorer)),
+            CommandId::SearchFileContents
+        );
+    }
+
+    #[test]
+    fn search_shortcut_maps_editor_to_terminal_search() {
+        assert_eq!(
+            search_shortcut_command(Some(PanelKind::Editor)),
+            CommandId::ToggleSearch
+        );
+    }
+
+    #[test]
+    fn search_shortcut_maps_terminal_to_terminal_search() {
+        assert_eq!(
+            search_shortcut_command(Some(PanelKind::Shell)),
+            CommandId::ToggleSearch
+        );
+    }
+
+    #[test]
+    fn search_shortcut_maps_none_to_terminal_search() {
+        assert_eq!(search_shortcut_command(None), CommandId::ToggleSearch);
     }
 }

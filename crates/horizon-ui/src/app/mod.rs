@@ -561,7 +561,7 @@ impl eframe::App for HorizonApp {
 
         if self.shutdown_progress.is_some() {
             self.render_shutdown_overlay(ctx);
-            self.poll_shutdown_progress();
+            self.poll_shutdown_progress(ctx);
             return;
         }
 

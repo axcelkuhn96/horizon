@@ -46,10 +46,13 @@ impl TerminalDropTarget {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) enum FileDropHighlight {
     Panel(PanelId),
     Workspace(WorkspaceId),
+    /// A specific File Explorer row (the folder that would receive the drop),
+    /// in screen coordinates. Used while OS files hover over the explorer.
+    ExplorerRow(Rect),
 }
 
 impl HorizonApp {
@@ -116,6 +119,19 @@ impl HorizonApp {
             None
         };
 
+        // While files hover over a File Explorer panel, highlight the folder row
+        // that would receive the drop. Over the empty area / panel background the
+        // drop still targets the explorer ROOT (a valid drop), so fall back to a
+        // panel-level highlight on the explorer itself rather than clearing the
+        // feedback.
+        if hovered
+            && let Some(pos) = hover_pos
+            && let Some((panel_id, row_rect)) = self.explorer_drop_target(pos, fullscreen_panel, scope)
+        {
+            self.file_drop_highlight =
+                Some(row_rect.map_or(FileDropHighlight::Panel(panel_id), FileDropHighlight::ExplorerRow));
+        }
+
         if dropped.is_empty() {
             return;
         }
@@ -123,6 +139,19 @@ impl HorizonApp {
         let screen_pos = native_pointer_pos
             .or_else(|| self.file_hover_positions.remove(&viewport_id))
             .or(pointer_pos);
+
+        // A drop over a File Explorer panel COPIES the files into the target
+        // folder (folder row -> that folder; file row -> its parent; empty area
+        // -> the explorer root). This is checked before the terminal/editor
+        // branches and, when it fires, fully handles the drop so the same files
+        // are never also pasted into a terminal.
+        if let Some(pos) = screen_pos
+            && let Some((panel_id, _)) = self.explorer_drop_target(pos, fullscreen_panel, scope)
+        {
+            self.copy_dropped_files_into_explorer(panel_id, pos, &dropped);
+            return;
+        }
+
         let (editor_drops, non_editor_drops) = partition_dropped_files(&dropped);
 
         if let Some(target) =
@@ -250,6 +279,79 @@ impl HorizonApp {
         }
 
         None
+    }
+
+    /// Resolve the OS-file-drop target for a screen position over a File
+    /// Explorer panel.
+    ///
+    /// Returns `Some((panel_id, row_rect))` when the topmost panel under `pos`
+    /// (respecting a droppable `fullscreen_panel` and `scope`) is a File
+    /// Explorer. `row_rect` is the screen rect of the row that would receive the
+    /// drop (for the hover highlight), or `None` when the drop would land on the
+    /// root / empty area. Returns `None` when no explorer is under the cursor.
+    fn explorer_drop_target(
+        &self,
+        pos: Pos2,
+        fullscreen_panel: Option<PanelId>,
+        scope: FileDropScope,
+    ) -> Option<(PanelId, Option<Rect>)> {
+        // A droppable fullscreen panel shadows everything beneath it; if it is a
+        // fullscreen non-explorer panel, the explorer is not reachable.
+        let panel_id = if let Some(fs) = fullscreen_panel {
+            fs
+        } else {
+            self.panel_screen_order
+                .iter()
+                .rev()
+                .copied()
+                .find(|id| self.panel_screen_rects.get(id).is_some_and(|r| r.contains(pos)))?
+        };
+
+        if !self.panel_is_in_scope(panel_id, scope) {
+            return None;
+        }
+        let panel = self.board.panel(panel_id)?;
+        if panel.kind != PanelKind::FileExplorer {
+            return None;
+        }
+        let state = panel.content.file_explorer()?;
+
+        // Topmost row under the cursor (if any) provides the highlight rect in a
+        // single scan; the copy itself re-derives the destination from the same
+        // hit-map.
+        let row_rect = horizon_core::file_tree::row_hit_entry_at(&state.row_hits, pos.x, pos.y).map(|hit| {
+            let (min_x, min_y, max_x, max_y) = hit.rect;
+            Rect::from_min_max(Pos2::new(min_x, min_y), Pos2::new(max_x, max_y))
+        });
+
+        Some((panel_id, row_rect))
+    }
+
+    /// Copy the dropped OS files into the explorer's target directory and refresh
+    /// that folder so the new entries appear. Non-destructive (see
+    /// [`horizon_core::file_ops::copy_into_dir`]); copy failures are logged, never
+    /// fatal.
+    fn copy_dropped_files_into_explorer(&mut self, panel_id: PanelId, pos: Pos2, dropped: &[egui::DroppedFile]) {
+        let srcs: Vec<std::path::PathBuf> = dropped.iter().filter_map(|file| file.path.clone()).collect();
+        if srcs.is_empty() {
+            return;
+        }
+
+        let Some(panel) = self.board.panel_mut(panel_id) else {
+            return;
+        };
+        let Some(state) = panel.content.file_explorer_mut() else {
+            return;
+        };
+
+        let dest = state.drop_target_for(pos.x, pos.y);
+        let report = horizon_core::file_ops::copy_into_dir(&srcs, &dest);
+        for error in &report.errors {
+            tracing::error!("file drop copy failed for {}: {}", error.source.display(), error.message);
+        }
+        // Reflect the freshly-copied entries in the tree.
+        state.refresh_dir(&dest);
+        self.mark_runtime_dirty();
     }
 
     fn paste_dropped_paths_into_terminal(&mut self, panel_id: PanelId, dropped: &[egui::DroppedFile]) -> bool {

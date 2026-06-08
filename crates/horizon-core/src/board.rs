@@ -244,22 +244,40 @@ impl Board {
     }
 
     pub fn shutdown_terminal_panels(&mut self) {
+        // Signal every panel to stop *first*, then join concurrently. Joining
+        // each terminal serially would cost up to
+        // `TERMINAL_PANEL_SHUTDOWN_TIMEOUT` per terminal (sum); spawning all
+        // join threads and waiting on a shared counter bounds total teardown to
+        // roughly the slowest single terminal instead.
         for panel in &mut self.panels {
             panel.request_shutdown();
         }
 
+        let completed = Arc::new(AtomicUsize::new(0));
+        let mut join_count = 0;
         for panel in &mut self.panels {
-            if panel.terminal().is_none() {
-                continue;
+            if let Some(terminal) = panel.terminal_mut()
+                && terminal.begin_async_join(&completed)
+            {
+                join_count += 1;
             }
-            if !panel.wait_for_shutdown(TERMINAL_PANEL_SHUTDOWN_TIMEOUT) {
+        }
+
+        // Wait until every join thread reports done, or the budget expires.
+        // Detached join threads finish PTY teardown in the background and the
+        // process exit reaps them, so a stuck terminal cannot wedge close.
+        let deadline = std::time::Instant::now() + TERMINAL_PANEL_SHUTDOWN_TIMEOUT;
+        while completed.load(std::sync::atomic::Ordering::Relaxed) < join_count {
+            if std::time::Instant::now() >= deadline {
                 tracing::warn!(
-                    panel_id = panel.id.0,
-                    kind = ?panel.kind,
+                    completed = completed.load(std::sync::atomic::Ordering::Relaxed),
+                    total = join_count,
                     timeout_ms = TERMINAL_PANEL_SHUTDOWN_TIMEOUT.as_millis(),
-                    "timed out waiting for terminal panel shutdown"
+                    "timed out waiting for terminal panels to shut down"
                 );
+                break;
             }
+            std::thread::sleep(Duration::from_millis(5));
         }
     }
 
