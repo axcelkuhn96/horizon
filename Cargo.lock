@@ -1396,6 +1396,7 @@ version = "0.3.0"
 dependencies = [
  "alacritty_terminal",
  "comrak",
+ "filetime",
  "git2",
  "ignore",
  "profiling",

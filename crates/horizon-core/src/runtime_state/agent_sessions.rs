@@ -275,6 +275,50 @@ fn file_updated_at_millis(path: &Path) -> Result<i64> {
     i64::try_from(elapsed.as_millis()).map_err(|error| Error::State(error.to_string()))
 }
 
+/// Find the most-recently-modified Claude session for a given `cwd` that has
+/// not yet been claimed by another panel.
+///
+/// Scans `<config_dir>/projects/` for `.jsonl` files, reads each session's
+/// `cwd` field, and returns the first (newest by mtime) `session_id` whose id
+/// is absent from `claimed`.  Returns `None` when no unclaimed match exists or
+/// when the directory is missing.
+///
+/// Mirrors the enumeration + sort + truncation from `load_claude_sessions` so
+/// the same `MAX_CLAUDE_SESSION_FILES` budget applies.
+#[must_use]
+pub fn most_recent_unclaimed_session_for<S: std::hash::BuildHasher>(
+    config_dir: &Path,
+    cwd: &str,
+    claimed: &std::collections::HashSet<String, S>,
+) -> Option<String> {
+    let projects_dir = config_dir.join("projects");
+    if !projects_dir.exists() {
+        return None;
+    }
+
+    let mut session_paths = Vec::new();
+    if collect_claude_project_files(&projects_dir, &mut session_paths).is_err() {
+        return None;
+    }
+    session_paths.sort_by_key(|(_, updated_at)| Reverse(*updated_at));
+    session_paths.truncate(super::MAX_CLAUDE_SESSION_FILES);
+
+    let target_cwd = normalize_cwd(Some(cwd));
+
+    for (path, updated_at) in session_paths {
+        if let Ok(Some(record)) = load_claude_project_session_summary(&path, updated_at) {
+            let cwd_matches = match (&target_cwd, &record.cwd) {
+                (Some(expected), Some(actual)) => expected == actual,
+                _ => false,
+            };
+            if cwd_matches && !claimed.contains(&record.session_id) {
+                return Some(record.session_id);
+            }
+        }
+    }
+    None
+}
+
 fn load_codex_sessions() -> Result<Vec<AgentSessionRecord>> {
     let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
         return Ok(Vec::new());
@@ -931,5 +975,100 @@ INSERT INTO session (id, title, directory, parent_id, time_updated, time_archive
             state.workspaces[0].panels[0].session_binding.is_none(),
             "Truly-fresh panel (had_session_activity=false) must not receive a binding"
         );
+    }
+
+    // ── most_recent_unclaimed_session_for tests ──────────────────────────────
+
+    use super::most_recent_unclaimed_session_for;
+
+    /// Write a minimal Claude `.jsonl` session file under
+    /// `<config_dir>/projects/<enc_cwd>/<uuid>.jsonl` and set its mtime to
+    /// `mtime_secs` seconds since the Unix epoch.  Returns the uuid string so
+    /// callers can reference it in `claimed` sets or assertions.
+    fn write_session_file(
+        config_dir: &std::path::Path,
+        enc_cwd: &str,
+        session_id: &str,
+        cwd: &str,
+        mtime_secs: i64,
+    ) {
+        let project_dir = config_dir.join("projects").join(enc_cwd);
+        std::fs::create_dir_all(&project_dir).expect("create project dir");
+        let path = project_dir.join(format!("{session_id}.jsonl"));
+        let line = format!("{{\"type\":\"user\",\"cwd\":\"{cwd}\",\"sessionId\":\"{session_id}\"}}\n");
+        std::fs::write(&path, line).expect("write session jsonl");
+        // Set mtime deterministically so test ordering is reproducible.
+        let mtime = filetime::FileTime::from_unix_time(mtime_secs, 0);
+        filetime::set_file_mtime(&path, mtime).expect("set mtime");
+    }
+
+    #[test]
+    fn most_recent_unclaimed_single_session_returned() {
+        // (a) single session for cwd, empty claimed → returns it
+        let dir = tempfile::tempdir().expect("temp dir");
+        write_session_file(dir.path(), "-repo", "session-aaa", "/repo", 1000);
+
+        let result = most_recent_unclaimed_session_for(dir.path(), "/repo", &std::collections::HashSet::new());
+        assert_eq!(result.as_deref(), Some("session-aaa"));
+    }
+
+    #[test]
+    fn most_recent_unclaimed_returns_newest_by_mtime() {
+        // (b) two sessions same cwd, empty claimed → returns the NEWEST (by mtime)
+        let dir = tempfile::tempdir().expect("temp dir");
+        write_session_file(dir.path(), "-repo", "session-older", "/repo", 1000);
+        write_session_file(dir.path(), "-repo", "session-newer", "/repo", 2000);
+
+        let result = most_recent_unclaimed_session_for(dir.path(), "/repo", &std::collections::HashSet::new());
+        assert_eq!(result.as_deref(), Some("session-newer"));
+    }
+
+    #[test]
+    fn most_recent_unclaimed_skips_claimed_returns_second() {
+        // (c) newest's id IS in claimed → returns the SECOND newest
+        let dir = tempfile::tempdir().expect("temp dir");
+        write_session_file(dir.path(), "-repo", "session-older", "/repo", 1000);
+        write_session_file(dir.path(), "-repo", "session-newer", "/repo", 2000);
+
+        let mut claimed = std::collections::HashSet::new();
+        claimed.insert("session-newer".to_string());
+
+        let result = most_recent_unclaimed_session_for(dir.path(), "/repo", &claimed);
+        assert_eq!(result.as_deref(), Some("session-older"));
+    }
+
+    #[test]
+    fn most_recent_unclaimed_all_claimed_returns_none() {
+        // (d) all ids claimed → None
+        let dir = tempfile::tempdir().expect("temp dir");
+        write_session_file(dir.path(), "-repo", "session-aaa", "/repo", 1000);
+        write_session_file(dir.path(), "-repo", "session-bbb", "/repo", 2000);
+
+        let mut claimed = std::collections::HashSet::new();
+        claimed.insert("session-aaa".to_string());
+        claimed.insert("session-bbb".to_string());
+
+        let result = most_recent_unclaimed_session_for(dir.path(), "/repo", &claimed);
+        assert!(result.is_none(), "all sessions claimed must return None");
+    }
+
+    #[test]
+    fn most_recent_unclaimed_no_matching_cwd_returns_none() {
+        // (e) cwd has no matching session → None
+        let dir = tempfile::tempdir().expect("temp dir");
+        write_session_file(dir.path(), "-other", "session-aaa", "/other", 1000);
+
+        let result = most_recent_unclaimed_session_for(dir.path(), "/repo", &std::collections::HashSet::new());
+        assert!(result.is_none(), "no session for /repo must return None");
+    }
+
+    #[test]
+    fn most_recent_unclaimed_missing_projects_dir_returns_none() {
+        // (f) missing `<dir>/projects` dir → None (no panic)
+        let dir = tempfile::tempdir().expect("temp dir");
+        // Do NOT create dir.path()/projects
+
+        let result = most_recent_unclaimed_session_for(dir.path(), "/repo", &std::collections::HashSet::new());
+        assert!(result.is_none(), "missing projects dir must return None without panic");
     }
 }
