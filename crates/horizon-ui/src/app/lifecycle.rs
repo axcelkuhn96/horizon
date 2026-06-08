@@ -25,19 +25,51 @@ impl HorizonApp {
     /// Starts asynchronous terminal shutdown. State is saved immediately,
     /// and background threads join each terminal event loop. The UI shows a
     /// progress overlay until all terminals are done or the budget expires.
+    ///
+    /// Every step here runs on the UI thread, so each must be bounded: the
+    /// runtime save must not block on per-terminal locks, and tearing down git
+    /// watchers must not join their (possibly mid-`git status`) threads. Timing
+    /// is logged so a real close surfaces which step (if any) is slow in the
+    /// journal (`journalctl --user _COMM=horizon`).
     #[profiling::function]
     fn begin_shutdown(&mut self) {
         if self.shutdown_progress.is_some() {
             return;
         }
 
+        let started = Instant::now();
+
+        let save_started = Instant::now();
         self.auto_save_runtime_state();
+        let save_elapsed = save_started.elapsed();
+
+        let watchers_started = Instant::now();
+        let watcher_count = self.git_watchers.len();
+        // Dropping each watcher now detaches its thread (non-blocking) instead
+        // of joining it, so a watcher running `git status` on a large repo can
+        // no longer stall the close. Signal them all first for promptness.
+        for watcher in self.git_watchers.values_mut() {
+            watcher.begin_stop();
+        }
         self.git_watchers.clear();
+        let watchers_elapsed = watchers_started.elapsed();
+
+        let async_started = Instant::now();
         self.shutdown_progress = Some(self.board.begin_async_shutdown());
+        let async_elapsed = async_started.elapsed();
+
+        tracing::info!(
+            total_ms = started.elapsed().as_millis(),
+            save_ms = save_elapsed.as_millis(),
+            watchers_ms = watchers_elapsed.as_millis(),
+            watcher_count,
+            async_signal_ms = async_elapsed.as_millis(),
+            "begin_shutdown: synchronous close work complete; async terminal teardown started"
+        );
     }
 
     #[profiling::function]
-    pub(super) fn poll_shutdown_progress(&mut self) {
+    pub(super) fn poll_shutdown_progress(&mut self, ctx: &Context) {
         const MAX_SHUTDOWN_WAIT: Duration = Duration::from_secs(3);
 
         let Some(progress) = &self.shutdown_progress else {
@@ -45,10 +77,22 @@ impl HorizonApp {
         };
 
         if progress.is_complete() || progress.started_at().elapsed() > MAX_SHUTDOWN_WAIT {
+            tracing::info!(
+                elapsed_ms = progress.started_at().elapsed().as_millis(),
+                completed = progress.terminals_completed(),
+                total = progress.terminal_count(),
+                timed_out = !progress.is_complete(),
+                "shutdown complete; exiting"
+            );
             self.exit_cleanup_complete = true;
             self.release_active_session_lease();
             std::process::exit(0);
         }
+
+        // Keep painting the overlay until terminals finish or the budget
+        // expires; without this the frame loop can stall and the overlay never
+        // advances (or the WM marks the window as not responding).
+        ctx.request_repaint();
     }
 
     #[profiling::function]
@@ -74,17 +118,46 @@ impl HorizonApp {
     }
 
     /// Synchronous fallback for the `on_exit` eframe callback.
+    ///
+    /// Runs only when the async overlay path did not already complete the
+    /// shutdown (`exit_cleanup_complete`). This is best-effort cleanup right
+    /// before the process exits, so blocking here is acceptable, but we still
+    /// instrument each step to diagnose slow closes via the journal.
     #[profiling::function]
     pub(super) fn run_exit_cleanup(&mut self) {
         if self.exit_cleanup_complete {
             return;
         }
 
+        let started = Instant::now();
         self.exit_cleanup_complete = true;
+
+        let save_started = Instant::now();
         self.auto_save_runtime_state();
-        self.board.shutdown_terminal_panels();
+        let save_elapsed = save_started.elapsed();
+
+        // Signal all watchers to stop first (non-blocking), then drop the map.
+        // `GitWatcher::begin_stop` detaches the thread, so this never joins a
+        // watcher mid-`git status`.
+        let watcher_count = self.git_watchers.len();
+        for watcher in self.git_watchers.values_mut() {
+            watcher.begin_stop();
+        }
         self.git_watchers.clear();
+
+        let terminals_started = Instant::now();
+        self.board.shutdown_terminal_panels();
+        let terminals_elapsed = terminals_started.elapsed();
+
         self.release_active_session_lease();
+
+        tracing::info!(
+            total_ms = started.elapsed().as_millis(),
+            save_ms = save_elapsed.as_millis(),
+            terminals_ms = terminals_elapsed.as_millis(),
+            watcher_count,
+            "run_exit_cleanup: synchronous fallback shutdown complete"
+        );
     }
 
     #[profiling::function]
