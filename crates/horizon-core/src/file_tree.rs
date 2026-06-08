@@ -68,8 +68,9 @@ fn build_ignore_matcher(dir: &Path) -> IgnoreMatchers {
     let mut current = Some(dir);
     while let Some(d) = current {
         let mut builder = GitignoreBuilder::new(d);
-        // `add` returns Some(err) on failure (e.g. the file is absent); that
-        // just means this directory contributes no ignore rules.
+        // `add` returns Some(err) on failure (the file is absent, or present
+        // but unreadable / permission-denied); either way this directory
+        // contributes no ignore rules.
         if builder.add(d.join(".gitignore")).is_none()
             && let Ok(gi) = builder.build()
         {
@@ -724,6 +725,27 @@ mod tests {
         let nodes = scan_dir(&app).expect("scan");
         assert!(find(&nodes, "dist").expect("dist").ignored, "ancestor rule must apply");
         assert!(!find(&nodes, "keep.ts").expect("keep.ts").ignored);
+    }
+
+    #[test]
+    fn scan_dir_nearer_whitelist_overrides_ancestor_ignore() {
+        // Ancestor ignores all *.log; the scanned dir's own .gitignore
+        // whitelists keep.log via `!keep.log`. The nearer rule must win, so
+        // keep.log is NOT ignored while other.log still is.
+        let root = tempfile::tempdir().expect("tempdir");
+        fs::write(root.path().join(".gitignore"), b"*.log\n").expect("root gitignore");
+        let app = root.path().join("app");
+        fs::create_dir(&app).expect("mkdir app");
+        fs::write(app.join(".gitignore"), b"!keep.log\n").expect("app gitignore");
+        fs::write(app.join("keep.log"), b"").expect("keep");
+        fs::write(app.join("other.log"), b"").expect("other");
+
+        let nodes = scan_dir(&app).expect("scan");
+        assert!(
+            !find(&nodes, "keep.log").expect("keep.log").ignored,
+            "nearer !keep.log must un-ignore it"
+        );
+        assert!(find(&nodes, "other.log").expect("other.log").ignored);
     }
 
     #[test]
