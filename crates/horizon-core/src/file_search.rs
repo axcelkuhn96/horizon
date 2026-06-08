@@ -601,6 +601,6 @@ mod tests {
     fn search_error_implements_display_and_error() {
         let err = SearchError::InvalidRegex("boom".to_string());
         assert_eq!(err.to_string(), "invalid regex: boom");
-        let _as_err: &dyn std::error::Error = &err;
+        let _: &dyn std::error::Error = &err;
     }
 }

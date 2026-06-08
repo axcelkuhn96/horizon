@@ -1164,7 +1164,7 @@ mod tests {
         assert!(!should_dispatch(
             "needle",
             "old",
-            SEARCH_DEBOUNCE - Duration::from_millis(1),
+            SEARCH_DEBOUNCE.saturating_sub(Duration::from_millis(1)),
             SEARCH_DEBOUNCE,
         ));
     }
@@ -1261,7 +1261,7 @@ mod tests {
     fn should_refresh_git_false_when_recent_and_no_focus_change() {
         // Within the throttle window and no focus regain => skip.
         assert!(!should_refresh_git(
-            Some(GIT_REFRESH_INTERVAL - Duration::from_millis(1)),
+            Some(GIT_REFRESH_INTERVAL.saturating_sub(Duration::from_millis(1))),
             GIT_REFRESH_INTERVAL,
             false,
         ));

@@ -300,7 +300,7 @@ mod tests {
         let src = src_dir.path().join("a.txt");
         fs::write(&src, "hello").expect("write src");
 
-        let report = copy_into_dir(&[src.clone()], dest_dir.path());
+        let report = copy_into_dir(std::slice::from_ref(&src), dest_dir.path());
 
         let expected = dest_dir.path().join("a.txt");
         assert_eq!(report.copied, vec![expected.clone()]);
@@ -319,15 +319,15 @@ mod tests {
         fs::write(&src, "original").expect("write src");
 
         // First copy -> a.txt
-        let r1 = copy_into_dir(&[src.clone()], dest_dir.path());
+        let r1 = copy_into_dir(std::slice::from_ref(&src), dest_dir.path());
         assert_eq!(r1.copied, vec![dest_dir.path().join("a.txt")]);
 
         // Second copy -> a (2).txt
-        let r2 = copy_into_dir(&[src.clone()], dest_dir.path());
+        let r2 = copy_into_dir(std::slice::from_ref(&src), dest_dir.path());
         assert_eq!(r2.copied, vec![dest_dir.path().join("a (2).txt")]);
 
         // Third copy -> a (3).txt
-        let r3 = copy_into_dir(&[src.clone()], dest_dir.path());
+        let r3 = copy_into_dir(std::slice::from_ref(&src), dest_dir.path());
         assert_eq!(r3.copied, vec![dest_dir.path().join("a (3).txt")]);
 
         // Original untouched.
@@ -382,7 +382,7 @@ mod tests {
         fs::create_dir(&sub).expect("mkdir sub");
         fs::write(sub.join("inner.txt"), "inner").expect("write inner");
 
-        let report = copy_into_dir(&[tree.clone()], dest_dir.path());
+        let report = copy_into_dir(std::slice::from_ref(&tree), dest_dir.path());
 
         let dest_tree = dest_dir.path().join("tree");
         assert_eq!(report.copied, vec![dest_tree.clone()]);
@@ -407,7 +407,7 @@ mod tests {
         let dest = src.join("nested");
         fs::create_dir(&dest).expect("mkdir dest");
 
-        let report = copy_into_dir(&[src.clone()], &dest);
+        let report = copy_into_dir(std::slice::from_ref(&src), &dest);
 
         assert!(report.copied.is_empty(), "nothing copied: {:?}", report.copied);
         assert_eq!(report.errors.len(), 1);
@@ -425,7 +425,7 @@ mod tests {
         let src = dest_dir.path().join("already.txt");
         fs::write(&src, "x").expect("write");
 
-        let report = copy_into_dir(&[src.clone()], dest_dir.path());
+        let report = copy_into_dir(std::slice::from_ref(&src), dest_dir.path());
 
         // Copying already.txt into its own parent dir collides and would just
         // make a duplicate; this is allowed (not a self-subtree), so assert it
