@@ -5,6 +5,30 @@ use std::time::{Duration, Instant};
 use egui::Context;
 use horizon_core::{AgentSessionBinding, AgentSessionCatalog, Board, PanelId, PanelKind, PanelOptions, PanelResume, PanelState};
 
+/// Build a `<binary> --resume <session_id>` command string.
+///
+/// Returns `None` if either input fails the safety check:
+/// - `binary` must be exactly `"claude"` or `"claude2"` (allowlist)
+/// - `session_id` must be between 32 and 128 characters (UUID v4 is 36; 128 is generous)
+/// - `session_id` must contain only hex digits and hyphens (`[0-9a-fA-F-]`)
+///
+/// The length bounds prevent both empty/short ids and multi-megabyte all-hex
+/// ids (denial-of-service / terminal-corruption) being written to the PTY; the
+/// charset check prevents shell-metacharacter injection while still accepting
+/// standard UUID v4 identifiers used by Claude.
+pub(crate) fn resume_command(binary: &str, session_id: &str) -> Option<String> {
+    if binary != "claude" && binary != "claude2" {
+        return None;
+    }
+    if session_id.len() < 32 || session_id.len() > 128 {
+        return None;
+    }
+    if !session_id.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
+        return None;
+    }
+    Some(format!("{binary} --resume {session_id}"))
+}
+
 use crate::{loading_spinner, theme};
 
 use super::util::{empty_string_as_none, short_session_id, truncate_session_label};
@@ -200,7 +224,20 @@ impl HorizonApp {
             .workspaces
             .iter()
             .flat_map(|workspace| &workspace.panels)
-            .any(PanelState::needs_session_bootstrap)
+            .any(Self::panel_state_needs_bootstrap)
+    }
+
+    /// A panel triggers the startup bootstrap when either:
+    /// - it is an agent panel needing its session recovered (Story-6 binding), or
+    /// - it is a Shell panel that had a Claude agent running at save time (Task 4
+    ///   shell-resume injection).
+    ///
+    /// The Shell arm is additive: it only ADDS a reason to spawn bootstrap and
+    /// does not affect the per-panel `needs_session_bootstrap()` invariant shared
+    /// by the agent binding worker (which still gates on `supports_session_binding()`).
+    fn panel_state_needs_bootstrap(panel: &PanelState) -> bool {
+        panel.needs_session_bootstrap()
+            || (panel.kind == PanelKind::Shell && panel.running_agent.is_some())
     }
 
     fn panel_options_need_session_bootstrap(opts: &PanelOptions) -> bool {
@@ -271,6 +308,43 @@ impl HorizonApp {
                     Board::new()
                 });
                 self.board.attention_enabled = self.template_config.features.attention_feed;
+
+                // Inject `<binary> --resume <session_id>\n` into every restored Shell
+                // panel that had a running Claude agent at save time.  This re-launches
+                // claude/claude2 inside the fresh zsh that the restored panel opened.
+                //
+                // Inject-once is guaranteed structurally: this `Ok(bootstrap)` arm fires
+                // exactly once (the receiver is taken and never put back), so the loop
+                // below can never run a second time.
+                for workspace in &bootstrap.runtime_state.workspaces {
+                    for panel_state in &workspace.panels {
+                        let Some(ref agent) = panel_state.running_agent else { continue };
+                        let Some(ref cwd) = panel_state.cwd else { continue };
+                        if panel_state.kind != PanelKind::Shell {
+                            continue;
+                        }
+                        let Some(session_id) =
+                            horizon_core::most_recent_session_for(&agent.config_dir, cwd)
+                        else {
+                            continue;
+                        };
+                        let Some(cmd) = resume_command(&agent.binary, &session_id) else {
+                            tracing::warn!(
+                                binary = %agent.binary,
+                                "skipping shell resume: session_id failed safety check"
+                            );
+                            continue;
+                        };
+                        let Some(panel_id) = self.board.panel_id_by_local_id(&panel_state.local_id)
+                        else {
+                            continue;
+                        };
+                        if let Some(panel) = self.board.panel_mut(panel_id) {
+                            panel.write_input(format!("{cmd}\n").as_bytes());
+                        }
+                    }
+                }
+
                 true
             }
             Err(TryRecvError::Empty) => {
@@ -489,7 +563,71 @@ pub(super) fn render_loading_view(ctx: &Context) {
 mod tests {
     use std::collections::HashSet;
 
-    use super::{DynamicPanelBindingState, HorizonApp, collect_dynamic_binding_updates, select_panel_launch_binding};
+    use super::{DynamicPanelBindingState, HorizonApp, collect_dynamic_binding_updates, resume_command, select_panel_launch_binding};
+
+    // ── resume_command ────────────────────────────────────────────────────────
+
+    const VALID_UUID: &str = "550e8400-e29b-41d4-a716-446655440000";
+
+    #[test]
+    fn resume_command_returns_command_for_valid_uuid_claude() {
+        let result = resume_command("claude", VALID_UUID);
+        assert_eq!(result, Some(format!("claude --resume {VALID_UUID}")));
+    }
+
+    #[test]
+    fn resume_command_returns_command_for_valid_uuid_claude2() {
+        let result = resume_command("claude2", VALID_UUID);
+        assert_eq!(result, Some(format!("claude2 --resume {VALID_UUID}")));
+    }
+
+    #[test]
+    fn resume_command_returns_none_for_empty_session_id() {
+        assert_eq!(resume_command("claude", ""), None);
+    }
+
+    #[test]
+    fn resume_command_returns_none_for_too_short_session_id() {
+        // 31 characters — just below the 32-char minimum
+        assert_eq!(resume_command("claude", "550e8400e29b41d4a71644665544000"), None);
+    }
+
+    #[test]
+    fn resume_command_returns_none_for_over_long_session_id() {
+        // 200 chars, all valid charset — must still be rejected by the upper bound
+        let id = "a".repeat(200);
+        assert_eq!(resume_command("claude", &id), None);
+    }
+
+    #[test]
+    fn resume_command_returns_none_for_disallowed_binary() {
+        // Only "claude"/"claude2" are allowed; anything else is rejected even with a valid id.
+        assert_eq!(resume_command("evilbin", VALID_UUID), None);
+    }
+
+    #[test]
+    fn resume_command_returns_none_for_session_id_with_semicolon() {
+        let id = "550e8400-e29b-41d4-a716-446655440000;rm -rf /";
+        assert_eq!(resume_command("claude", id), None);
+    }
+
+    #[test]
+    fn resume_command_returns_none_for_session_id_with_dollar_paren() {
+        let id = "550e8400-e29b-41d4-a716-44665544$(whoami)";
+        assert_eq!(resume_command("claude", id), None);
+    }
+
+    #[test]
+    fn resume_command_returns_none_for_session_id_with_space() {
+        let id = "550e8400-e29b-41d4-a716-44665544 0000";
+        assert_eq!(resume_command("claude", id), None);
+    }
+
+    #[test]
+    fn resume_command_returns_none_for_session_id_with_backtick() {
+        let id = "550e8400-e29b-41d4-a716-4466554`id`0";
+        assert_eq!(resume_command("claude", id), None);
+    }
     use horizon_core::{PanelId, PanelKind, PanelResume, PanelState, RuntimeState, WorkspaceState};
 
     #[test]
@@ -540,6 +678,70 @@ mod tests {
         };
 
         assert!(HorizonApp::runtime_state_needs_session_bootstrap(&state));
+    }
+
+    /// Task 4: a workspace whose only panel is a Shell that had a Claude agent
+    /// running at save time must trigger bootstrap, so the Ok-arm inject loop runs.
+    #[test]
+    fn runtime_state_needs_bootstrap_for_shell_with_running_agent() {
+        let state = RuntimeState {
+            workspaces: vec![WorkspaceState {
+                local_id: "workspace".to_string(),
+                name: "alpha".to_string(),
+                cwd: None,
+                position: None,
+                template: None,
+                layout: None,
+                sidebar_collapsed: false,
+                panels: vec![PanelState {
+                    local_id: "shell".to_string(),
+                    name: "Shell".to_string(),
+                    kind: PanelKind::Shell,
+                    resume: PanelResume::Fresh,
+                    running_agent: Some(horizon_core::agent_detect::RunningAgent {
+                        binary: "claude".to_string(),
+                        config_dir: std::path::PathBuf::from("/home/user/.claude"),
+                    }),
+                    ..PanelState::default()
+                }],
+            }],
+            ..RuntimeState::default()
+        };
+
+        assert!(
+            HorizonApp::runtime_state_needs_session_bootstrap(&state),
+            "Shell panel with running_agent=Some must trigger bootstrap"
+        );
+    }
+
+    /// A Shell panel with no detected agent must NOT trigger bootstrap (unchanged).
+    #[test]
+    fn runtime_state_skips_bootstrap_for_shell_without_running_agent() {
+        let state = RuntimeState {
+            workspaces: vec![WorkspaceState {
+                local_id: "workspace".to_string(),
+                name: "alpha".to_string(),
+                cwd: None,
+                position: None,
+                template: None,
+                layout: None,
+                sidebar_collapsed: false,
+                panels: vec![PanelState {
+                    local_id: "shell".to_string(),
+                    name: "Shell".to_string(),
+                    kind: PanelKind::Shell,
+                    resume: PanelResume::Fresh,
+                    running_agent: None,
+                    ..PanelState::default()
+                }],
+            }],
+            ..RuntimeState::default()
+        };
+
+        assert!(
+            !HorizonApp::runtime_state_needs_session_bootstrap(&state),
+            "Shell panel with running_agent=None must not trigger bootstrap"
+        );
     }
 
     #[test]
