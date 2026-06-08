@@ -8,6 +8,7 @@ mod config_migration;
 pub mod dir_search;
 mod editor;
 mod error;
+pub mod file_ops;
 pub mod file_search;
 pub mod file_search_runner;
 pub mod file_tree;
