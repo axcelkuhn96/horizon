@@ -12,7 +12,7 @@ use std::process::Command;
 use egui::epaint::text::{LayoutJob, TextFormat, TextWrapping};
 use egui::{Align, Align2, Color32, CornerRadius, FontId, Layout, Pos2, Rect, RichText, ScrollArea, Sense, Vec2};
 use horizon_core::file_tree::{
-    ChangedTreeNode, FileNode, FileTreeState, changed_file_tree, dir_contains_changes, status_for_path,
+    ChangedTreeNode, FileNode, FileTreeState, RowHit, changed_file_tree, dir_contains_changes, status_for_path,
 };
 use horizon_core::{FileStatus, GitStatus, Panel};
 
@@ -207,6 +207,11 @@ impl<'a> FileExplorerView<'a> {
         // apply afterwards (mirrors GitChangesView cloning `viewer.status`).
         let status = state.git_status.clone();
         let mut action: Option<TreeAction> = None;
+        // Screen-space hit boxes for the visible rows, rebuilt every frame so the
+        // OS-file-drop handler can resolve the folder under the cursor. Only the
+        // normal (on-disk) tree records hits; the filtered changes-only view is
+        // not a drop target.
+        let mut row_hits: Vec<RowHit> = Vec::new();
 
         // Bound the scroll area to the panel body so a tall tree clips and
         // scrolls inside the panel instead of painting over neighbouring
@@ -223,7 +228,7 @@ impl<'a> FileExplorerView<'a> {
                 if show_only {
                     render_changes_only(ui, status.as_deref(), &state.changed_expanded, &mut action);
                 } else {
-                    render_nodes(ui, &state.roots, 0, status.as_deref(), &mut action);
+                    render_nodes(ui, &state.roots, 0, status.as_deref(), &mut action, &mut row_hits);
                 }
                 ui.add_space(4.0);
             });
@@ -238,6 +243,10 @@ impl<'a> FileExplorerView<'a> {
         );
 
         render_footer(ui, state.code_missing);
+
+        // Publish this frame's screen-space row hit-map for the OS-file-drop
+        // handler (empty in changes-only mode, so drops resolve to the root).
+        state.row_hits = row_hits;
 
         if refresh {
             state.reload_root();
@@ -319,9 +328,10 @@ fn render_nodes(
     depth: usize,
     status: Option<&GitStatus>,
     action: &mut Option<TreeAction>,
+    row_hits: &mut Vec<RowHit>,
 ) {
     for node in nodes {
-        render_node(ui, node, depth, status, action);
+        render_node(ui, node, depth, status, action, row_hits);
     }
 }
 
@@ -331,11 +341,12 @@ fn render_node(
     depth: usize,
     status: Option<&GitStatus>,
     action: &mut Option<TreeAction>,
+    row_hits: &mut Vec<RowHit>,
 ) {
     let is_dir = node.is_dir;
     let is_open = node.children.is_some();
 
-    if render_row(ui, node, depth, status) {
+    if render_row(ui, node, depth, status, row_hits) {
         // First interaction in the frame wins; later ones are ignored.
         if action.is_none() {
             *action = Some(if is_dir {
@@ -351,7 +362,7 @@ fn render_node(
     }
 
     if let Some(children) = &node.children {
-        render_nodes(ui, children, depth + 1, status, action);
+        render_nodes(ui, children, depth + 1, status, action, row_hits);
     }
 }
 
@@ -416,7 +427,13 @@ fn row_colors(is_dir: bool, dir_changed: bool, ignored: bool, decoration: Option
 
 /// Renders one tree row. Returns `true` if the row should toggle (folder) or
 /// open (file) — i.e. clicked for a folder, double-clicked for a file.
-fn render_row(ui: &mut egui::Ui, node: &FileNode, depth: usize, status: Option<&GitStatus>) -> bool {
+fn render_row(
+    ui: &mut egui::Ui,
+    node: &FileNode,
+    depth: usize,
+    status: Option<&GitStatus>,
+    row_hits: &mut Vec<RowHit>,
+) -> bool {
     let decoration = status.and_then(|s| status_decoration(status_for_path(s, &node.path)));
 
     // Normal-tree folder propagation: a directory that CONTAINS uncommitted
@@ -436,6 +453,22 @@ fn render_row(ui: &mut egui::Ui, node: &FileNode, depth: usize, status: Option<&
     };
 
     let response = paint_tree_row(ui, &visual);
+
+    // Record the row's screen-space hit box for the OS-file-drop handler. The
+    // tree paints inside a transform-layer Area, so map the local rect to global
+    // coordinates the app-level pointer position is expressed in.
+    let to_global = ui.ctx().layer_transform_to_global(ui.layer_id()).unwrap_or_default();
+    let screen_rect = to_global * response.rect;
+    row_hits.push(RowHit {
+        rect: (
+            screen_rect.min.x,
+            screen_rect.min.y,
+            screen_rect.max.x,
+            screen_rect.max.y,
+        ),
+        path: node.path.clone(),
+        is_dir: node.is_dir,
+    });
 
     if node.is_dir {
         response.clicked()
@@ -950,7 +983,7 @@ mod tests {
         };
 
         let geoms = row_geoms(&["bootstrap", "methods.csv"], |ui| {
-            render_nodes(ui, &[dir_a.clone(), top_file.clone()], 0, None, &mut None);
+            render_nodes(ui, &[dir_a.clone(), top_file.clone()], 0, None, &mut None, &mut Vec::new());
         });
         let depth0 = &geoms[0];
         let depth2 = &geoms[1];

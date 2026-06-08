@@ -78,6 +78,52 @@ pub fn should_refresh_git(
     }
 }
 
+/// One visible explorer row's screen-space hit box, recorded each frame so the
+/// app-level OS-file-drop handler can map a global pointer position to the tree
+/// node under the cursor without depending on `egui` types.
+///
+/// `rect` is `(min_x, min_y, max_x, max_y)` in screen (global) coordinates. The
+/// geometry test lives in [`row_hit_at`], kept pure (plain floats) so it can be
+/// unit-tested without a renderer.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RowHit {
+    /// Screen-space rect as `(min_x, min_y, max_x, max_y)`.
+    pub rect: (f32, f32, f32, f32),
+    /// Absolute path of the node this row paints.
+    pub path: PathBuf,
+    /// `true` for directory rows, `false` for files.
+    pub is_dir: bool,
+}
+
+/// Returns the path + `is_dir` of the topmost recorded row whose screen rect
+/// contains `(x, y)`, or `None` when the point hits no row. Rows are tested in
+/// reverse (last-painted-first) so a later row wins when rects overlap.
+///
+/// Pure geometry over plain floats — no `egui`, so it is directly unit-tested.
+#[must_use]
+pub fn row_hit_at(rows: &[RowHit], x: f32, y: f32) -> Option<(&Path, bool)> {
+    rows.iter().rev().find_map(|row| {
+        let (min_x, min_y, max_x, max_y) = row.rect;
+        (x >= min_x && x <= max_x && y >= min_y && y <= max_y).then_some((row.path.as_path(), row.is_dir))
+    })
+}
+
+/// Resolve the destination directory for an OS-file drop, given the explorer row
+/// under the cursor (`path` + `is_dir`) and the explorer `root`.
+///
+/// - A folder hit copies INTO that folder.
+/// - A file hit copies into the file's parent directory (falling back to `root`
+///   if the file somehow has no parent).
+/// - No hit (empty area / panel background) copies into `root`.
+#[must_use]
+pub fn drop_target_dir(hit: Option<(&Path, bool)>, root: &Path) -> PathBuf {
+    match hit {
+        Some((path, true)) => path.to_path_buf(),
+        Some((path, false)) => path.parent().map_or_else(|| root.to_path_buf(), Path::to_path_buf),
+        None => root.to_path_buf(),
+    }
+}
+
 /// One node in the file tree. `children == None` means "directory not yet
 /// scanned" (lazy). `children == Some(_)` means scanned (possibly empty).
 #[derive(Clone, Debug)]
@@ -399,6 +445,11 @@ pub struct FileTreeState {
     /// `is_focused` value observed on the previous frame, so the show path can
     /// detect a focus-regain edge (`!prev && now`) and refresh immediately.
     prev_focus: bool,
+    /// Screen-space hit boxes for the visible tree rows, rebuilt every frame by
+    /// the widget's paint pass (cleared at the start of `show`, pushed per row).
+    /// The OS-file-drop handler reads these to map a global pointer position to
+    /// the drop target directory; see [`row_hit_at`] / [`drop_target_dir`].
+    pub row_hits: Vec<RowHit>,
 }
 
 /// State for the File Explorer's content-search panel (the VSCode-style "search
@@ -458,7 +509,17 @@ impl FileTreeState {
             search: SearchPanelState::default(),
             last_git_refresh: None,
             prev_focus: false,
+            row_hits: Vec::new(),
         }
+    }
+
+    /// Resolve the OS-file-drop destination directory for a global pointer
+    /// position, using the row hit-map recorded by the widget this frame. Folder
+    /// row -> that folder; file row -> its parent; no row (empty area / panel
+    /// background) -> the explorer `root`. See [`row_hit_at`] / [`drop_target_dir`].
+    #[must_use]
+    pub fn drop_target_for(&self, x: f32, y: f32) -> PathBuf {
+        drop_target_dir(row_hit_at(&self.row_hits, x, y), &self.root)
     }
 
     /// Open (or re-focus) the content-search panel. Requests input focus on the
@@ -525,6 +586,27 @@ impl FileTreeState {
         }
     }
 
+    /// Re-scan the on-disk children of `dir` so newly-created entries appear.
+    ///
+    /// Used after an OS-file drop copies files into `dir`. When `dir` is the
+    /// explorer root the whole root level is reloaded; otherwise the matching
+    /// directory node is found and its (already-expanded) children are re-scanned
+    /// in place so the copied files show immediately. A collapsed or absent
+    /// target is left untouched — re-expanding it will lazily pick up the new
+    /// files. Never panics.
+    pub fn refresh_dir(&mut self, dir: &Path) {
+        if dir == self.root {
+            self.reload_root();
+            return;
+        }
+        if let Some(node) = find_node_mut(&mut self.roots, dir)
+            && node.is_dir
+            && node.children.is_some()
+        {
+            node.children = Some(scan_dir(dir).unwrap_or_default());
+        }
+    }
+
     pub fn set_git_status(&mut self, status: Arc<GitStatus>) {
         self.git_status = Some(status);
     }
@@ -577,6 +659,21 @@ impl FileTreeState {
     pub fn collapse_changed(&mut self, path: &Path) {
         self.changed_expanded.remove(path);
     }
+}
+
+/// Depth-first search for the (unique) loaded node whose `path` matches.
+fn find_node_mut<'n>(nodes: &'n mut [FileNode], path: &Path) -> Option<&'n mut FileNode> {
+    for node in nodes {
+        if node.path == path {
+            return Some(node);
+        }
+        if let Some(children) = &mut node.children
+            && let Some(found) = find_node_mut(children, path)
+        {
+            return Some(found);
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -1148,6 +1245,118 @@ mod tests {
             status.changes.iter().any(|c| c.path == "new.txt"),
             "untracked file must appear in refreshed status"
         );
+    }
+
+    #[test]
+    fn drop_target_dir_folder_hit_targets_the_folder() {
+        let root = std::path::PathBuf::from("/repo");
+        let folder = std::path::PathBuf::from("/repo/src");
+        assert_eq!(drop_target_dir(Some((folder.as_path(), true)), &root), folder);
+    }
+
+    #[test]
+    fn drop_target_dir_file_hit_targets_parent() {
+        let root = std::path::PathBuf::from("/repo");
+        let file = std::path::PathBuf::from("/repo/src/main.rs");
+        assert_eq!(
+            drop_target_dir(Some((file.as_path(), false)), &root),
+            std::path::PathBuf::from("/repo/src")
+        );
+    }
+
+    #[test]
+    fn drop_target_dir_none_targets_root() {
+        let root = std::path::PathBuf::from("/repo");
+        assert_eq!(drop_target_dir(None, &root), root);
+    }
+
+    #[test]
+    fn drop_target_dir_file_at_root_targets_root() {
+        let root = std::path::PathBuf::from("/repo");
+        let file = std::path::PathBuf::from("/repo/top.txt");
+        assert_eq!(drop_target_dir(Some((file.as_path(), false)), &root), root);
+    }
+
+    #[test]
+    fn row_hit_at_returns_topmost_row_containing_point() {
+        let rows = vec![
+            RowHit {
+                rect: (0.0, 0.0, 100.0, 20.0),
+                path: std::path::PathBuf::from("/repo/a"),
+                is_dir: true,
+            },
+            RowHit {
+                rect: (0.0, 20.0, 100.0, 40.0),
+                path: std::path::PathBuf::from("/repo/b.txt"),
+                is_dir: false,
+            },
+        ];
+        // Point in the first row.
+        assert_eq!(
+            row_hit_at(&rows, 10.0, 10.0),
+            Some((std::path::Path::new("/repo/a"), true))
+        );
+        // Point in the second row.
+        assert_eq!(
+            row_hit_at(&rows, 10.0, 30.0),
+            Some((std::path::Path::new("/repo/b.txt"), false))
+        );
+    }
+
+    #[test]
+    fn row_hit_at_returns_none_outside_all_rows() {
+        let rows = vec![RowHit {
+            rect: (0.0, 0.0, 100.0, 20.0),
+            path: std::path::PathBuf::from("/repo/a"),
+            is_dir: true,
+        }];
+        assert_eq!(row_hit_at(&rows, 200.0, 200.0), None);
+        assert_eq!(row_hit_at(&[], 10.0, 10.0), None);
+    }
+
+    #[test]
+    fn row_hit_at_prefers_later_row_when_rects_overlap() {
+        let rows = vec![
+            RowHit {
+                rect: (0.0, 0.0, 100.0, 40.0),
+                path: std::path::PathBuf::from("/repo/under"),
+                is_dir: true,
+            },
+            RowHit {
+                rect: (0.0, 0.0, 100.0, 40.0),
+                path: std::path::PathBuf::from("/repo/over"),
+                is_dir: true,
+            },
+        ];
+        assert_eq!(
+            row_hit_at(&rows, 10.0, 10.0),
+            Some((std::path::Path::new("/repo/over"), true))
+        );
+    }
+
+    #[test]
+    fn refresh_dir_reloads_root_and_expanded_subdir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::create_dir(dir.path().join("sub")).expect("mkdir sub");
+
+        let mut state = FileTreeState::new(dir.path().to_path_buf());
+        state.reload_root();
+        assert!(state.roots.iter().any(|n| n.name == "sub"));
+
+        // A new root-level file appears after refresh_dir(root).
+        fs::write(dir.path().join("new.txt"), b"x").expect("write new");
+        state.refresh_dir(dir.path());
+        assert!(state.roots.iter().any(|n| n.name == "new.txt"));
+
+        // Expand the subdir, then a file created inside it shows after refresh.
+        let sub = state.roots.iter_mut().find(|n| n.name == "sub").expect("sub node");
+        FileTreeState::ensure_children(sub);
+        let sub_path = dir.path().join("sub");
+        fs::write(sub_path.join("inner.txt"), b"y").expect("write inner");
+        state.refresh_dir(&sub_path);
+        let sub = state.roots.iter().find(|n| n.name == "sub").expect("sub node");
+        let children = sub.children.as_ref().expect("loaded children");
+        assert!(children.iter().any(|n| n.name == "inner.txt"));
     }
 
     #[test]

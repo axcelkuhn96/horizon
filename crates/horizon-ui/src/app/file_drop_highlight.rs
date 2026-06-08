@@ -25,6 +25,9 @@ impl HorizonApp {
                     let accent = workspace_accent(&self.board, workspace_id);
                     (*rect, accent, CornerRadius::same(20))
                 }),
+            // The target explorer row is already a screen-space rect; highlight it
+            // tightly so the user sees exactly which folder receives the drop.
+            FileDropHighlight::ExplorerRow(rect) => Some((rect, theme::ACCENT(), CornerRadius::same(4))),
         }) else {
             return;
         };
