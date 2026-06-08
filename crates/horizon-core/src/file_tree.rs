@@ -95,17 +95,29 @@ pub struct RowHit {
     pub is_dir: bool,
 }
 
+/// Returns the topmost recorded [`RowHit`] whose screen rect contains `(x, y)`,
+/// or `None` when the point hits no row. Rows are tested in reverse
+/// (last-painted-first) so a later row wins when rects overlap.
+///
+/// Pure geometry over plain floats — no `egui`. Callers that need the full row
+/// (path + `is_dir` + rect for a highlight) use this to avoid a second scan;
+/// [`row_hit_at`] is the thin predicate wrapper returning just `(path, is_dir)`.
+#[must_use]
+pub fn row_hit_entry_at(rows: &[RowHit], x: f32, y: f32) -> Option<&RowHit> {
+    rows.iter().rev().find(|row| {
+        let (min_x, min_y, max_x, max_y) = row.rect;
+        x >= min_x && x <= max_x && y >= min_y && y <= max_y
+    })
+}
+
 /// Returns the path + `is_dir` of the topmost recorded row whose screen rect
-/// contains `(x, y)`, or `None` when the point hits no row. Rows are tested in
-/// reverse (last-painted-first) so a later row wins when rects overlap.
+/// contains `(x, y)`, or `None` when the point hits no row. Thin wrapper over
+/// [`row_hit_entry_at`] for callers that only need the destination identity.
 ///
 /// Pure geometry over plain floats — no `egui`, so it is directly unit-tested.
 #[must_use]
 pub fn row_hit_at(rows: &[RowHit], x: f32, y: f32) -> Option<(&Path, bool)> {
-    rows.iter().rev().find_map(|row| {
-        let (min_x, min_y, max_x, max_y) = row.rect;
-        (x >= min_x && x <= max_x && y >= min_y && y <= max_y).then_some((row.path.as_path(), row.is_dir))
-    })
+    row_hit_entry_at(rows, x, y).map(|row| (row.path.as_path(), row.is_dir))
 }
 
 /// Resolve the destination directory for an OS-file drop, given the explorer row
@@ -1312,6 +1324,22 @@ mod tests {
         }];
         assert_eq!(row_hit_at(&rows, 200.0, 200.0), None);
         assert_eq!(row_hit_at(&[], 10.0, 10.0), None);
+    }
+
+    #[test]
+    fn row_hit_entry_at_returns_full_row_with_rect() {
+        // The entry variant exposes the rect (used for the hover highlight) so
+        // callers avoid a second scan to recover it.
+        let rows = vec![RowHit {
+            rect: (5.0, 6.0, 95.0, 26.0),
+            path: std::path::PathBuf::from("/repo/a"),
+            is_dir: true,
+        }];
+        let hit = row_hit_entry_at(&rows, 10.0, 10.0).expect("row under point");
+        assert_eq!(hit.rect, (5.0, 6.0, 95.0, 26.0));
+        assert_eq!(hit.path, std::path::PathBuf::from("/repo/a"));
+        assert!(hit.is_dir);
+        assert!(row_hit_entry_at(&rows, 500.0, 500.0).is_none());
     }
 
     #[test]

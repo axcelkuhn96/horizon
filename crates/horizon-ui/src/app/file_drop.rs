@@ -120,12 +120,16 @@ impl HorizonApp {
         };
 
         // While files hover over a File Explorer panel, highlight the folder row
-        // that would receive the drop (overrides the panel/workspace highlight).
+        // that would receive the drop. Over the empty area / panel background the
+        // drop still targets the explorer ROOT (a valid drop), so fall back to a
+        // panel-level highlight on the explorer itself rather than clearing the
+        // feedback.
         if hovered
             && let Some(pos) = hover_pos
-            && let Some((_, row_rect)) = self.explorer_drop_target(pos, fullscreen_panel, scope)
+            && let Some((panel_id, row_rect)) = self.explorer_drop_target(pos, fullscreen_panel, scope)
         {
-            self.file_drop_highlight = row_rect.map(FileDropHighlight::ExplorerRow);
+            self.file_drop_highlight =
+                Some(row_rect.map_or(FileDropHighlight::Panel(panel_id), FileDropHighlight::ExplorerRow));
         }
 
         if dropped.is_empty() {
@@ -312,13 +316,12 @@ impl HorizonApp {
         }
         let state = panel.content.file_explorer()?;
 
-        // Topmost row under the cursor (if any) provides the highlight rect; the
-        // copy itself re-derives the destination from the same hit-map.
-        let row_rect = horizon_core::file_tree::row_hit_at(&state.row_hits, pos.x, pos.y).and_then(|(path, _)| {
-            state.row_hits.iter().find(|hit| hit.path == path).map(|hit| {
-                let (min_x, min_y, max_x, max_y) = hit.rect;
-                Rect::from_min_max(Pos2::new(min_x, min_y), Pos2::new(max_x, max_y))
-            })
+        // Topmost row under the cursor (if any) provides the highlight rect in a
+        // single scan; the copy itself re-derives the destination from the same
+        // hit-map.
+        let row_rect = horizon_core::file_tree::row_hit_entry_at(&state.row_hits, pos.x, pos.y).map(|hit| {
+            let (min_x, min_y, max_x, max_y) = hit.rect;
+            Rect::from_min_max(Pos2::new(min_x, min_y), Pos2::new(max_x, max_y))
         });
 
         Some((panel_id, row_rect))
