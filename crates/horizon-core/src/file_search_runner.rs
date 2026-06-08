@@ -18,6 +18,14 @@
 //! dropped), so a slow search never blocks the runner or the UI; its result is
 //! simply ignored once superseded.
 //!
+//! ## Debounce contract (caller responsibility)
+//! Supersession only discards stale *results* — the superseded worker thread
+//! still runs its full directory walk to completion. The runner does NOT
+//! debounce. Therefore the CALLER (the UI) MUST debounce its calls to
+//! [`SearchRunner::start`] (e.g. only fire after ~150ms of input quiescence),
+//! otherwise rapid typing spawns one full directory walk per keystroke, which
+//! is wasteful on large trees.
+//!
 //! ## Empty-query behaviour
 //! A query that is empty or whitespace-only does no useful work, so
 //! [`SearchRunner::start`] does NOT spawn a thread for it. Instead it resets the
@@ -89,6 +97,12 @@ impl SearchRunner {
     ///
     /// Supersedes any in-flight search: its generation is bumped, so when the
     /// older search eventually finishes its result is dropped by [`poll`].
+    ///
+    /// Note that supersession only discards the stale *result*: the superseded
+    /// worker thread still runs its full directory walk to completion. This
+    /// method does NOT debounce, so the CALLER (the UI) MUST debounce its calls
+    /// (e.g. only fire after ~150ms of input quiescence) to avoid spawning one
+    /// full directory walk per keystroke on large trees.
     ///
     /// An empty or whitespace-only `query` does no work — the runner resets to
     /// [`SearchState::Idle`] and no thread is spawned.
