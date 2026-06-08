@@ -701,6 +701,7 @@ mod tests {
                     running_agent: Some(horizon_core::agent_detect::RunningAgent {
                         binary: "claude".to_string(),
                         config_dir: std::path::PathBuf::from("/home/user/.claude"),
+                        session_id: None,
                     }),
                     ..PanelState::default()
                 }],
