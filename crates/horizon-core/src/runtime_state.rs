@@ -168,10 +168,16 @@ impl RuntimeState {
 
         let mut pending_by_group: HashMap<(PanelKind, String), Vec<&mut PanelState>> = HashMap::new();
         for panel in self.workspaces.iter_mut().flat_map(|workspace| &mut workspace.panels) {
-            if !panel.kind.supports_session_binding()
-                || panel.session_binding.is_some()
-                || !matches!(panel.resume, PanelResume::Last)
-            {
+            if !panel.kind.supports_session_binding() || panel.session_binding.is_some() {
+                continue;
+            }
+            // Bootstrap-eligible: Last (existing behaviour) OR Fresh with evidence of
+            // prior activity.  A truly-fresh panel (had_session_activity=false) is
+            // intentionally excluded to avoid spuriously resuming a catalog session
+            // that merely shares (kind, cwd) with a panel the user opened but never ran.
+            let eligible = matches!(panel.resume, PanelResume::Last)
+                || (matches!(panel.resume, PanelResume::Fresh) && panel.had_session_activity);
+            if !eligible {
                 continue;
             }
             let cwd = normalize_cwd(panel.cwd.as_deref()).unwrap_or_default();
@@ -244,6 +250,8 @@ impl RuntimeState {
                                 .filter(|editor| editor.file_path.is_none() && !editor.text.is_empty())
                                 .map(|editor| editor.text.clone()),
                             collapsed: panel.collapsed,
+                            had_session_activity: panel.kind.supports_session_binding()
+                                && panel.last_output_at_millis.is_some(),
                         }
                     })
                     .collect();
@@ -414,6 +422,13 @@ pub struct PanelState {
     /// Whether the panel is collapsed to titlebar-only. Persists across relaunch.
     #[serde(default)]
     pub collapsed: bool,
+    /// The panel's agent process produced at least one byte of output before the
+    /// app was closed.  Used at cold-start to distinguish a panel that was
+    /// genuinely active (and whose session is worth trying to recover) from one
+    /// that was opened but never used.  Only meaningful for agent panels
+    /// (`kind.supports_session_binding()`); always `false` for others.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub had_session_activity: bool,
 }
 
 impl PanelState {
@@ -460,6 +475,7 @@ impl PanelState {
             }),
             editor_content: None,
             collapsed: panel.collapsed,
+            had_session_activity: false,
         }
     }
 
@@ -510,6 +526,7 @@ impl Default for PanelState {
             template: None,
             editor_content: None,
             collapsed: false,
+            had_session_activity: false,
         }
     }
 }

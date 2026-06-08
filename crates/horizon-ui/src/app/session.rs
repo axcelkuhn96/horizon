@@ -3,7 +3,7 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
 use egui::Context;
-use horizon_core::{AgentSessionBinding, AgentSessionCatalog, Board, PanelId, PanelKind, PanelOptions, PanelResume};
+use horizon_core::{AgentSessionBinding, AgentSessionCatalog, Board, PanelId, PanelKind, PanelOptions, PanelResume, PanelState};
 
 use crate::{loading_spinner, theme};
 
@@ -200,11 +200,21 @@ impl HorizonApp {
             .workspaces
             .iter()
             .flat_map(|workspace| &workspace.panels)
-            .any(|panel| {
-                panel.kind.supports_session_binding()
-                    && panel.session_binding.is_none()
-                    && matches!(panel.resume, PanelResume::Last)
-            })
+            .any(Self::panel_state_needs_session_bootstrap)
+    }
+
+    fn panel_state_needs_session_bootstrap(panel: &PanelState) -> bool {
+        if !panel.kind.supports_session_binding() || panel.session_binding.is_some() {
+            return false;
+        }
+        // A panel with PanelResume::Last always needs bootstrap (existing behaviour).
+        // A panel with PanelResume::Fresh needs it only when it had real prior output,
+        // i.e. a session was actually running — had_session_activity is the persisted
+        // evidence.  A truly-fresh panel (had_session_activity=false) is intentionally
+        // excluded to avoid spuriously resuming an unrelated catalog session that merely
+        // shares (kind, cwd).
+        matches!(panel.resume, PanelResume::Last)
+            || (matches!(panel.resume, PanelResume::Fresh) && panel.had_session_activity)
     }
 
     fn panel_options_need_session_bootstrap(opts: &PanelOptions) -> bool {
@@ -571,8 +581,41 @@ mod tests {
         assert!(HorizonApp::runtime_state_needs_session_bootstrap(&state));
     }
 
+    /// A `Fresh` unbound agent panel that had real prior output must trigger
+    /// bootstrap so the previous session can be recovered on restart.
     #[test]
-    fn runtime_state_skips_bootstrap_for_fresh_or_bound_panels() {
+    fn runtime_state_needs_bootstrap_for_unbound_fresh_agent_panel_with_activity() {
+        let state = RuntimeState {
+            workspaces: vec![WorkspaceState {
+                local_id: "workspace".to_string(),
+                name: "alpha".to_string(),
+                cwd: None,
+                position: None,
+                template: None,
+                layout: None,
+                sidebar_collapsed: false,
+                panels: vec![PanelState {
+                    local_id: "claude-active".to_string(),
+                    name: "Claude".to_string(),
+                    kind: PanelKind::Claude,
+                    resume: PanelResume::Fresh,
+                    had_session_activity: true,
+                    ..PanelState::default()
+                }],
+            }],
+            ..RuntimeState::default()
+        };
+
+        assert!(
+            HorizonApp::runtime_state_needs_session_bootstrap(&state),
+            "unbound Fresh agent panel with had_session_activity=true must trigger bootstrap"
+        );
+    }
+
+    /// Bound panels (any resume) must always skip bootstrap (binding already known).
+    /// Truly-fresh panels with no prior activity must also skip — nothing to recover.
+    #[test]
+    fn runtime_state_skips_bootstrap_for_bound_panels_and_truly_fresh_panels() {
         let state = RuntimeState {
             workspaces: vec![WorkspaceState {
                 local_id: "workspace".to_string(),
@@ -583,13 +626,15 @@ mod tests {
                 layout: None,
                 sidebar_collapsed: false,
                 panels: vec![
+                    // Non-agent panel — never bootstrap-eligible.
                     PanelState {
-                        local_id: "fresh".to_string(),
+                        local_id: "shell".to_string(),
                         name: "Shell".to_string(),
                         kind: PanelKind::Shell,
                         resume: PanelResume::Fresh,
                         ..PanelState::default()
                     },
+                    // Bound agent — already has a session_id, no bootstrap needed.
                     PanelState {
                         local_id: "bound".to_string(),
                         name: "Codex".to_string(),
@@ -604,12 +649,24 @@ mod tests {
                         )),
                         ..PanelState::default()
                     },
+                    // Fresh agent with NO prior activity — skip to avoid spurious resume.
+                    PanelState {
+                        local_id: "truly-fresh".to_string(),
+                        name: "Claude".to_string(),
+                        kind: PanelKind::Claude,
+                        resume: PanelResume::Fresh,
+                        had_session_activity: false,
+                        ..PanelState::default()
+                    },
                 ],
             }],
             ..RuntimeState::default()
         };
 
-        assert!(!HorizonApp::runtime_state_needs_session_bootstrap(&state));
+        assert!(
+            !HorizonApp::runtime_state_needs_session_bootstrap(&state),
+            "bound and truly-fresh panels must not trigger bootstrap"
+        );
     }
 
     #[test]

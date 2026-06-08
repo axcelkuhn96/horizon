@@ -169,7 +169,7 @@ pub struct Panel {
     /// Set by `process_output` each frame; read by attention detection to skip
     /// the expensive `last_lines_text` scan for panels without new content.
     pub(crate) had_recent_output: bool,
-    last_output_at_millis: Option<i64>,
+    pub(crate) last_output_at_millis: Option<i64>,
     /// Original launch command (for persistence).
     pub launch_command: Option<String>,
     /// Original launch args (for persistence).

@@ -843,4 +843,93 @@ INSERT INTO session (id, title, directory, parent_id, time_updated, time_archive
         assert!(catalog.recent_for(PanelKind::Pi, Some("/missing")).is_empty());
         assert!(catalog.recent_for(PanelKind::Claude, Some("/repo")).is_empty());
     }
+
+    /// A `Fresh` panel with `had_session_activity=true` must receive a catalog
+    /// binding at startup bootstrap, so the previously-running agent session is
+    /// resumed on restart.
+    #[test]
+    fn bootstrap_assigns_binding_to_fresh_panel_with_prior_activity() {
+        let mut state = RuntimeState {
+            workspaces: vec![WorkspaceState {
+                local_id: "workspace".to_string(),
+                name: "alpha".to_string(),
+                cwd: None,
+                position: None,
+                template: None,
+                layout: None,
+                sidebar_collapsed: false,
+                panels: vec![PanelState {
+                    local_id: "claude-active".to_string(),
+                    name: "Claude".to_string(),
+                    kind: PanelKind::Claude,
+                    cwd: Some("/repo".to_string()),
+                    resume: PanelResume::Fresh,
+                    had_session_activity: true,
+                    ..PanelState::default()
+                }],
+            }],
+            ..RuntimeState::default()
+        };
+        let catalog = AgentSessionCatalog {
+            sessions: vec![AgentSessionRecord {
+                kind: PanelKind::Claude,
+                session_id: "session-active".to_string(),
+                cwd: Some("/repo".to_string()),
+                label: None,
+                updated_at: 100,
+            }],
+        };
+
+        state.bootstrap_missing_agent_bindings(&catalog);
+
+        let binding = state.workspaces[0].panels[0].session_binding.as_ref();
+        assert!(
+            binding.is_some(),
+            "Fresh panel with had_session_activity=true must receive a session binding"
+        );
+        assert_eq!(binding.expect("binding").session_id, "session-active");
+    }
+
+    /// A `Fresh` panel with `had_session_activity=false` must NOT be assigned any
+    /// binding — it was opened but never used, so there is nothing to recover.
+    #[test]
+    fn bootstrap_skips_binding_for_truly_fresh_panel() {
+        let mut state = RuntimeState {
+            workspaces: vec![WorkspaceState {
+                local_id: "workspace".to_string(),
+                name: "alpha".to_string(),
+                cwd: None,
+                position: None,
+                template: None,
+                layout: None,
+                sidebar_collapsed: false,
+                panels: vec![PanelState {
+                    local_id: "claude-unused".to_string(),
+                    name: "Claude".to_string(),
+                    kind: PanelKind::Claude,
+                    cwd: Some("/repo".to_string()),
+                    resume: PanelResume::Fresh,
+                    had_session_activity: false,
+                    ..PanelState::default()
+                }],
+            }],
+            ..RuntimeState::default()
+        };
+        let catalog = AgentSessionCatalog {
+            sessions: vec![AgentSessionRecord {
+                kind: PanelKind::Claude,
+                session_id: "unrelated-session".to_string(),
+                cwd: Some("/repo".to_string()),
+                label: None,
+                updated_at: 100,
+            }],
+        };
+
+        state.bootstrap_missing_agent_bindings(&catalog);
+
+        assert!(
+            state.workspaces[0].panels[0].session_binding.is_none(),
+            "Truly-fresh panel (had_session_activity=false) must not receive a binding"
+        );
+    }
 }
