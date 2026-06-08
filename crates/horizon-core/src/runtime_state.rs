@@ -6,7 +6,7 @@ use std::path::Path;
 use serde::{Deserialize, Deserializer, Serialize};
 use uuid::Uuid;
 
-use crate::agent_detect::{RunningAgent, detect_running_agent, session_id_from_resume_line};
+use crate::agent_detect::{RunningAgent, detect_running_agent};
 use crate::board::{Board, WorkspaceLayout};
 use crate::config::{Config, TerminalConfig, WindowConfig, WorkspaceConfig};
 use crate::error::{Error, Result};
@@ -254,23 +254,7 @@ impl RuntimeState {
                             running_agent: if panel.kind == PanelKind::Shell
                                 && panel.terminal_title.to_lowercase().contains("claude")
                             {
-                                let mut agent = panel.child_pid().and_then(detect_running_agent);
-                                // Scrollback fallback: when argv gave no session_id, scan
-                                // the panel's terminal output for the `--resume <uuid>`
-                                // line that claude prints on graceful exit (or that the
-                                // user typed). Only performed when an agent was detected
-                                // but its session_id is still None. Contents are never
-                                // logged (security).
-                                if let Some(ref mut running) = agent
-                                    && running.session_id.is_none()
-                                    && let Some(term) = terminal
-                                {
-                                    let (lines, _) = term.full_text_lines(term.scrollback_limit());
-                                    let scrollback_text = lines.join("\n");
-                                    running.session_id =
-                                        session_id_from_resume_line(&scrollback_text);
-                                }
-                                agent
+                                panel.child_pid().and_then(detect_running_agent)
                             } else {
                                 None
                             },
