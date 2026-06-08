@@ -36,6 +36,21 @@ impl HorizonApp {
         };
     }
 
+    /// Open (or re-focus) the content-search panel on the focused File Explorer.
+    /// No-op if no panel is focused or the focused panel is not an explorer
+    /// (the Ctrl+Shift+F dispatch already gates this, but stay defensive).
+    fn open_explorer_search(&mut self) {
+        let Some(id) = self.board.focused else {
+            return;
+        };
+        let Some(panel) = self.board.panel_mut(id) else {
+            return;
+        };
+        if let Some(state) = panel.content.file_explorer_mut() {
+            state.open_search();
+        }
+    }
+
     pub(in crate::app) fn render_command_palette(&mut self, ctx: &Context) {
         let Some(palette) = self.command_palette.as_mut() else {
             return;
@@ -149,12 +164,7 @@ impl HorizonApp {
                     self.search_overlay = Some(SearchOverlay::new());
                 }
             }
-            CommandId::SearchFileContents => {
-                // TODO(search-panel): open the File Explorer content-search UI.
-                // Wired in a later task; kept as a no-op (never panics) so the
-                // contextual Ctrl+Shift+F dispatch and match stay exhaustive.
-                tracing::info!("search file contents requested (explorer focused)");
-            }
+            CommandId::SearchFileContents => self.open_explorer_search(),
             CommandId::ToggleScrollPan => {
                 self.scroll_pans_over_panels = !self.scroll_pans_over_panels;
                 tracing::info!(

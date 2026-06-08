@@ -6,6 +6,7 @@ mod command_palette;
 mod command_registry;
 mod dir_picker;
 mod editor_widget;
+mod file_search_widget;
 mod file_tree_widget;
 mod git_changes_widget;
 mod image_paste;

@@ -3,12 +3,47 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use ignore::WalkBuilder;
 
 use crate::error::Result;
+use crate::file_search::FileSearchOptions;
+use crate::file_search_runner::{SearchRunner, SearchState};
 use crate::git_status::{FileStatus, GitStatus};
+
+/// Quiescence window the content-search must observe before dispatching a new
+/// query to the background runner. The runner does NOT debounce itself (see its
+/// module docs), so the caller must: we only `start` after this much input
+/// silence to avoid spawning one full directory walk per keystroke.
+pub const SEARCH_DEBOUNCE: Duration = Duration::from_millis(150);
+
+/// Decides whether the content-search should dispatch `query` to the background
+/// runner right now. Pure and deterministic (no clock): the caller passes the
+/// elapsed time since the last edit so tests stay timing-free.
+///
+/// Returns `true` only when ALL hold:
+/// - `query` is non-empty after trimming (empty/whitespace never searches);
+/// - `query` differs from `last_dispatched` (no redundant re-dispatch of the
+///   same query);
+/// - the input has been quiescent for at least `debounce` (that is,
+///   `elapsed_since_edit >= debounce`), satisfying the runner's contract.
+#[must_use]
+pub fn should_dispatch(
+    query: &str,
+    last_dispatched: &str,
+    elapsed_since_edit: Duration,
+    debounce: Duration,
+) -> bool {
+    if query.trim().is_empty() {
+        return false;
+    }
+    if query == last_dispatched {
+        return false;
+    }
+    elapsed_since_edit >= debounce
+}
 
 /// One node in the file tree. `children == None` means "directory not yet
 /// scanned" (lazy). `children == Some(_)` means scanned (possibly empty).
@@ -304,7 +339,10 @@ fn compact_dir_chains(nodes: &mut [ChangedTreeNode]) {
 }
 
 /// Per-panel file-explorer state. Lives inside `PanelContent::FileExplorer`.
-#[derive(Clone, Debug)]
+///
+/// Not `Clone`/`Debug`: it owns a [`SearchRunner`], which holds a thread
+/// [`std::sync::mpsc::Receiver`] (neither `Clone` nor `Debug`). It is never
+/// cloned — each panel constructs its own with [`FileTreeState::new`].
 pub struct FileTreeState {
     pub root: PathBuf,
     pub roots: Vec<FileNode>,
@@ -319,6 +357,51 @@ pub struct FileTreeState {
     /// keyed by absolute path. Empty = fully collapsed (the default).
     /// Cleared whenever the filter toggle changes value.
     pub changed_expanded: HashSet<PathBuf>,
+    /// Content-search ("search in files") panel state, scoped to `root`.
+    pub search: SearchPanelState,
+}
+
+/// State for the File Explorer's content-search panel (the VSCode-style "search
+/// in files" UI bound to Ctrl+Shift+F). Owns the background [`SearchRunner`] so
+/// it survives across frames, plus the debounce bookkeeping the runner requires.
+#[derive(Default)]
+pub struct SearchPanelState {
+    /// Whether the search box is showing above the tree.
+    pub active: bool,
+    /// Current text in the query input.
+    pub query: String,
+    /// Set when the panel was just opened so the view can grab keyboard focus
+    /// for the input on the next frame, then clear it.
+    pub focus_requested: bool,
+    /// The query string last handed to `runner.start`. Guards against
+    /// re-dispatching an unchanged query.
+    last_dispatched: String,
+    /// Wall-clock instant of the most recent query edit, used to measure input
+    /// quiescence for the debounce. `None` until the first edit.
+    last_edit: Option<Instant>,
+    /// Background runner; detached worker threads, non-blocking poll.
+    runner: SearchRunner,
+}
+
+impl SearchPanelState {
+    /// Record that the query was just edited (resets the debounce clock). Called
+    /// by the view whenever the text input reports a change.
+    pub fn mark_edited(&mut self) {
+        self.last_edit = Some(Instant::now());
+    }
+
+    /// The runner's latest observed state, for the view to render.
+    #[must_use]
+    pub fn state(&self) -> &SearchState {
+        self.runner.state()
+    }
+
+    /// The query string that was last dispatched to the runner (for tests and
+    /// for the view to confirm which query a result belongs to).
+    #[must_use]
+    pub fn last_dispatched(&self) -> &str {
+        &self.last_dispatched
+    }
 }
 
 impl FileTreeState {
@@ -332,7 +415,59 @@ impl FileTreeState {
             code_missing: false,
             show_only_changes: false,
             changed_expanded: HashSet::new(),
+            search: SearchPanelState::default(),
         }
+    }
+
+    /// Open (or re-focus) the content-search panel. Requests input focus on the
+    /// next frame; never clears an in-progress query, so re-pressing the
+    /// shortcut while open just re-focuses the box.
+    pub fn open_search(&mut self) {
+        self.search.active = true;
+        self.search.focus_requested = true;
+    }
+
+    /// Close the content-search panel and reset the runner to idle. The query
+    /// text is preserved so re-opening shows the previous search; results are
+    /// dropped (the runner is cleared).
+    pub fn close_search(&mut self) {
+        self.search.active = false;
+        self.search.focus_requested = false;
+        self.search.runner.clear();
+        self.search.last_dispatched.clear();
+        self.search.last_edit = None;
+    }
+
+    /// Per-frame search pump. When the panel is active, applies the debounce
+    /// decision (dispatching a fresh search once the query has been quiescent
+    /// for [`SEARCH_DEBOUNCE`]) and drains any finished results.
+    ///
+    /// Quiescence is measured from the `last_edit` instant the view records via
+    /// [`SearchPanelState::mark_edited`]; the pure decision lives in
+    /// [`should_dispatch`] (clock-free, separately tested). Returns `true` while
+    /// a search is in flight, signalling the view to request a repaint.
+    pub fn tick_search(&mut self) -> bool {
+        if !self.search.active {
+            return false;
+        }
+        // Time since the last edit; if there has been no edit yet, treat it as
+        // long-quiescent so a pre-filled query (re-opened panel) can dispatch.
+        let elapsed = self
+            .search
+            .last_edit
+            .map_or(SEARCH_DEBOUNCE, |t| t.elapsed());
+        if should_dispatch(
+            &self.search.query,
+            &self.search.last_dispatched,
+            elapsed,
+            SEARCH_DEBOUNCE,
+        ) {
+            self.search.last_dispatched = self.search.query.clone();
+            self.search
+                .runner
+                .start(self.root.clone(), self.search.query.clone(), FileSearchOptions::default());
+        }
+        matches!(self.search.runner.poll(), SearchState::Searching)
     }
 
     /// (Re)scan the root level. Safe to call repeatedly (refresh button).
@@ -777,6 +912,115 @@ mod tests {
 
         state.collapse_changed(&dir);
         assert!(!state.is_changed_expanded(&dir));
+    }
+
+    #[test]
+    fn should_dispatch_true_when_changed_and_quiescent() {
+        // A new, non-empty query that differs from the last dispatched one and
+        // has been quiescent long enough must dispatch.
+        assert!(should_dispatch(
+            "needle",
+            "",
+            SEARCH_DEBOUNCE,
+            SEARCH_DEBOUNCE
+        ));
+        assert!(should_dispatch(
+            "needle",
+            "old",
+            SEARCH_DEBOUNCE + Duration::from_millis(50),
+            SEARCH_DEBOUNCE,
+        ));
+    }
+
+    #[test]
+    fn should_dispatch_false_when_unchanged() {
+        // Same query already dispatched: no redundant re-dispatch even once quiescent.
+        assert!(!should_dispatch(
+            "needle",
+            "needle",
+            SEARCH_DEBOUNCE,
+            SEARCH_DEBOUNCE
+        ));
+    }
+
+    #[test]
+    fn should_dispatch_false_when_empty_or_whitespace() {
+        assert!(!should_dispatch("", "", SEARCH_DEBOUNCE, SEARCH_DEBOUNCE));
+        assert!(!should_dispatch(
+            "   ",
+            "",
+            SEARCH_DEBOUNCE,
+            SEARCH_DEBOUNCE
+        ));
+    }
+
+    #[test]
+    fn should_dispatch_false_when_changed_but_not_yet_quiescent() {
+        // Query changed but the input is still settling (elapsed < debounce).
+        assert!(!should_dispatch(
+            "needle",
+            "old",
+            SEARCH_DEBOUNCE - Duration::from_millis(1),
+            SEARCH_DEBOUNCE,
+        ));
+    }
+
+    #[test]
+    fn open_search_activates_and_requests_focus() {
+        let mut state = FileTreeState::new(std::path::PathBuf::from("/repo"));
+        assert!(!state.search.active);
+        state.open_search();
+        assert!(state.search.active);
+        assert!(state.search.focus_requested);
+    }
+
+    #[test]
+    fn close_search_deactivates_and_resets_runner() {
+        let mut state = FileTreeState::new(std::path::PathBuf::from("/repo"));
+        state.open_search();
+        state.search.query = "needle".to_string();
+        state.search.last_dispatched = "needle".to_string();
+        state.close_search();
+        assert!(!state.search.active);
+        assert!(!state.search.focus_requested);
+        assert!(state.search.last_dispatched().is_empty());
+        assert!(matches!(state.search.state(), SearchState::Idle));
+    }
+
+    #[test]
+    fn tick_search_no_dispatch_while_inactive() {
+        let mut state = FileTreeState::new(std::path::PathBuf::from("/repo"));
+        state.search.query = "needle".to_string();
+        // Not active: must not dispatch regardless of elapsed time.
+        assert!(!state.tick_search());
+        assert!(state.search.last_dispatched().is_empty());
+    }
+
+    #[test]
+    fn tick_search_dispatches_query_once_quiescent() {
+        let mut state = FileTreeState::new(std::path::PathBuf::from("/repo"));
+        state.open_search();
+        state.search.query = "needle".to_string();
+        // No edit recorded yet => treated as long-quiescent, so it dispatches.
+        let _ = state.tick_search();
+        assert_eq!(state.search.last_dispatched(), "needle");
+        // Calling again with the same query does not re-dispatch (idempotent).
+        let _ = state.tick_search();
+        assert_eq!(state.search.last_dispatched(), "needle");
+    }
+
+    #[test]
+    fn tick_search_waits_for_quiescence_after_edit() {
+        let mut state = FileTreeState::new(std::path::PathBuf::from("/repo"));
+        state.open_search();
+        state.search.query = "needle".to_string();
+        // A fresh edit just happened: not yet quiescent, so no dispatch.
+        state.search.mark_edited();
+        let _ = state.tick_search();
+        assert!(
+            state.search.last_dispatched().is_empty(),
+            "must wait out the debounce after an edit"
+        );
     }
 
     #[test]

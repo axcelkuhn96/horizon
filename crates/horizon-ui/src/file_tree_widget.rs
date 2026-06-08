@@ -175,6 +175,27 @@ impl<'a> FileExplorerView<'a> {
         render_header(ui, state, &mut refresh, &mut show_only);
         state.set_show_only_changes(show_only);
 
+        // Content-search panel (Ctrl+Shift+F). When active it renders above the
+        // tree; its background runner is pumped every frame and finished results
+        // (or an in-flight spinner) are painted by the widget. The reveal action
+        // is applied after the panel render so we can mutate the tree.
+        if state.search.active {
+            let mut repaint = false;
+            let _searching = state.tick_search();
+            let search_action =
+                crate::file_search_widget::show_search_panel(ui, state, panel_id, &mut repaint);
+            if repaint {
+                ui.ctx().request_repaint();
+            }
+            match search_action {
+                Some(crate::file_search_widget::SearchUiAction::Close) => state.close_search(),
+                Some(crate::file_search_widget::SearchUiAction::Reveal(path)) => {
+                    reveal_in_tree(&mut state.roots, &state.root, &path);
+                }
+                None => {}
+            }
+        }
+
         // Clone the status Arc out before the recursive render so the immutable
         // borrow of `state.git_status` does not conflict with the mutations we
         // apply afterwards (mirrors GitChangesView cloning `viewer.status`).
@@ -621,6 +642,39 @@ fn render_footer(ui: &mut egui::Ui, code_missing: bool) {
         );
     });
     ui.add_space(4.0);
+}
+
+/// Reveals `target` in the tree by expanding every ancestor directory between
+/// `root` (exclusive) and `target`'s parent (inclusive), lazily scanning each
+/// level so the file's row becomes visible.
+///
+/// Walks the path components from `root` down: at each step it finds the matching
+/// directory node, ensures its children are loaded, then descends. Stops early
+/// (no panic) if a component isn't found — e.g. the file was deleted, lives under
+/// a `HARD_SKIP` dir, or sits outside `root`. There is no persistent selection
+/// model, so this only expands-to-visible; a highlight is a possible Next-Step.
+fn reveal_in_tree(roots: &mut Vec<FileNode>, root: &Path, target: &Path) {
+    let Ok(rel) = target.strip_prefix(root) else {
+        return;
+    };
+    // The components to descend are every ancestor dir of the file (drop the
+    // file name itself).
+    let mut components: Vec<_> = rel.components().collect();
+    components.pop(); // file name — we only expand directories
+
+    let mut abs = root.to_path_buf();
+    let mut level: &mut Vec<FileNode> = roots;
+    for comp in components {
+        abs.push(comp);
+        let Some(idx) = level.iter().position(|n| n.is_dir && n.path == abs) else {
+            return; // ancestor not present in the scanned tree; stop quietly
+        };
+        FileTreeState::ensure_children(&mut level[idx]);
+        match level[idx].children.as_mut() {
+            Some(children) => level = children,
+            None => return,
+        }
+    }
 }
 
 /// Finds the node at `path` and lazily scans its children (expand).
