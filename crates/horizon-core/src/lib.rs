@@ -9,6 +9,7 @@ pub mod dir_search;
 mod editor;
 mod error;
 pub mod file_search;
+pub mod file_search_runner;
 pub mod file_tree;
 pub mod git_changes;
 pub mod git_status;
