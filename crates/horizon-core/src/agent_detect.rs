@@ -104,6 +104,93 @@ fn is_uuid_like(s: &str) -> bool {
     (32..=128).contains(&len) && s.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
 }
 
+/// Scan terminal scrollback text for `--resume <uuid>` occurrences and return
+/// the **last** (most recent) matching uuid.
+///
+/// This is the fallback path when argv gave no session id: claude prints
+/// `Resume this session with:\nclaude --resume <uuid>` on graceful exit, or a
+/// user may have typed `claude --resume <uuid>` or `claude2 --resume <uuid>`.
+///
+/// The leading binary is incidental — we match on the `--resume` token
+/// followed by a whitespace-delimited uuid-like token.  ANSI/color escape
+/// codes are stripped before matching so colored terminal output does not
+/// interfere.
+///
+/// Returns the last uuid found (validated with [`is_uuid_like`]), or `None`
+/// when no valid `--resume <uuid>` pair is present.
+#[must_use]
+pub fn session_id_from_resume_line(text: &str) -> Option<String> {
+    // Strip ANSI escape sequences (\x1b[...m and other CSI sequences).
+    // We only need to remove non-UUID chars that might be injected around the
+    // uuid token by the terminal's color output.
+    let stripped = strip_ansi_escapes(text);
+
+    let mut last_uuid: Option<String> = None;
+
+    // Tokenize on whitespace and scan for --resume <next-token> pairs.
+    let tokens: Vec<&str> = stripped.split_whitespace().collect();
+    let mut i = 0;
+    while i < tokens.len() {
+        if tokens[i] == "--resume"
+            && let Some(candidate) = tokens.get(i + 1)
+        {
+            // Strip any remaining non-uuid chars from the candidate
+            // (e.g. residual ANSI bytes that survived the gross strip).
+            let clean = candidate.trim_matches(|c: char| !c.is_ascii_hexdigit() && c != '-');
+            if is_uuid_like(clean) {
+                last_uuid = Some(clean.to_owned());
+            }
+            i += 2;
+            continue;
+        }
+        i += 1;
+    }
+
+    last_uuid
+}
+
+/// Remove ANSI/VT escape sequences from `text` (CSI, OSC, and plain `\x1b`
+/// sequences). Returns a `String` with only printable content.
+fn strip_ansi_escapes(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' {
+            match chars.peek() {
+                Some(&'[') => {
+                    // CSI sequence: consume until a letter (final byte).
+                    chars.next(); // consume '['
+                    for c in chars.by_ref() {
+                        if c.is_ascii_alphabetic() {
+                            break;
+                        }
+                    }
+                }
+                Some(&']') => {
+                    // OSC sequence: consume until ST (\x1b\\) or BEL (\x07).
+                    chars.next(); // consume ']'
+                    let mut prev = '\0';
+                    for c in chars.by_ref() {
+                        if c == '\x07' || (prev == '\x1b' && c == '\\') {
+                            break;
+                        }
+                        prev = c;
+                    }
+                }
+                _ => {
+                    // Other escape: skip the next char if present.
+                    chars.next();
+                }
+            }
+        } else {
+            result.push(ch);
+        }
+    }
+
+    result
+}
+
 /// Walk the process tree rooted at `child_pid` (the PTY child, typically a
 /// `script` wrapper) until we find a process whose `cmdline` identifies it as a
 /// `claude` CLI invocation, then classify it via [`classify_agent_from_environ`].
@@ -211,7 +298,7 @@ fn cmdline_is_claude(pid: u32) -> bool {
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use super::{classify_agent_from_environ, session_id_from_cmdline};
+    use super::{classify_agent_from_environ, session_id_from_cmdline, session_id_from_resume_line};
 
     fn home() -> &'static Path {
         Path::new("/home/x")
@@ -380,5 +467,80 @@ mod tests {
         let agent = classify_agent_from_environ(&garbage, home());
         assert_eq!(agent.binary, "claude");
         assert_eq!(agent.config_dir, PathBuf::from("/home/x/.claude"));
+    }
+
+    // ── session_id_from_resume_line tests ─────────────────────────────────────
+
+    const RESUME_UUID: &str = "6c81741c-b21f-4d2f-bc63-9c245c1b8c0d";
+    const RESUME_UUID2: &str = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+
+    // (a) claude's graceful-exit resume block → Some(uuid)
+    #[test]
+    fn resume_line_claude_exit_block() {
+        let text = format!("Resume this session with:\nclaude --resume {RESUME_UUID}\n");
+        assert_eq!(
+            session_id_from_resume_line(&text),
+            Some(RESUME_UUID.to_owned())
+        );
+    }
+
+    // (b) two resume lines → returns the LAST uuid
+    #[test]
+    fn resume_line_returns_last_uuid_when_multiple() {
+        let text = format!(
+            "claude --resume {RESUME_UUID}\nsome other output\nclaude --resume {RESUME_UUID2}\n"
+        );
+        assert_eq!(
+            session_id_from_resume_line(&text),
+            Some(RESUME_UUID2.to_owned())
+        );
+    }
+
+    // (c) no resume line → None
+    #[test]
+    fn resume_line_absent_returns_none() {
+        assert_eq!(session_id_from_resume_line("hello world\nno resume here\n"), None);
+    }
+
+    // (d) --resume followed by a garbage/non-uuid token → None for that occurrence
+    #[test]
+    fn resume_line_garbage_token_returns_none() {
+        assert_eq!(
+            session_id_from_resume_line("claude --resume ./some/path"),
+            None
+        );
+    }
+
+    // (e) ANSI color escapes around the uuid → still extracts the uuid
+    #[test]
+    fn resume_line_ansi_escapes_stripped() {
+        // Simulate: claude --resume \x1b[0m<uuid>\x1b[0m
+        let text = format!("claude --resume \x1b[0m{RESUME_UUID}\x1b[0m");
+        assert_eq!(
+            session_id_from_resume_line(&text),
+            Some(RESUME_UUID.to_owned())
+        );
+    }
+
+    // (f) claude2 binary → Some(uuid) (binary is incidental)
+    #[test]
+    fn resume_line_claude2_binary() {
+        let text = format!("claude2 --resume {RESUME_UUID}");
+        assert_eq!(
+            session_id_from_resume_line(&text),
+            Some(RESUME_UUID.to_owned())
+        );
+    }
+
+    // empty text → None (no panic)
+    #[test]
+    fn resume_line_empty_text() {
+        assert_eq!(session_id_from_resume_line(""), None);
+    }
+
+    // --resume present but no following token → None (no panic)
+    #[test]
+    fn resume_line_no_token_after_flag() {
+        assert_eq!(session_id_from_resume_line("claude --resume"), None);
     }
 }
