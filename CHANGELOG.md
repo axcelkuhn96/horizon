@@ -3,6 +3,16 @@
 Fork pessoal do [peters/horizon](https://github.com/peters/horizon) com melhorias de navegação e UX.
 Patch aditivo sobre o upstream **v0.2.6**.
 
+## [0.3.2] — 2026-06-09
+
+### File Explorer
+- **A busca de conteúdo agora fecha de verdade**: a busca (`Ctrl+Shift+F`) ganhou um botão **X** sempre clicável no cabeçalho e o `Esc` passou a fechar mesmo quando o campo de busca perdeu o foco pro terminal (antes o `Esc` só funcionava com o input focado, e o terminal roubava o foco — a busca ficava presa aberta).
+- **Duplo-clique num resultado da busca abre o arquivo no VS Code** (`code --goto arquivo:linha` quando há linha), espelhando o duplo-clique da árvore; clique simples segue revelando o arquivo na árvore.
+
+### Terminal
+- **Sem barra de scroll "fantasma" dentro de TUIs full-screen** (ex.: `claude`): em alt-screen o terminal não tem scrollback (a pílula da barra aparecia cheia e inútil), então a barra é escondida nesse modo — e seu retângulo deixa de ser clicável (não há mais zona de clique invisível na borda direita). Um shell normal com scrollback mantém a barra normal.
+- **Ctrl+clique num caminho de arquivo que apareça no terminal abre no VS Code na linha citada**: funciona inclusive com **caminhos relativos** (ex.: `crates/foo/bar.rs:12`), resolvidos contra o diretório do painel, e mesmo enquanto um TUI em alt-screen com mouse-reporting está rodando (o clique é interceptado antes de ir pro PTY). URLs continuam abrindo no navegador. A detecção rejeita versões (`0.3.1`), razões (`3/5`, `N/A`) e tokens em formato de flag (`-…`) — esse último fecha um vetor de *argv flag smuggling*.
+
 ## [0.3.1] — 2026-06-08
 
 ### Sessões
