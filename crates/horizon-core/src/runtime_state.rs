@@ -204,7 +204,7 @@ impl RuntimeState {
         canvas_view: CanvasViewState,
         detached_workspaces: Vec<DetachedWorkspaceState>,
     ) -> Self {
-        let workspaces = board
+        let mut workspaces: Vec<WorkspaceState> = board
             .workspaces
             .iter()
             .map(|workspace| {
@@ -275,6 +275,8 @@ impl RuntimeState {
             })
             .collect();
 
+        assign_fresh_session_ids(&mut workspaces);
+
         Self {
             version: RUNTIME_STATE_VERSION,
             window: Some(window),
@@ -290,6 +292,43 @@ impl RuntimeState {
                 .map(|panel| panel.local_id.clone()),
             detached_workspaces,
             workspaces,
+        }
+    }
+}
+
+/// Post-pass: resolve fresh-session ids for Shell+claude panels whose
+/// `running_agent` was detected but whose `session_id` is still `None`
+/// (i.e., claude was started without `--resume <id>`).
+///
+/// A `claimed` set is seeded with every session id already present (from
+/// argv) so that a fresh panel can never steal an id that another panel is
+/// explicitly resuming.  Then, in stable (workspace, panel) order, each
+/// fresh panel calls `most_recent_unclaimed_session_for` and, if a result
+/// is found, its id is immediately inserted into `claimed` so the next
+/// panel in the same cwd gets a distinct id.
+pub fn assign_fresh_session_ids(workspaces: &mut [WorkspaceState]) {
+    // Seed claimed with all session ids already resolved via argv.
+    let mut claimed: HashSet<String> = workspaces
+        .iter()
+        .flat_map(|workspace| &workspace.panels)
+        .filter_map(|panel| panel.running_agent.as_ref()?.session_id.clone())
+        .collect();
+
+    // Iterate in stable order and fill in None session ids.
+    for workspace in workspaces.iter_mut() {
+        for panel in &mut workspace.panels {
+            let (Some(agent), Some(cwd)) = (&panel.running_agent, &panel.cwd) else {
+                continue;
+            };
+            if agent.session_id.is_some() {
+                continue;
+            }
+            let config_dir = agent.config_dir.clone();
+            let cwd = cwd.clone();
+            if let Some(id) = most_recent_unclaimed_session_for(&config_dir, &cwd, &claimed) {
+                claimed.insert(id.clone());
+                panel.running_agent.as_mut().expect("checked above").session_id = Some(id);
+            }
         }
     }
 }
@@ -1203,6 +1242,188 @@ workspaces:
             !yaml.contains("running_agent"),
             "running_agent: None must not appear in serialized YAML (skip_serializing_if)"
         );
+    }
+
+    // ── assign_fresh_session_ids tests ──────────────────────────────────────
+
+    /// Write a minimal Claude `.jsonl` session file under
+    /// `<config_dir>/projects/<enc_cwd>/<uuid>.jsonl` with a controlled mtime.
+    fn write_session(config_dir: &std::path::Path, enc_cwd: &str, session_id: &str, cwd: &str, mtime_secs: i64) {
+        let project_dir = config_dir.join("projects").join(enc_cwd);
+        std::fs::create_dir_all(&project_dir).expect("create project dir");
+        let path = project_dir.join(format!("{session_id}.jsonl"));
+        let line = format!("{{\"type\":\"user\",\"cwd\":\"{cwd}\",\"sessionId\":\"{session_id}\"}}\n");
+        std::fs::write(&path, line).expect("write session jsonl");
+        let mtime = filetime::FileTime::from_unix_time(mtime_secs, 0);
+        filetime::set_file_mtime(&path, mtime).expect("set mtime");
+    }
+
+    fn shell_panel_with_fresh_agent(
+        local_id: &str,
+        cwd: &str,
+        config_dir: &std::path::Path,
+        session_id: Option<&str>,
+    ) -> PanelState {
+        PanelState {
+            local_id: local_id.to_string(),
+            name: "Shell".to_string(),
+            kind: PanelKind::Shell,
+            cwd: Some(cwd.to_string()),
+            running_agent: Some(RunningAgent {
+                binary: "claude".to_string(),
+                config_dir: config_dir.to_path_buf(),
+                session_id: session_id.map(str::to_string),
+            }),
+            ..PanelState::default()
+        }
+    }
+
+    #[test]
+    fn assign_fresh_session_ids_fills_none_with_newest_session() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_session(dir.path(), "-repo", "session-aaa", "/repo", 1000);
+
+        let mut workspaces = vec![WorkspaceState {
+            panels: vec![shell_panel_with_fresh_agent("p1", "/repo", dir.path(), None)],
+            ..WorkspaceState::default()
+        }];
+
+        assign_fresh_session_ids(&mut workspaces);
+
+        assert_eq!(
+            workspaces[0].panels[0]
+                .running_agent
+                .as_ref()
+                .unwrap()
+                .session_id
+                .as_deref(),
+            Some("session-aaa"),
+            "fresh panel must get the newest unclaimed session"
+        );
+    }
+
+    #[test]
+    fn assign_fresh_session_ids_two_panels_same_cwd_get_distinct_ids() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_session(dir.path(), "-repo", "session-older", "/repo", 1000);
+        write_session(dir.path(), "-repo", "session-newer", "/repo", 2000);
+
+        let mut workspaces = vec![WorkspaceState {
+            panels: vec![
+                shell_panel_with_fresh_agent("p1", "/repo", dir.path(), None),
+                shell_panel_with_fresh_agent("p2", "/repo", dir.path(), None),
+            ],
+            ..WorkspaceState::default()
+        }];
+
+        assign_fresh_session_ids(&mut workspaces);
+
+        let id1 = workspaces[0].panels[0]
+            .running_agent
+            .as_ref()
+            .unwrap()
+            .session_id
+            .clone()
+            .expect("first panel must get a session id");
+        let id2 = workspaces[0].panels[1]
+            .running_agent
+            .as_ref()
+            .unwrap()
+            .session_id
+            .clone()
+            .expect("second panel must get a session id");
+
+        assert_ne!(id1, id2, "two fresh panels in the same cwd must get distinct session ids");
+        // Newest first, oldest second — stable order matters.
+        assert_eq!(id1.as_str(), "session-newer");
+        assert_eq!(id2.as_str(), "session-older");
+    }
+
+    #[test]
+    fn assign_fresh_session_ids_argv_resolved_keeps_id_and_blocks_claim() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_session(dir.path(), "-repo", "session-argv", "/repo", 2000);
+        write_session(dir.path(), "-repo", "session-fresh", "/repo", 1000);
+
+        let mut workspaces = vec![WorkspaceState {
+            panels: vec![
+                // Panel 1: argv-resolved (already has session_id from --resume).
+                shell_panel_with_fresh_agent("p1", "/repo", dir.path(), Some("session-argv")),
+                // Panel 2: fresh (no --resume).
+                shell_panel_with_fresh_agent("p2", "/repo", dir.path(), None),
+            ],
+            ..WorkspaceState::default()
+        }];
+
+        assign_fresh_session_ids(&mut workspaces);
+
+        // argv panel must be unchanged.
+        assert_eq!(
+            workspaces[0].panels[0]
+                .running_agent
+                .as_ref()
+                .unwrap()
+                .session_id
+                .as_deref(),
+            Some("session-argv"),
+            "argv-resolved session id must not be overwritten"
+        );
+        // fresh panel must get the second-newest (since newest is claimed by argv panel).
+        assert_eq!(
+            workspaces[0].panels[1]
+                .running_agent
+                .as_ref()
+                .unwrap()
+                .session_id
+                .as_deref(),
+            Some("session-fresh"),
+            "fresh panel must not claim the argv-resolved session id"
+        );
+    }
+
+    #[test]
+    fn assign_fresh_session_ids_no_sessions_for_cwd_stays_none() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // No sessions written — projects dir doesn't even exist.
+
+        let mut workspaces = vec![WorkspaceState {
+            panels: vec![shell_panel_with_fresh_agent("p1", "/repo", dir.path(), None)],
+            ..WorkspaceState::default()
+        }];
+
+        assign_fresh_session_ids(&mut workspaces);
+
+        assert!(
+            workspaces[0].panels[0]
+                .running_agent
+                .as_ref()
+                .unwrap()
+                .session_id
+                .is_none(),
+            "panel with no cwd sessions must stay None"
+        );
+    }
+
+    #[test]
+    fn assign_fresh_session_ids_non_shell_panel_ignored() {
+        // A Claude-kind panel (agent panel, not a Shell+running_agent) must not
+        // be touched by the post-pass — it has no running_agent.
+        let mut workspaces = vec![WorkspaceState {
+            panels: vec![PanelState {
+                local_id: "p1".to_string(),
+                name: "Claude".to_string(),
+                kind: PanelKind::Claude,
+                cwd: Some("/repo".to_string()),
+                running_agent: None,
+                ..PanelState::default()
+            }],
+            ..WorkspaceState::default()
+        }];
+
+        // No panic, no change.
+        assign_fresh_session_ids(&mut workspaces);
+
+        assert!(workspaces[0].panels[0].running_agent.is_none());
     }
 
     #[test]
