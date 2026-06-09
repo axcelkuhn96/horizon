@@ -1,8 +1,8 @@
 use alacritty_terminal::term::cell::{Cell, Flags};
 
 use super::{
-    Column, Dimensions, PathBuf, Point, RenderableContent, Scroll, Term, TermDamage, Terminal, current_cwd_for_pid,
-    find_file_path_at_column, find_url_at_column, viewport_to_point,
+    ClickTarget, Column, Dimensions, PathBuf, Point, RenderableContent, Scroll, Term, TermDamage, Terminal,
+    current_cwd_for_pid, find_file_path_at_column, find_url_at_column, viewport_to_point,
 };
 
 impl Terminal {
@@ -204,12 +204,18 @@ impl Terminal {
     /// Return a clickable target (URL or file path) at the given
     /// viewport-relative row and column, if any is detected.
     #[must_use]
-    pub fn clickable_at_point(&self, row: usize, col: usize) -> Option<String> {
+    pub fn clickable_at_point(&self, row: usize, col: usize) -> Option<ClickTarget> {
         let term = self.term.lock();
         let cols = usize::from(self.cols);
         let (line_chars, logical_col) = wrapped_line_chars_at_viewport_point(&term, cols, row, col)?;
 
-        find_url_at_column(&line_chars, logical_col).or_else(|| find_file_path_at_column(&line_chars, logical_col))
+        if let Some(url) = find_url_at_column(&line_chars, logical_col) {
+            return Some(ClickTarget::Url(url));
+        }
+        if let Some((path, line)) = find_file_path_at_column(&line_chars, logical_col) {
+            return Some(ClickTarget::File { path, line });
+        }
+        None
     }
 }
 

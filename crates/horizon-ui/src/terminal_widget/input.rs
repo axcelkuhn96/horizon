@@ -3,8 +3,11 @@ use std::collections::VecDeque;
 use alacritty_terminal::term::TermMode;
 use egui::emath::TSTransform;
 use egui::{Key, PointerButton, Pos2, Rect, Vec2};
+use std::path::Path;
+
 use horizon_core::{
-    Panel, PanelKind, SelectionType, ShortcutBinding, ShortcutKey, ShortcutModifiers, SshConnectionStatus, TerminalSide,
+    ClickTarget, Panel, PanelKind, SelectionType, ShortcutBinding, ShortcutKey, ShortcutModifiers, SshConnectionStatus,
+    TerminalSide,
 };
 
 use super::super::input::{self, TerminalInputEvent};
@@ -407,11 +410,29 @@ fn handle_pointer_button(
             pointer.visible_rows,
             pointer.visible_cols,
         )
-        && let Some(terminal) = panel.terminal()
-        && let Some(target) = terminal.clickable_at_point(point.line, point.column)
     {
-        horizon_core::open_url(&target);
-        return;
+        // Clone launch_cwd before borrowing panel.terminal() to avoid borrow conflict.
+        let launch_cwd = panel.launch_cwd.clone();
+        if let Some(terminal) = panel.terminal()
+            && let Some(target) = terminal.clickable_at_point(point.line, point.column)
+        {
+            match target {
+                ClickTarget::Url(url) => {
+                    horizon_core::open_url(&url);
+                }
+                ClickTarget::File { path, line } => {
+                    let resolved = if Path::new(&path).is_absolute() || path.starts_with('~') {
+                        std::path::PathBuf::from(&path)
+                    } else if let Some(cwd) = launch_cwd {
+                        cwd.join(&path)
+                    } else {
+                        std::path::PathBuf::from(&path)
+                    };
+                    crate::file_tree_widget::open_path_in_vscode(&resolved, line);
+                }
+            }
+            return;
+        }
     }
 
     if pointer_button_starts_local_selection(pointer.terminal_mode, button, pressed, modifiers) {

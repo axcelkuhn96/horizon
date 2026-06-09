@@ -295,25 +295,144 @@ fn unmatched_closing_delimiter(chars: &[char], start: usize, end: usize, open: c
     false
 }
 
-pub(super) fn find_file_path_at_column(chars: &[char], col: usize) -> Option<String> {
+/// Returns `(bare_path, optional_line_number)` for the file-path token at
+/// `col`, or `None` when the column does not land on a recognised path.
+///
+/// Recognised tokens (see [`is_path_like`] for the exact rules):
+/// - Absolute paths starting with `/` or `~/`.
+/// - Relative tokens that contain a `/` with a substantial alphabetic segment.
+/// - Relative tokens that look like `name.ext` with a letter-bearing stem.
+///
+/// Plain words, all-numeric versions (`0.3.1`, `3.14`), short ratios (`3/5`),
+/// and flag-shaped tokens (leading `-`) are rejected to limit false positives
+/// and prevent argv flag smuggling into the editor launcher.
+#[must_use]
+pub(super) fn find_file_path_at_column(chars: &[char], col: usize) -> Option<(String, Option<u32>)> {
     let mut index = 0;
     while index < chars.len() {
-        let is_path_start = (chars[index] == '/'
-            || (chars[index] == '~' && index + 1 < chars.len() && chars[index + 1] == '/'))
-            && (index == 0 || is_path_boundary(chars[index - 1]));
-        if !is_path_start {
+        // A token starts at a path boundary (or the beginning of the line).
+        let at_boundary = index == 0 || is_path_boundary(chars[index - 1]);
+        if !at_boundary || chars[index].is_whitespace() {
             index += 1;
             continue;
         }
+
         let start = index;
         let end = path_end_column(chars, start);
-        let path = strip_line_col_suffix_chars(&chars[start..end]);
-        if path.len() > 1 && col >= start && col < start + path.len() {
-            return Some(path.iter().collect());
+        if end <= start {
+            index += 1;
+            continue;
         }
+
+        let token = &chars[start..end];
+        // Strip any trailing :N or :N:M suffix and parse the line number.
+        let (path_chars, line_number) = strip_line_col_suffix(token);
+
+        // Reject tokens shorter than 2 chars (bare `/` etc.).
+        if path_chars.len() < 2 {
+            index = end;
+            continue;
+        }
+
+        // Check that the column lands inside the path portion.
+        if col >= start && col < start + path_chars.len() {
+            // Accept the token if it looks like a file path.
+            let token_str: String = path_chars.iter().collect();
+            if is_path_like(path_chars) {
+                return Some((token_str, line_number));
+            }
+        }
+
         index = end;
     }
     None
+}
+
+/// Returns `true` when `chars` (the bare path without any line/col suffix)
+/// looks like a file-system path worth opening.
+///
+/// Rules (in order):
+/// - A leading `-` is rejected outright: such tokens could be smuggled to the
+///   editor as a CLI flag (e.g. `--goto`, `-rf`).
+/// - Starts with `/` (absolute) or `~` (home-relative): always accept.
+/// - Slash rule: a relative token containing `/` is accepted only when the
+///   whole token is at least 4 chars long AND at least one slash-separated
+///   segment is >= 2 chars and contains an ASCII letter. This accepts
+///   `crates/foo`, `src/lib`, `./src/lib` while rejecting `3/5`, `1/3`,
+///   `a/b`, `N/A`.
+/// - `name.ext` rule: accept when the extension after the last `.` is 1–8
+///   ASCII alphanumeric chars AND the stem (everything before that last `.`)
+///   contains at least one ASCII letter. This keeps `main.rs`, `Cargo.toml`,
+///   `bar.rs` while rejecting all-numeric versions like `0.3.1`, `3.14`,
+///   `1.5`. (`v1.2.3` has stem `v1.2` whose `v` is a letter, so it passes —
+///   acceptable, low harm.)
+fn is_path_like(chars: &[char]) -> bool {
+    // Flag-shaped token: never treat as a path (argv smuggling guard).
+    if chars[0] == '-' {
+        return false;
+    }
+    // Absolute or home-relative: always accept.
+    if chars[0] == '/' || chars[0] == '~' {
+        return true;
+    }
+    // Slash rule: needs a substantial, letter-bearing segment.
+    if chars.contains(&'/') {
+        if chars.len() < 4 {
+            return false;
+        }
+        let token: String = chars.iter().collect();
+        let has_substantial_segment = token
+            .split('/')
+            .any(|seg| seg.chars().count() >= 2 && seg.chars().any(|c| c.is_ascii_alphabetic()));
+        return has_substantial_segment;
+    }
+    // name.ext heuristic: letter-bearing stem + short alphanumeric extension.
+    if let Some(dot_pos) = chars.iter().rposition(|&c| c == '.') {
+        let stem = &chars[..dot_pos];
+        let ext = &chars[dot_pos + 1..];
+        let stem_has_letter = stem.iter().any(char::is_ascii_alphabetic);
+        if stem_has_letter && !ext.is_empty() && ext.len() <= 8 && ext.iter().all(char::is_ascii_alphanumeric) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Strip a trailing `:N` or `:N:M` suffix from `chars`, returning the path
+/// slice and the parsed line number.
+///
+/// For `:N` → line = N.
+/// For `:N:M` → line = N (first number), M is column (stripped but discarded).
+///
+/// The algorithm strips from the right: the innermost (rightmost) number is
+/// stripped first (column or sole line), then the next (line). After at most
+/// two numeric suffixes are stripped we stop, so the last value stored in
+/// `last_stripped` at the time we stop is the line number.
+fn strip_line_col_suffix(chars: &[char]) -> (&[char], Option<u32>) {
+    let mut result = chars;
+    let mut stripped_count = 0u32;
+    let mut last_stripped: Option<u32> = None;
+
+    loop {
+        let Some(colon_pos) = result.iter().rposition(|character| *character == ':') else {
+            return (result, last_stripped);
+        };
+        let suffix = &result[colon_pos + 1..];
+        if !suffix.is_empty() && suffix.iter().all(char::is_ascii_digit) {
+            let n: u32 = suffix.iter().fold(0u32, |acc, c| {
+                acc.saturating_mul(10).saturating_add(*c as u32 - '0' as u32)
+            });
+            last_stripped = Some(n);
+            stripped_count += 1;
+            result = &result[..colon_pos];
+            // Stop after stripping at most two numeric components (:line:col).
+            if stripped_count >= 2 {
+                return (result, last_stripped);
+            }
+        } else {
+            return (result, last_stripped);
+        }
+    }
 }
 
 fn is_path_boundary(character: char) -> bool {
@@ -334,21 +453,6 @@ fn path_end_column(chars: &[char], start: usize) -> usize {
     end
 }
 
-fn strip_line_col_suffix_chars(chars: &[char]) -> &[char] {
-    let mut result = chars;
-    loop {
-        let Some(colon_pos) = result.iter().rposition(|character| *character == ':') else {
-            return result;
-        };
-        let suffix = &result[colon_pos + 1..];
-        if !suffix.is_empty() && suffix.iter().all(char::is_ascii_digit) {
-            result = &result[..colon_pos];
-        } else {
-            return result;
-        }
-    }
-}
-
 /// Open a URL or file path with the platform's default handler.
 pub fn open_url(url: &str) {
     let command = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
@@ -367,7 +471,7 @@ pub fn open_url(url: &str) {
 mod tests {
     use std::path::PathBuf;
 
-    use super::parse_lsof_cwd;
+    use super::{find_file_path_at_column, parse_lsof_cwd};
 
     #[test]
     fn parse_lsof_cwd_extracts_working_directory() {
@@ -399,5 +503,107 @@ mod tests {
     fn parse_first_child_pid_returns_none_when_empty() {
         assert_eq!(super::parse_first_child_pid(""), None);
         assert_eq!(super::parse_first_child_pid("\n"), None);
+    }
+
+    // ---- find_file_path_at_column TDD tests ----
+
+    #[test]
+    fn absolute_path_no_suffix_detected() {
+        let line: Vec<char> = "/a/b.rs".chars().collect();
+        // click inside path
+        assert_eq!(find_file_path_at_column(&line, 3), Some(("/a/b.rs".to_string(), None)));
+    }
+
+    #[test]
+    fn absolute_path_with_line_suffix_detected() {
+        let line: Vec<char> = "/a/b.rs:12".chars().collect();
+        assert_eq!(
+            find_file_path_at_column(&line, 3),
+            Some(("/a/b.rs".to_string(), Some(12)))
+        );
+    }
+
+    #[test]
+    fn absolute_path_with_line_and_col_suffix_detected() {
+        let line: Vec<char> = "/a/b.rs:12:5".chars().collect();
+        assert_eq!(
+            find_file_path_at_column(&line, 3),
+            Some(("/a/b.rs".to_string(), Some(12)))
+        );
+    }
+
+    #[test]
+    fn relative_path_with_slash_detected() {
+        let line: Vec<char> = "crates/foo/bar.rs:7".chars().collect();
+        // click inside path (col 5 = 'o' in "foo")
+        assert_eq!(
+            find_file_path_at_column(&line, 5),
+            Some(("crates/foo/bar.rs".to_string(), Some(7)))
+        );
+    }
+
+    #[test]
+    fn relative_file_name_with_extension_detected() {
+        let line: Vec<char> = "main.rs:3".chars().collect();
+        assert_eq!(
+            find_file_path_at_column(&line, 2),
+            Some(("main.rs".to_string(), Some(3)))
+        );
+    }
+
+    #[test]
+    fn plain_word_without_slash_or_extension_rejected() {
+        let line: Vec<char> = "hello".chars().collect();
+        assert_eq!(find_file_path_at_column(&line, 2), None);
+    }
+
+    #[test]
+    fn relative_dir_token_with_slash_detected() {
+        // `src/lib` has a slash, so it passes the slash rule
+        let line: Vec<char> = "src/lib".chars().collect();
+        assert_eq!(find_file_path_at_column(&line, 2), Some(("src/lib".to_string(), None)));
+    }
+
+    #[test]
+    fn all_numeric_version_rejected() {
+        let line: Vec<char> = "0.3.1".chars().collect();
+        assert_eq!(find_file_path_at_column(&line, 2), None);
+    }
+
+    #[test]
+    fn decimal_number_rejected() {
+        let line: Vec<char> = "3.14".chars().collect();
+        assert_eq!(find_file_path_at_column(&line, 1), None);
+    }
+
+    #[test]
+    fn short_alpha_ratio_rejected() {
+        // `N/A`: segments are single chars, so the slash rule rejects it.
+        let line: Vec<char> = "N/A".chars().collect();
+        assert_eq!(find_file_path_at_column(&line, 1), None);
+    }
+
+    #[test]
+    fn short_numeric_ratio_rejected() {
+        let line: Vec<char> = "3/5".chars().collect();
+        assert_eq!(find_file_path_at_column(&line, 1), None);
+    }
+
+    #[test]
+    fn leading_dash_token_rejected() {
+        // Security: a flag-shaped token must never be returned as a path.
+        let line: Vec<char> = "-rf".chars().collect();
+        assert_eq!(find_file_path_at_column(&line, 1), None);
+
+        let line: Vec<char> = "--goto".chars().collect();
+        assert_eq!(find_file_path_at_column(&line, 2), None);
+    }
+
+    #[test]
+    fn click_in_line_suffix_zone_returns_none() {
+        // For `/a/b.rs:12`, the path span is `/a/b.rs` (cols 0..7). A click in
+        // the `:12` suffix zone (col 8) is outside the clickable path span.
+        let line: Vec<char> = "/a/b.rs:12".chars().collect();
+        assert_eq!(find_file_path_at_column(&line, 8), None);
     }
 }

@@ -129,6 +129,43 @@ pub(crate) fn open_in_vscode(path: &Path, code_missing: &mut bool) {
     }
 }
 
+/// Open `path` in VS Code, jumping to `line` when known. Fire-and-forget; logs
+/// a warning if `code` could not be launched. Used by the terminal Ctrl+click
+/// path (no `code_missing` UI sink there).
+///
+/// Defense-in-depth against argv flag smuggling: a path beginning with `-`
+/// could be interpreted by `code` as a CLI flag, so it is refused outright
+/// (the path itself is not logged). The no-line case uses a `--` argv
+/// terminator so the path can never be parsed as an option. The `--goto` case
+/// keeps `path:line` as the option's single value (inserting `--` there would
+/// break it); the leading-`-` guard already makes that value safe.
+pub(crate) fn open_path_in_vscode(path: &std::path::Path, line: Option<u32>) {
+    let path_str = path.to_string_lossy();
+    if path_str.starts_with('-') {
+        tracing::warn!("refusing to open path beginning with '-'");
+        return;
+    }
+
+    let mut command = Command::new("code");
+    match line {
+        Some(ln) => {
+            command.arg("--goto").arg(format!("{}:{ln}", path.display()));
+        }
+        None => {
+            command.arg("--").arg(path);
+        }
+    }
+    let launched = command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .is_ok();
+    if !launched {
+        tracing::warn!("failed to launch `code` for terminal file open");
+    }
+}
+
 /// Renders the lazy project file tree for a `PanelKind::FileExplorer` panel.
 pub struct FileExplorerView<'a> {
     panel: &'a mut Panel,

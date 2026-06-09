@@ -66,6 +66,20 @@ pub struct AgentNotification {
     pub message: String,
 }
 
+/// A clickable target detected at a terminal viewport coordinate.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ClickTarget {
+    /// A URL (http/https/file scheme).
+    Url(String),
+    /// A file-system path, optionally with a line number.
+    File {
+        /// Bare path without any `:line` or `:line:col` suffix.
+        path: String,
+        /// Line number parsed from the suffix, if present.
+        line: Option<u32>,
+    },
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum HorizonOscTitle {
     Notification(AgentNotification),
@@ -533,7 +547,7 @@ mod tests {
         let line: Vec<char> = "error at /home/user/project/src/main.rs rest".chars().collect();
         assert_eq!(
             find_file_path_at_column(&line, 10),
-            Some("/home/user/project/src/main.rs".to_string()),
+            Some(("/home/user/project/src/main.rs".to_string(), None)),
         );
     }
 
@@ -542,14 +556,17 @@ mod tests {
         let line: Vec<char> = "see ~/project/config.yaml for details".chars().collect();
         assert_eq!(
             find_file_path_at_column(&line, 5),
-            Some("~/project/config.yaml".to_string()),
+            Some(("~/project/config.yaml".to_string(), None)),
         );
     }
 
     #[test]
     fn line_col_suffix_stripped_from_path() {
         let line: Vec<char> = "error: /src/lib.rs:42:15 something".chars().collect();
-        assert_eq!(find_file_path_at_column(&line, 8), Some("/src/lib.rs".to_string()),);
+        assert_eq!(
+            find_file_path_at_column(&line, 8),
+            Some(("/src/lib.rs".to_string(), Some(42))),
+        );
     }
 
     #[test]
