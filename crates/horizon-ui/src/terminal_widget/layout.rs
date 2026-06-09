@@ -67,6 +67,7 @@ pub(super) fn terminal_interaction(
     layout: TerminalLayout,
     panel_id: u64,
     interactive: bool,
+    scrollbar_interactive: bool,
 ) -> TerminalInteraction {
     let (allocated_rect, _) = ui.allocate_exact_size(layout.outer.size(), egui::Sense::hover());
     let layout = TerminalLayout {
@@ -79,7 +80,9 @@ pub(super) fn terminal_interaction(
     } else {
         egui::Sense::hover()
     };
-    let scrollbar_sense = if interactive {
+    // Hidden in alt-screen (see `terminal_scrollbar_visible`): keep the rect a
+    // hover-only sense so the invisible right-edge zone can't be clicked/dragged.
+    let scrollbar_sense = if interactive && scrollbar_interactive {
         egui::Sense::click_and_drag()
     } else {
         egui::Sense::hover()

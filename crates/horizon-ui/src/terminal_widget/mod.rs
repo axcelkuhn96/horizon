@@ -12,6 +12,8 @@ use horizon_core::{Panel, PanelId};
 
 use crate::theme;
 
+use alacritty_terminal::term::TermMode;
+
 use self::context_menu::{apply_terminal_context_action, show_terminal_context_menu};
 use self::ime::{clear_terminal_ime_state, publish_terminal_ime_output};
 pub(crate) use self::input::SSH_RECONNECT_SHORTCUT;
@@ -21,6 +23,15 @@ pub(crate) use self::render::TerminalGridCache;
 use self::render::{render_cursor, render_grid};
 use self::scrollbar::render_scrollbar;
 use super::primary_selection::PrimarySelection;
+
+/// Whether to draw the host scrollbar for a terminal in this mode. A full-screen
+/// TUI in alt-screen (e.g. claude code) has no host scrollback — `history_size()`
+/// is always 0 there — so the scrollbar would render as a useless full-height
+/// pill. Hide it in alt-screen; a normal shell with scrollback keeps it.
+#[must_use]
+fn terminal_scrollbar_visible(mode: TermMode) -> bool {
+    !mode.contains(TermMode::ALT_SCREEN)
+}
 
 const FONT_SIZE: f32 = 13.0;
 const LINE_HEIGHT_FACTOR: f32 = 1.3;
@@ -89,7 +100,15 @@ impl<'a> TerminalView<'a> {
         self.panel
             .resize(new_rows, new_cols, viewport.cell_width, viewport.cell_height);
 
-        let interaction = terminal_interaction(ui, layout, self.panel.id.0, interactive);
+        // Alt-screen TUIs (e.g. claude code) hide the scrollbar; compute this
+        // once (one term-lock) and reuse it both to make the rect
+        // non-interactive (so the invisible zone can't be clicked/dragged) and
+        // to gate the paint below.
+        let scrollbar_visible = self
+            .panel
+            .terminal()
+            .is_none_or(|terminal| terminal_scrollbar_visible(terminal.mode()));
+        let interaction = terminal_interaction(ui, layout, self.panel.id.0, interactive, scrollbar_visible);
         // Publish the body's egui focus Id so directional-focus navigation can
         // deliver keyboard focus the same way a click does (mirror of the
         // `interaction.body.request_focus()` call in the pointer handler).
@@ -163,14 +182,16 @@ impl<'a> TerminalView<'a> {
                     &metrics,
                     has_terminal_focus,
                 );
-                render_scrollbar(
-                    ui,
-                    interaction.layout.scrollbar,
-                    display_offset,
-                    usize::from(new_rows),
-                    history_size,
-                    scrollbar_highlighted,
-                );
+                if scrollbar_visible {
+                    render_scrollbar(
+                        ui,
+                        interaction.layout.scrollbar,
+                        display_offset,
+                        usize::from(new_rows),
+                        history_size,
+                        scrollbar_highlighted,
+                    );
+                }
             });
             self.grid_cache = grid_cache;
         }
@@ -289,8 +310,24 @@ pub(crate) fn viewport_for_available_space(ctx: &Context, available: Vec2) -> la
 
 #[cfg(test)]
 mod tests {
-    use super::terminal_focus_request_id;
+    use super::{terminal_focus_request_id, terminal_scrollbar_visible};
+    use alacritty_terminal::term::TermMode;
     use horizon_core::PanelId;
+
+    #[test]
+    fn scrollbar_hidden_in_alt_screen() {
+        assert!(!terminal_scrollbar_visible(TermMode::ALT_SCREEN));
+        // Alt-screen combined with other flags is still hidden.
+        assert!(!terminal_scrollbar_visible(
+            TermMode::ALT_SCREEN | TermMode::MOUSE_REPORT_CLICK
+        ));
+    }
+
+    #[test]
+    fn scrollbar_shown_in_normal_screen() {
+        assert!(terminal_scrollbar_visible(TermMode::NONE));
+        assert!(terminal_scrollbar_visible(TermMode::APP_CURSOR));
+    }
 
     #[test]
     fn focus_request_id_is_stable_per_panel() {
