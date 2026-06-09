@@ -174,6 +174,15 @@ pub fn format_match_line(line_text: &str, span: (usize, usize), max_chars: usize
     }
 }
 
+/// Whether the search panel should close this frame. Pure so the close logic is
+/// unit-tested without an egui context. The panel closes if Escape was pressed
+/// (the panel only renders while `search.active`, so consuming Escape here is
+/// safe) OR the header close (X) button was clicked.
+#[must_use]
+pub fn search_close_requested(escape_pressed: bool, close_clicked: bool) -> bool {
+    escape_pressed || close_clicked
+}
+
 /// Renders the content-search panel for `state` and returns an action for the
 /// caller to apply (it cannot mutate the tree here without re-borrowing).
 ///
@@ -247,9 +256,17 @@ fn show_search_panel_inner(
             if response.changed() {
                 state.search.mark_edited();
             }
-            // Esc closes the panel (only honored while the input has focus so it
-            // doesn't swallow a global Esc).
-            if response.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            // Close (X) button — always clickable regardless of which widget holds
+            // egui focus (the terminal can steal focus from the TextEdit, which is
+            // why Esc-while-focused alone was unreliable).
+            let close = ui
+                .add(egui::Button::new(RichText::new("\u{f00d}").size(12.0).color(theme::FG_DIM())).frame(false))
+                .on_hover_text("Close search (Esc)");
+            // Escape is checked unconditionally: `show_search_panel` only renders
+            // while `state.search.active`, so consuming Escape here cannot swallow
+            // an Escape meant for another context.
+            let escape_pressed = ui.input(|i| i.key_pressed(egui::Key::Escape));
+            if search_close_requested(escape_pressed, close.clicked()) {
                 *action = Some(SearchUiAction::Close);
             }
         },
@@ -684,5 +701,17 @@ mod tests {
     fn display_path_bare_file_has_no_parent() {
         let p = Path::new("main.rs");
         assert_eq!(display_path(p), "main.rs");
+    }
+
+    #[test]
+    fn close_requested_on_escape_or_button() {
+        // Escape alone closes.
+        assert!(search_close_requested(true, false));
+        // The X button alone closes.
+        assert!(search_close_requested(false, true));
+        // Both at once still closes.
+        assert!(search_close_requested(true, true));
+        // Neither does nothing.
+        assert!(!search_close_requested(false, false));
     }
 }
