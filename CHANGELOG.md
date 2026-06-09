@@ -3,6 +3,12 @@
 Fork pessoal do [peters/horizon](https://github.com/peters/horizon) com melhorias de navegação e UX.
 Patch aditivo sobre o upstream **v0.2.6**.
 
+## [0.3.1] — 2026-06-08
+
+### Sessões
+- **Auto-resume de `claude`/`claude2` digitado dentro de um painel Shell**: se você rodou `claude` (conta 1) ou `claude2` (conta 2) num terminal Shell e fechou o app, ao reabrir o painel **religa na mesma conversa** via `<binário> --resume <session_id>`. O id da sessão é capturado de forma exata por painel: primeiro do `--resume <id>` no argv do processo claude vivo; senão (sessão nova, sem id no argv) resolve pela sessão `.jsonl` mais recente daquele diretório, com **reivindicação distinta por painel** — dois shells no mesmo diretório nunca mais retomam a mesma sessão. A conta (claude vs claude2) vem do `CLAUDE_CONFIG_DIR` do processo; o `session_id` é validado (uuid-like) antes de qualquer injeção.
+- Abordagens descartadas com evidência (não confiáveis): ler o fd aberto do processo (`claude` não mantém o `.jsonl` aberto) e varrer o scrollback pela linha de resume (só impressa na saída → obsoleta enquanto o claude está vivo).
+
 ## [0.3.0] — 2026-06-08
 
 ### File Explorer
