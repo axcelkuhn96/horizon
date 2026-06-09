@@ -66,7 +66,12 @@ fn scrollbar_thumb_rect(track_rect: Rect, thumb_height: f32, scrollback: usize, 
 /// Returns the y-coordinate of the top of the scrollbar thumb for the given
 /// scrollback position.  Used to compute a grab offset so drag-scrolling does
 /// not teleport the thumb to the pointer position.
-pub(super) fn scrollbar_thumb_top(track_rect: egui::Rect, thumb_height: f32, scrollback: usize, scrollback_limit: usize) -> f32 {
+pub(super) fn scrollbar_thumb_top(
+    track_rect: egui::Rect,
+    thumb_height: f32,
+    scrollback: usize,
+    scrollback_limit: usize,
+) -> f32 {
     let max_scrollback = usize_to_f32(scrollback_limit.max(1));
     let scroll_ratio = (usize_to_f32(scrollback).min(max_scrollback) / max_scrollback).clamp(0.0, 1.0);
     let travel = (track_rect.height() - thumb_height).max(0.0);
@@ -88,9 +93,7 @@ pub(super) fn scrollbar_pointer_to_scrollback(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        scrollbar_pointer_to_scrollback, scrollbar_thumb_height, scrollbar_thumb_rect, scrollbar_thumb_top,
-    };
+    use super::{scrollbar_pointer_to_scrollback, scrollbar_thumb_height, scrollbar_thumb_rect, scrollbar_thumb_top};
     use egui::{Pos2, Rect, Vec2};
 
     #[test]

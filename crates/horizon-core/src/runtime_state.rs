@@ -317,17 +317,19 @@ pub fn assign_fresh_session_ids(workspaces: &mut [WorkspaceState]) {
     // Iterate in stable order and fill in None session ids.
     for workspace in workspaces.iter_mut() {
         for panel in &mut workspace.panels {
-            let (Some(agent), Some(cwd)) = (&panel.running_agent, &panel.cwd) else {
+            let Some(cwd) = panel.cwd.clone() else {
+                continue;
+            };
+            let Some(agent) = panel.running_agent.as_mut() else {
                 continue;
             };
             if agent.session_id.is_some() {
                 continue;
             }
             let config_dir = agent.config_dir.clone();
-            let cwd = cwd.clone();
             if let Some(id) = most_recent_unclaimed_session_for(&config_dir, &cwd, &claimed) {
                 claimed.insert(id.clone());
-                panel.running_agent.as_mut().expect("checked above").session_id = Some(id);
+                agent.session_id = Some(id);
             }
         }
     }
@@ -1333,7 +1335,10 @@ workspaces:
             .clone()
             .expect("second panel must get a session id");
 
-        assert_ne!(id1, id2, "two fresh panels in the same cwd must get distinct session ids");
+        assert_ne!(
+            id1, id2,
+            "two fresh panels in the same cwd must get distinct session ids"
+        );
         // Newest first, oldest second — stable order matters.
         assert_eq!(id1.as_str(), "session-newer");
         assert_eq!(id2.as_str(), "session-older");
@@ -1452,8 +1457,7 @@ workspaces:
         };
 
         let yaml = state.to_yaml().expect("serialize runtime state");
-        let reloaded: RuntimeState =
-            serde_yaml::from_str(&yaml).expect("deserialize runtime state");
+        let reloaded: RuntimeState = serde_yaml::from_str(&yaml).expect("deserialize runtime state");
 
         let agent = reloaded.workspaces[0].panels[0]
             .running_agent

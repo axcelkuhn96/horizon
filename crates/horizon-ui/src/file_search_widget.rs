@@ -118,7 +118,11 @@ pub struct MatchLineDisplay {
 /// is clamped to `[1, MAX_LINE_CHARS]` so we always keep at least one glyph and
 /// never exceed the absolute safety cap.
 #[must_use]
-#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
 pub fn chars_budget_for_width(available_px: f32) -> usize {
     if !available_px.is_finite() || available_px <= 0.0 {
         return 1;
@@ -302,21 +306,16 @@ fn show_search_panel_inner(
             }
             Ok(found) => {
                 let rows = flatten_results(found);
-                results_scroll(results_max_h, panel_id).show_rows(
-                    ui,
-                    RESULT_ROW_HEIGHT,
-                    rows.len(),
-                    |ui, range| {
-                        // Paint an opaque fill behind the visible viewport so
-                        // results never bleed through to content underneath.
-                        let vp = ui.max_rect();
-                        ui.painter()
-                            .rect_filled(vp, egui::CornerRadius::ZERO, theme::PANEL_BG());
-                        for row in &rows[range] {
-                            render_row(ui, row, action);
-                        }
-                    },
-                );
+                results_scroll(results_max_h, panel_id).show_rows(ui, RESULT_ROW_HEIGHT, rows.len(), |ui, range| {
+                    // Paint an opaque fill behind the visible viewport so
+                    // results never bleed through to content underneath.
+                    let vp = ui.max_rect();
+                    ui.painter()
+                        .rect_filled(vp, egui::CornerRadius::ZERO, theme::PANEL_BG());
+                    for row in &rows[range] {
+                        render_row(ui, row, action);
+                    }
+                });
             }
         },
     }
@@ -349,10 +348,7 @@ fn results_scroll(max_height: f32, panel_id: u64) -> ScrollArea {
 fn render_row(ui: &mut egui::Ui, row: &SearchRow<'_>, action: &mut Option<SearchUiAction>) {
     match *row {
         SearchRow::TruncationBanner { total } => {
-            let resp = ui.allocate_response(
-                Vec2::new(ui.available_width(), RESULT_ROW_HEIGHT),
-                egui::Sense::hover(),
-            );
+            let resp = ui.allocate_response(Vec2::new(ui.available_width(), RESULT_ROW_HEIGHT), egui::Sense::hover());
             ui.painter().text(
                 egui::Pos2::new(resp.rect.min.x + 8.0, resp.rect.center().y),
                 egui::Align2::LEFT_CENTER,
@@ -373,10 +369,7 @@ fn render_row(ui: &mut egui::Ui, row: &SearchRow<'_>, action: &mut Option<Search
 
 /// Renders a clickable file-path header row (icon + compact path).
 fn render_file_header(ui: &mut egui::Ui, path: &Path, action: &mut Option<SearchUiAction>) {
-    let header = ui.allocate_response(
-        Vec2::new(ui.available_width(), RESULT_ROW_HEIGHT),
-        egui::Sense::click(),
-    );
+    let header = ui.allocate_response(Vec2::new(ui.available_width(), RESULT_ROW_HEIGHT), egui::Sense::click());
     let header_rect = header.rect;
     if header.hovered() {
         ui.painter()
@@ -414,10 +407,7 @@ fn render_match_row(
     span: (usize, usize),
     action: &mut Option<SearchUiAction>,
 ) {
-    let row = ui.allocate_response(
-        Vec2::new(ui.available_width(), RESULT_ROW_HEIGHT),
-        egui::Sense::click(),
-    );
+    let row = ui.allocate_response(Vec2::new(ui.available_width(), RESULT_ROW_HEIGHT), egui::Sense::click());
     let row_rect = row.rect;
     // Text starts after the line-number gutter; elide to the pixel width that
     // remains up to the row's right edge so the line can never paint past the
@@ -482,7 +472,13 @@ fn paint_match_text(painter: &egui::Painter, pos: egui::Pos2, display: &MatchLin
         theme::ACCENT(),
     );
     x = g_match.max.x;
-    painter.text(egui::Pos2::new(x, pos.y), egui::Align2::LEFT_CENTER, after, font, theme::FG());
+    painter.text(
+        egui::Pos2::new(x, pos.y),
+        egui::Align2::LEFT_CENTER,
+        after,
+        font,
+        theme::FG(),
+    );
 }
 
 /// A dim, indented one-line status message (e.g. "Searching…").

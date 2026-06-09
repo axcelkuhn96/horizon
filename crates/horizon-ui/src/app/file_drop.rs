@@ -347,7 +347,11 @@ impl HorizonApp {
         let dest = state.drop_target_for(pos.x, pos.y);
         let report = horizon_core::file_ops::copy_into_dir(&srcs, &dest);
         for error in &report.errors {
-            tracing::error!("file drop copy failed for {}: {}", error.source.display(), error.message);
+            tracing::error!(
+                "file drop copy failed for {}: {}",
+                error.source.display(),
+                error.message
+            );
         }
         // Reflect the freshly-copied entries in the tree.
         state.refresh_dir(&dest);

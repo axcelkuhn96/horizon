@@ -985,13 +985,7 @@ INSERT INTO session (id, title, directory, parent_id, time_updated, time_archive
     /// `<config_dir>/projects/<enc_cwd>/<uuid>.jsonl` and set its mtime to
     /// `mtime_secs` seconds since the Unix epoch.  Returns the uuid string so
     /// callers can reference it in `claimed` sets or assertions.
-    fn write_session_file(
-        config_dir: &std::path::Path,
-        enc_cwd: &str,
-        session_id: &str,
-        cwd: &str,
-        mtime_secs: i64,
-    ) {
+    fn write_session_file(config_dir: &std::path::Path, enc_cwd: &str, session_id: &str, cwd: &str, mtime_secs: i64) {
         let project_dir = config_dir.join("projects").join(enc_cwd);
         std::fs::create_dir_all(&project_dir).expect("create project dir");
         let path = project_dir.join(format!("{session_id}.jsonl"));

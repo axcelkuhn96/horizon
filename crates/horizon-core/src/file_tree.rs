@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use ignore::WalkBuilder;
+use ignore::gitignore::{Gitignore, GitignoreBuilder};
 
 use crate::error::Result;
 use crate::file_search::FileSearchOptions;
@@ -31,12 +31,7 @@ pub const SEARCH_DEBOUNCE: Duration = Duration::from_millis(150);
 /// - the input has been quiescent for at least `debounce` (that is,
 ///   `elapsed_since_edit >= debounce`), satisfying the runner's contract.
 #[must_use]
-pub fn should_dispatch(
-    query: &str,
-    last_dispatched: &str,
-    elapsed_since_edit: Duration,
-    debounce: Duration,
-) -> bool {
+pub fn should_dispatch(query: &str, last_dispatched: &str, elapsed_since_edit: Duration, debounce: Duration) -> bool {
     if query.trim().is_empty() {
         return false;
     }
@@ -69,11 +64,7 @@ pub const GIT_REFRESH_INTERVAL: Duration = Duration::from_millis(1500);
 /// - `elapsed_since_last` is `None` — status has never been refreshed yet;
 /// - `elapsed_since_last >= interval` — the throttle window has elapsed.
 #[must_use]
-pub fn should_refresh_git(
-    elapsed_since_last: Option<Duration>,
-    interval: Duration,
-    focus_regained: bool,
-) -> bool {
+pub fn should_refresh_git(elapsed_since_last: Option<Duration>, interval: Duration, focus_regained: bool) -> bool {
     if focus_regained {
         return true;
     }
@@ -602,10 +593,7 @@ impl FileTreeState {
         }
         // Time since the last edit; if there has been no edit yet, treat it as
         // long-quiescent so a pre-filled query (re-opened panel) can dispatch.
-        let elapsed = self
-            .search
-            .last_edit
-            .map_or(SEARCH_DEBOUNCE, |t| t.elapsed());
+        let elapsed = self.search.last_edit.map_or(SEARCH_DEBOUNCE, |t| t.elapsed());
         if should_dispatch(
             &self.search.query,
             &self.search.last_dispatched,
@@ -613,9 +601,11 @@ impl FileTreeState {
             SEARCH_DEBOUNCE,
         ) {
             self.search.last_dispatched = self.search.query.clone();
-            self.search
-                .runner
-                .start(self.root.clone(), self.search.query.clone(), FileSearchOptions::default());
+            self.search.runner.start(
+                self.root.clone(),
+                self.search.query.clone(),
+                FileSearchOptions::default(),
+            );
         }
         matches!(self.search.runner.poll(), SearchState::Searching)
     }
@@ -786,7 +776,10 @@ mod tests {
         let listed = names(&nodes);
         assert!(listed.contains(&"visible.txt".to_string()));
         assert!(listed.contains(&".gitignore".to_string()));
-        assert!(listed.contains(&"ignored.txt".to_string()), "gitignored file must be shown");
+        assert!(
+            listed.contains(&"ignored.txt".to_string()),
+            "gitignored file must be shown"
+        );
         assert!(find(&nodes, "ignored.txt").expect("ignored.txt").ignored);
         assert!(!find(&nodes, "visible.txt").expect("visible.txt").ignored);
     }
@@ -1046,7 +1039,10 @@ mod tests {
         assert!(!find(&nodes, "src").expect("src").ignored);
 
         // HARD_SKIP still hidden entirely
-        assert!(!listed.contains(&"node_modules".to_string()), "node_modules must stay hidden");
+        assert!(
+            !listed.contains(&"node_modules".to_string()),
+            "node_modules must stay hidden"
+        );
     }
 
     #[test]
@@ -1144,12 +1140,7 @@ mod tests {
     fn should_dispatch_true_when_changed_and_quiescent() {
         // A new, non-empty query that differs from the last dispatched one and
         // has been quiescent long enough must dispatch.
-        assert!(should_dispatch(
-            "needle",
-            "",
-            SEARCH_DEBOUNCE,
-            SEARCH_DEBOUNCE
-        ));
+        assert!(should_dispatch("needle", "", SEARCH_DEBOUNCE, SEARCH_DEBOUNCE));
         assert!(should_dispatch(
             "needle",
             "old",
@@ -1161,23 +1152,13 @@ mod tests {
     #[test]
     fn should_dispatch_false_when_unchanged() {
         // Same query already dispatched: no redundant re-dispatch even once quiescent.
-        assert!(!should_dispatch(
-            "needle",
-            "needle",
-            SEARCH_DEBOUNCE,
-            SEARCH_DEBOUNCE
-        ));
+        assert!(!should_dispatch("needle", "needle", SEARCH_DEBOUNCE, SEARCH_DEBOUNCE));
     }
 
     #[test]
     fn should_dispatch_false_when_empty_or_whitespace() {
         assert!(!should_dispatch("", "", SEARCH_DEBOUNCE, SEARCH_DEBOUNCE));
-        assert!(!should_dispatch(
-            "   ",
-            "",
-            SEARCH_DEBOUNCE,
-            SEARCH_DEBOUNCE
-        ));
+        assert!(!should_dispatch("   ", "", SEARCH_DEBOUNCE, SEARCH_DEBOUNCE));
     }
 
     #[test]
@@ -1511,17 +1492,11 @@ mod tests {
         assert!(state.selected.is_none());
 
         state.select_row(std::path::PathBuf::from("/repo/src"), true);
-        assert_eq!(
-            state.selected,
-            Some((std::path::PathBuf::from("/repo/src"), true))
-        );
+        assert_eq!(state.selected, Some((std::path::PathBuf::from("/repo/src"), true)));
 
         // Selecting a file overwrites the previous selection.
         state.select_row(std::path::PathBuf::from("/repo/main.rs"), false);
-        assert_eq!(
-            state.selected,
-            Some((std::path::PathBuf::from("/repo/main.rs"), false))
-        );
+        assert_eq!(state.selected, Some((std::path::PathBuf::from("/repo/main.rs"), false)));
     }
 
     #[test]

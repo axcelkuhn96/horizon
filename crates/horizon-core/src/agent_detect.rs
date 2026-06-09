@@ -257,30 +257,21 @@ mod tests {
     // (d) --resume followed by a non-uuid (path) → None
     #[test]
     fn cmdline_resume_non_uuid_value() {
-        assert_eq!(
-            session_id_from_cmdline(b"claude\0--resume\0./some/path\0"),
-            None
-        );
+        assert_eq!(session_id_from_cmdline(b"claude\0--resume\0./some/path\0"), None);
     }
 
     // (e) joined --resume=<uuid> form → Some(uuid)
     #[test]
     fn cmdline_resume_equals_form() {
         let cmdline = format!("claude\0--resume={UUID}\0");
-        assert_eq!(
-            session_id_from_cmdline(cmdline.as_bytes()),
-            Some(UUID.to_owned())
-        );
+        assert_eq!(session_id_from_cmdline(cmdline.as_bytes()), Some(UUID.to_owned()));
     }
 
     // (f) extra args surrounding --resume → uuid still found
     #[test]
     fn cmdline_resume_with_surrounding_args() {
         let cmdline = format!("claude\0--model\0sonnet\0--resume\0{UUID}\0--foo\0");
-        assert_eq!(
-            session_id_from_cmdline(cmdline.as_bytes()),
-            Some(UUID.to_owned())
-        );
+        assert_eq!(session_id_from_cmdline(cmdline.as_bytes()), Some(UUID.to_owned()));
     }
 
     // (g) over-long (>128 chars) all-hex value → None

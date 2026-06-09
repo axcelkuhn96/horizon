@@ -198,11 +198,7 @@ fn ascii_lowercase(input: &str) -> String {
 /// Returns [`SearchError::InvalidRegex`] when `opts.regex` is set and `query`
 /// is not a valid regular expression. Per-file IO errors are never propagated;
 /// such files are simply skipped.
-pub fn search_files(
-    root: &Path,
-    query: &str,
-    opts: &FileSearchOptions,
-) -> Result<SearchOutcome, SearchError> {
+pub fn search_files(root: &Path, query: &str, opts: &FileSearchOptions) -> Result<SearchOutcome, SearchError> {
     if query.is_empty() {
         return Ok(SearchOutcome {
             results: Vec::new(),
@@ -219,12 +215,7 @@ pub fn search_files(
         .git_global(false)
         .git_exclude(false)
         .parents(false)
-        .filter_entry(|entry| {
-            entry
-                .file_name()
-                .to_str()
-                .is_none_or(|name| !HARD_SKIP.contains(&name))
-        })
+        .filter_entry(|entry| entry.file_name().to_str().is_none_or(|name| !HARD_SKIP.contains(&name)))
         .build();
 
     let mut results: Vec<FileSearchResult> = Vec::new();
@@ -454,10 +445,7 @@ mod tests {
         let dir = TempDir::new().expect("tempdir");
         write(dir.path(), "a.txt", b"id=42 and id=7\n");
 
-        let regex_opts = FileSearchOptions {
-            regex: true,
-            ..opts()
-        };
+        let regex_opts = FileSearchOptions { regex: true, ..opts() };
         let outcome = search_files(dir.path(), r"id=\d+", &regex_opts).expect("search");
         assert_eq!(outcome.results.len(), 1);
         let matches = &outcome.results[0].matches;
@@ -471,10 +459,7 @@ mod tests {
         let dir = TempDir::new().expect("tempdir");
         write(dir.path(), "a.txt", b"anything\n");
 
-        let regex_opts = FileSearchOptions {
-            regex: true,
-            ..opts()
-        };
+        let regex_opts = FileSearchOptions { regex: true, ..opts() };
         let err = search_files(dir.path(), "(unclosed", &regex_opts).expect_err("should error");
         match err {
             SearchError::InvalidRegex(msg) => assert!(!msg.is_empty()),
@@ -561,7 +546,11 @@ mod tests {
 
         let outcome = search_files(dir.path(), "needle", &opts()).expect("search");
         let paths: Vec<&PathBuf> = outcome.results.iter().map(|r| &r.path).collect();
-        assert_eq!(paths, vec![&dir.path().join("src/main.rs")], "only src/ should be searched");
+        assert_eq!(
+            paths,
+            vec![&dir.path().join("src/main.rs")],
+            "only src/ should be searched"
+        );
     }
 
     #[test]

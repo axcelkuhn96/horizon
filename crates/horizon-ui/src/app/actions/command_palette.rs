@@ -369,10 +369,7 @@ mod tests {
 
     #[test]
     fn search_shortcut_maps_terminal_to_terminal_search() {
-        assert_eq!(
-            search_shortcut_command(Some(PanelKind::Shell)),
-            CommandId::ToggleSearch
-        );
+        assert_eq!(search_shortcut_command(Some(PanelKind::Shell)), CommandId::ToggleSearch);
     }
 
     #[test]

@@ -191,8 +191,7 @@ impl<'a> FileExplorerView<'a> {
         if state.search.active {
             let mut repaint = false;
             state.tick_search();
-            let search_action =
-                crate::file_search_widget::show_search_panel(ui, state, panel_id, &mut repaint);
+            let search_action = crate::file_search_widget::show_search_panel(ui, state, panel_id, &mut repaint);
             if repaint {
                 ui.ctx().request_repaint();
             }
@@ -245,7 +244,14 @@ impl<'a> FileExplorerView<'a> {
                         selection: &mut selection,
                         row_hits: &mut row_hits,
                     };
-                    render_nodes(ui, &state.roots, 0, status.as_deref(), &mut sink, selected_path.as_deref());
+                    render_nodes(
+                        ui,
+                        &state.roots,
+                        0,
+                        status.as_deref(),
+                        &mut sink,
+                        selected_path.as_deref(),
+                    );
                 }
                 ui.add_space(4.0);
             });
@@ -452,7 +458,12 @@ struct RowVisual<'a> {
 /// (rows highlight on hover only, painted independently of these colors), so the
 /// selection-always-wins rule has no row to apply to. If selection is added
 /// later, it must override the value returned here at the call site.
-fn row_colors(is_dir: bool, dir_changed: bool, ignored: bool, decoration: Option<(&str, Color32)>) -> (Color32, Color32) {
+fn row_colors(
+    is_dir: bool,
+    dir_changed: bool,
+    ignored: bool,
+    decoration: Option<(&str, Color32)>,
+) -> (Color32, Color32) {
     if is_dir {
         if dir_changed {
             (theme::PALETTE_GREEN(), theme::PALETTE_GREEN())

@@ -35,7 +35,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 
-use crate::file_search::{search_files, FileSearchOptions, SearchError, SearchOutcome};
+use crate::file_search::{FileSearchOptions, SearchError, SearchOutcome, search_files};
 
 /// Lifecycle of the runner as observed by the UI.
 #[derive(Debug)]

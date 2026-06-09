@@ -503,18 +503,20 @@ fn handle_scrollbar_drag(ui: &mut egui::Ui, panel: &mut Panel, interaction: &Ter
     // Only take a write lock on egui's global data map when an offset was
     // actually stored — the common idle path takes the cheaper read lock.
     if !is_down && !clicked {
-        if ui.ctx().data(|d| d.get_temp::<ScrollbarGrabOffset>(interaction.scrollbar.id).is_some()) {
+        if ui
+            .ctx()
+            .data(|d| d.get_temp::<ScrollbarGrabOffset>(interaction.scrollbar.id).is_some())
+        {
             ui.ctx()
                 .data_mut(|d| d.remove::<ScrollbarGrabOffset>(interaction.scrollbar.id));
         }
         return;
     }
 
-    let Some(pointer_position) = interaction
-        .scrollbar
-        .interact_pointer_pos()
-        .or_else(|| ui.input(|i| i.pointer.interact_pos()).map(|p| transform_pos(from_global, p)))
-    else {
+    let Some(pointer_position) = interaction.scrollbar.interact_pointer_pos().or_else(|| {
+        ui.input(|i| i.pointer.interact_pos())
+            .map(|p| transform_pos(from_global, p))
+    }) else {
         return;
     };
 
@@ -526,7 +528,10 @@ fn handle_scrollbar_drag(ui: &mut egui::Ui, panel: &mut Panel, interaction: &Ter
     // On the first press frame (`drag_started` is true, or no offset stored yet)
     // we record pointer_y − thumb_top so the thumb follows the pointer smoothly.
     let grab_offset = if is_down && !clicked {
-        if let Some(stored) = ui.ctx().data(|d| d.get_temp::<ScrollbarGrabOffset>(interaction.scrollbar.id)) {
+        if let Some(stored) = ui
+            .ctx()
+            .data(|d| d.get_temp::<ScrollbarGrabOffset>(interaction.scrollbar.id))
+        {
             stored.0
         } else {
             // First press frame: measure where on the thumb the pointer landed.
@@ -545,8 +550,7 @@ fn handle_scrollbar_drag(ui: &mut egui::Ui, panel: &mut Panel, interaction: &Ter
     };
 
     let effective_pos = Pos2::new(pointer_position.x, pointer_position.y - grab_offset);
-    let target_scrollback =
-        scrollbar_pointer_to_scrollback(effective_pos, track_rect, thumb_h, history_size);
+    let target_scrollback = scrollbar_pointer_to_scrollback(effective_pos, track_rect, thumb_h, history_size);
 
     panel.set_scrollback(target_scrollback);
     ui.ctx().request_repaint();
