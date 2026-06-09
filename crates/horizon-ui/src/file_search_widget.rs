@@ -44,6 +44,8 @@ pub enum SearchUiAction {
     /// User clicked a match row — reveal this file in the tree (expand its
     /// ancestor directories and scroll it into view).
     Reveal(PathBuf),
+    /// User double-clicked a result row — open the file in VS Code.
+    Open(PathBuf),
 }
 
 /// One flattened, indexable row of the results list. The grouped
@@ -181,6 +183,21 @@ pub fn format_match_line(line_text: &str, span: (usize, usize), max_chars: usize
 #[must_use]
 pub fn search_close_requested(escape_pressed: bool, close_clicked: bool) -> bool {
     escape_pressed || close_clicked
+}
+
+/// Maps a result-row interaction to its action. Pure so click routing is
+/// unit-tested without an egui context. Double-click opens the file in the
+/// editor; a single click reveals it in the tree. Double-click wins if both are
+/// reported in the same frame.
+#[must_use]
+pub fn result_row_action(path: &Path, clicked: bool, double_clicked: bool) -> Option<SearchUiAction> {
+    if double_clicked {
+        Some(SearchUiAction::Open(path.to_path_buf()))
+    } else if clicked {
+        Some(SearchUiAction::Reveal(path.to_path_buf()))
+    } else {
+        None
+    }
 }
 
 /// Renders the content-search panel for `state` and returns an action for the
@@ -384,7 +401,8 @@ fn render_row(ui: &mut egui::Ui, row: &SearchRow<'_>, action: &mut Option<Search
     }
 }
 
-/// Renders a clickable file-path header row (icon + compact path).
+/// Renders a clickable file-path header row (icon + compact path). A single
+/// click reveals the file in the tree; a double-click opens it in VS Code.
 fn render_file_header(ui: &mut egui::Ui, path: &Path, action: &mut Option<SearchUiAction>) {
     let header = ui.allocate_response(Vec2::new(ui.available_width(), RESULT_ROW_HEIGHT), egui::Sense::click());
     let header_rect = header.rect;
@@ -409,13 +427,15 @@ fn render_file_header(ui: &mut egui::Ui, path: &Path, action: &mut Option<Search
         egui::FontId::proportional(12.0),
         theme::FG_SOFT(),
     );
-    if header.clicked() && action.is_none() {
-        *action = Some(SearchUiAction::Reveal(path.to_path_buf()));
+    if action.is_none()
+        && let Some(a) = result_row_action(path, header.clicked(), header.double_clicked())
+    {
+        *action = Some(a);
     }
 }
 
-/// Renders a single match row (line-number gutter + highlighted line). Clicking
-/// reveals the owning file in the tree.
+/// Renders a single match row (line-number gutter + highlighted line). A single
+/// click reveals the owning file in the tree; a double-click opens it in VS Code.
 fn render_match_row(
     ui: &mut egui::Ui,
     path: &Path,
@@ -451,8 +471,10 @@ fn render_match_row(
     );
     // Line text (highlighting the matched span when visible).
     paint_match_text(&painter, egui::Pos2::new(text_x, mid_y), &display);
-    if row.clicked() && action.is_none() {
-        *action = Some(SearchUiAction::Reveal(path.to_path_buf()));
+    if action.is_none()
+        && let Some(a) = result_row_action(path, row.clicked(), row.double_clicked())
+    {
+        *action = Some(a);
     }
 }
 
@@ -713,5 +735,27 @@ mod tests {
         assert!(search_close_requested(true, true));
         // Neither does nothing.
         assert!(!search_close_requested(false, false));
+    }
+
+    #[test]
+    fn result_click_maps_to_reveal_double_click_to_open() {
+        let p = Path::new("src/main.rs");
+        // Double-click opens in the editor.
+        assert!(matches!(
+            result_row_action(p, false, true),
+            Some(SearchUiAction::Open(ref q)) if q == p
+        ));
+        // Single click reveals in the tree.
+        assert!(matches!(
+            result_row_action(p, true, false),
+            Some(SearchUiAction::Reveal(ref q)) if q == p
+        ));
+        // No interaction → no action.
+        assert!(result_row_action(p, false, false).is_none());
+        // Double-click takes precedence when both are reported the same frame.
+        assert!(matches!(
+            result_row_action(p, true, true),
+            Some(SearchUiAction::Open(_))
+        ));
     }
 }

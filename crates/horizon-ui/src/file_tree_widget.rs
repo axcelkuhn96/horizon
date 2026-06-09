@@ -200,6 +200,9 @@ impl<'a> FileExplorerView<'a> {
                 Some(crate::file_search_widget::SearchUiAction::Reveal(path)) => {
                     reveal_in_tree(&mut state.roots, &state.root, &path);
                 }
+                Some(crate::file_search_widget::SearchUiAction::Open(path)) => {
+                    open_in_vscode(&path, &mut state.code_missing);
+                }
                 None => {}
             }
             // No stale row hit-map while searching: drops resolve to the root.
