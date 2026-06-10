@@ -852,6 +852,8 @@ const PLATFORM_USES_LOGIN_SHELL: bool = cfg!(any(
 pub(super) const fn platform_default_shell() -> &'static str {
     if cfg!(target_os = "macos") {
         "/bin/zsh"
+    } else if cfg!(windows) {
+        "powershell.exe"
     } else {
         "/bin/bash"
     }
