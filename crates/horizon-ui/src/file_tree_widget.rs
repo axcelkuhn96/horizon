@@ -269,6 +269,9 @@ impl<'a> FileExplorerView<'a> {
 
         // Snapshot the selected path before the immutable borrow in render_nodes.
         let selected_path: Option<PathBuf> = state.selected.as_ref().map(|(p, _)| p.clone());
+        // Snapshot the tree root so the per-row right-click menu can compute a
+        // VS Code-style relative path without re-borrowing `state` mid-render.
+        let root_path: PathBuf = state.root.clone();
 
         let scroll_output = ScrollArea::vertical()
             .max_height(max_h)
@@ -291,6 +294,7 @@ impl<'a> FileExplorerView<'a> {
                         status.as_deref(),
                         &mut sink,
                         selected_path.as_deref(),
+                        &root_path,
                     );
                 }
                 ui.add_space(4.0);
@@ -411,9 +415,10 @@ fn render_nodes(
     status: Option<&GitStatus>,
     sink: &mut RenderSink<'_>,
     selected: Option<&Path>,
+    root: &Path,
 ) {
     for node in nodes {
-        render_node(ui, node, depth, status, sink, selected);
+        render_node(ui, node, depth, status, sink, selected, root);
     }
 }
 
@@ -424,12 +429,13 @@ fn render_node(
     status: Option<&GitStatus>,
     sink: &mut RenderSink<'_>,
     selected: Option<&Path>,
+    root: &Path,
 ) {
     let is_dir = node.is_dir;
     let is_open = node.children.is_some();
     let is_selected = selected.is_some_and(|s| s == node.path.as_path());
 
-    let response = render_row(ui, node, depth, status, sink.row_hits, is_selected);
+    let response = render_row(ui, node, depth, status, sink.row_hits, is_selected, root);
 
     // Selection is the SINGLE source of truth here: any single click selects the
     // row (file or folder), recorded independently of the primary action below.
@@ -454,7 +460,7 @@ fn render_node(
     }
 
     if let Some(children) = &node.children {
-        render_nodes(ui, children, depth + 1, status, sink, selected);
+        render_nodes(ui, children, depth + 1, status, sink, selected, root);
     }
 }
 
@@ -542,6 +548,7 @@ fn render_row(
     status: Option<&GitStatus>,
     row_hits: &mut Vec<RowHit>,
     is_selected: bool,
+    root: &Path,
 ) -> RowResponse {
     let decoration = status.and_then(|s| status_decoration(status_for_path(s, &node.path)));
 
@@ -562,6 +569,10 @@ fn render_row(
     };
 
     let response = paint_tree_row(ui, &visual, is_selected);
+
+    // Right-click: VS Code-style path actions. Copying does not mutate tree
+    // state, so we act inline inside the menu rather than deferring a TreeAction.
+    file_row_context_menu(&response, &node.path, root);
 
     // Record the row's screen-space hit box for the OS-file-drop handler. The
     // tree paints inside a transform-layer Area, so map the local rect to global
@@ -588,6 +599,43 @@ fn render_row(
         clicked: response.clicked(),
         primary_action,
     }
+}
+
+/// VS Code-style right-click menu for a file-tree row. Offers Copy Path
+/// (absolute), Copy Relative Path (relative to the explorer root), and Copy
+/// Name. Copying touches only the system clipboard — no tree mutation — so it
+/// runs inline here, mirroring how the terminal context menu copies selections.
+fn file_row_context_menu(response: &egui::Response, path: &Path, root: &Path) {
+    response.context_menu(|ui| {
+        ui.set_min_width(190.0);
+
+        if ui.add(tree_menu_button("Copy Path")).clicked() {
+            ui.ctx().copy_text(path.to_string_lossy().into_owned());
+            ui.close();
+        }
+        if ui.add(tree_menu_button("Copy Relative Path")).clicked() {
+            let relative = path.strip_prefix(root).unwrap_or(path);
+            ui.ctx().copy_text(relative.to_string_lossy().into_owned());
+            ui.close();
+        }
+        if ui.add(tree_menu_button("Copy Name")).clicked() {
+            let name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            ui.ctx().copy_text(name);
+            ui.close();
+        }
+    });
+}
+
+/// A context-menu row button styled to match the terminal menu: flat at rest,
+/// subtle hover fill, spanning the menu width.
+fn tree_menu_button(label: &str) -> egui::Button<'static> {
+    egui::Button::new(RichText::new(label).size(12.0).color(theme::FG_SOFT()))
+        .fill(Color32::TRANSPARENT)
+        .corner_radius(6)
+        .min_size(Vec2::new(190.0, 0.0))
 }
 
 /// Paints one fully-manual tree row at explicit x offsets and returns the row's
