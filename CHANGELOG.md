@@ -3,6 +3,15 @@
 Fork pessoal do [peters/horizon](https://github.com/peters/horizon) com melhorias de navegação e UX.
 Patch aditivo sobre o upstream **v0.2.6**.
 
+## [0.3.3] — 2026-06-10
+
+### Windows / portabilidade
+- **Terminais funcionam no Windows**: o shell padrão passou a ser resolvido por plataforma — no Windows usa **`powershell.exe`** (antes caía no `else` e tentava `/bin/bash`, que não existe, e todo painel Shell morria com *"PTY error: o sistema não pode encontrar o arquivo especificado"*). macOS (`/bin/zsh`) e Linux (`/bin/bash`) seguem iguais, e a variável `SHELL` continua tendo prioridade quando definida. Vale para Shell e também para os painéis de agente (Claude/Codex/etc.).
+- **Paste de imagem agora funciona no Windows e no macOS** (antes era só Linux): colar (`Ctrl+V` ou botão direito → **Paste Image**) com uma imagem no clipboard salva um PNG temporário em `~/.horizon/pasted/` e injeta o **caminho** do arquivo no terminal — ideal para o Claude Code. A leitura do clipboard usa `arboard`, que é cross-platform; SOs exóticos continuam com o stub que preserva o paste de texto.
+
+### File Explorer
+- **Menu de botão direito com "Copy Path"** (estilo VSCode): clicar com o botão direito em qualquer arquivo/pasta da árvore abre um menu com **Copy Path** (caminho absoluto), **Copy Relative Path** (relativo à raiz do workspace) e **Copy Name** (só o nome). Reusa o mesmo seam de clipboard do menu do terminal.
+
 ## [0.3.2] — 2026-06-09
 
 ### File Explorer
