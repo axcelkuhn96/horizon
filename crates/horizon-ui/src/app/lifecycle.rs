@@ -12,6 +12,7 @@ use super::speech::SpeechEvent;
 use super::{HorizonApp, WS_BG_PAD, WS_TITLE_HEIGHT, attention_feed};
 
 const SPEECH_RELEASE_OWNERSHIP_TIMEOUT: Duration = Duration::from_secs(3);
+const SPEECH_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct HoldHotkeyTransition {
@@ -448,26 +449,44 @@ impl HorizonApp {
             // Keep frames coming so the pulse animates and poll() runs
             // promptly even when the terminal is otherwise idle, but bounded
             // so a long transcription doesn't spin the render loop.
-            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+            ctx.request_repaint_after(SPEECH_POLL_INTERVAL);
         }
-        // Publish the selected backend for the settings UI (relevant when
-        // the config says `auto`). Clear it while unknown so a stale value
-        // from before a live config rebuild is not displayed.
-        match speech.active_backend() {
+
+        self.poll_speech_runtime(ctx, events);
+    }
+
+    /// Drain speech worker events even while the engine is otherwise idle.
+    /// Startup preloads complete in `State::Idle`, so they need their own
+    /// bounded repaint loop and must be polled from views that return before
+    /// normal input processing.
+    pub(super) fn poll_speech_runtime(&mut self, ctx: &Context, mut events: Vec<SpeechEvent>) {
+        let Some(speech) = self.speech.as_mut() else {
+            ctx.data_mut(|data| data.remove_temp::<String>(egui::Id::new("speech_active_backend")));
+            self.inject_speech_events(events);
+            return;
+        };
+
+        events.extend(speech.poll());
+        if speech.has_pending_preloads() {
+            ctx.request_repaint_after(SPEECH_POLL_INTERVAL);
+        }
+        // Publish after polling so a preload success is visible to settings in
+        // the same frame that drains its worker event.
+        let active_backend = speech.active_backend().map(str::to_owned);
+        // Capture/worker failures can end Recording during poll(), after the
+        // transition above ran. Drop ownership before rendering can start a
+        // new mic-button recording in this same frame.
+        let recording_finished = speech.recording_target().is_none();
+
+        match active_backend {
             Some(backend) => {
-                let backend = backend.to_string();
                 ctx.data_mut(|data| data.insert_temp(egui::Id::new("speech_active_backend"), backend));
             }
             None => {
                 ctx.data_mut(|data| data.remove_temp::<String>(egui::Id::new("speech_active_backend")));
             }
         }
-
-        events.extend(speech.poll());
-        // Capture/worker failures can end Recording during poll(), after the
-        // transition above ran. Drop ownership before rendering can start a
-        // new mic-button recording in this same frame.
-        if speech.recording_target().is_none() {
+        if recording_finished {
             self.speech_engaged_profile = None;
         }
         self.inject_speech_events(events);
@@ -514,6 +533,8 @@ impl HorizonApp {
     /// otherwise be invisible (ignored presses, empty transcripts, errors).
     pub(super) fn render_speech_notice(&mut self, ctx: &Context) {
         const NOTICE_TTL: Duration = Duration::from_secs(5);
+        const NOTICE_MAX_WIDTH: f32 = 720.0;
+        const NOTICE_VIEWPORT_MARGIN: f32 = 48.0;
         let Some(notice) = &self.speech_notice else {
             return;
         };
@@ -528,15 +549,19 @@ impl HorizonApp {
         } else {
             ("🎤", theme::FG())
         };
+        let max_width = (ctx.content_rect().width() - NOTICE_VIEWPORT_MARGIN).clamp(1.0, NOTICE_MAX_WIDTH);
         egui::Area::new(egui::Id::new("speech_notice_overlay"))
             .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -24.0))
             .order(egui::Order::Foreground)
             .interactable(false)
             .show(ctx, |ui| {
+                ui.set_max_width(max_width);
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
-                    ui.horizontal(|ui| {
+                    ui.horizontal_top(|ui| {
                         ui.label(egui::RichText::new(icon).color(tint).size(12.0));
-                        ui.label(egui::RichText::new(&notice.message).color(theme::FG()).size(12.0));
+                        ui.add(
+                            egui::Label::new(egui::RichText::new(&notice.message).color(theme::FG()).size(12.0)).wrap(),
+                        );
                     });
                 });
             });
@@ -942,6 +967,155 @@ mod tests {
         app.finalize_frame(&ctx, false, 0, 0);
 
         assert!(repaint_requests.load(Ordering::Relaxed) > 0);
+    }
+
+    #[cfg(feature = "speech")]
+    #[test]
+    fn empty_board_keeps_polling_preloads_and_publishes_success_in_the_drain_frame() {
+        let ctx = Context::default();
+        let mut app = test_app();
+        let (speech, channels) = crate::app::speech::SpeechSystem::with_test_preload();
+        app.speech = Some(speech);
+        app.theme_applied = true;
+        assert!(app.board.panels.is_empty());
+
+        let mut frame = eframe::Frame::_new_kittest();
+        // Warm the context once; a context's first pass requests an immediate
+        // repaint for its own initialization, which masks later deadlines.
+        // Honor immediate follow-up passes like an integration backend until
+        // the app exposes its next delayed deadline.
+        let mut repaint_delay = Duration::ZERO;
+        for _ in 0..8 {
+            let output = ctx.run(egui::RawInput::default(), |ctx| {
+                eframe::App::update(&mut app, ctx, &mut frame);
+            });
+            repaint_delay = output
+                .viewport_output
+                .get(&egui::ViewportId::ROOT)
+                .expect("root viewport output")
+                .repaint_delay;
+            if !repaint_delay.is_zero() {
+                break;
+            }
+        }
+
+        assert!(
+            app.speech
+                .as_ref()
+                .is_some_and(super::super::speech::SpeechSystem::has_pending_preloads)
+        );
+        assert!(!repaint_delay.is_zero());
+        assert!(repaint_delay <= super::SPEECH_POLL_INTERVAL);
+
+        channels.complete_preload("Metal");
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            eframe::App::update(&mut app, ctx, &mut frame);
+        });
+
+        assert!(
+            !app.speech
+                .as_ref()
+                .is_some_and(super::super::speech::SpeechSystem::has_pending_preloads)
+        );
+        assert_eq!(
+            ctx.data(|data| data.get_temp::<String>(egui::Id::new("speech_active_backend"))),
+            Some("Metal".to_string())
+        );
+    }
+
+    #[cfg(feature = "speech")]
+    #[test]
+    fn startup_chooser_drains_and_renders_preload_failure() {
+        use horizon_core::{StartupChooser, StartupPromptReason};
+
+        let ctx = Context::default();
+        let mut app = test_app();
+        app.startup_chooser = Some(crate::app::StartupChooserState::new(StartupChooser {
+            reason: StartupPromptReason::LiveConflict,
+            config_path: "/tmp/horizon-config.yaml".to_string(),
+            sessions: Vec::new(),
+        }));
+        let (speech, channels) = crate::app::speech::SpeechSystem::with_test_preload();
+        app.speech = Some(speech);
+        channels.fail_preload("model not found");
+
+        let mut frame = eframe::Frame::_new_kittest();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            eframe::App::update(&mut app, ctx, &mut frame);
+        });
+
+        assert!(app.startup_chooser.is_some());
+        assert!(app.speech_notice.as_ref().is_some_and(|notice| {
+            notice.error && notice.message.contains("profile 1") && notice.message.contains("model not found")
+        }));
+        assert!(
+            !app.speech
+                .as_ref()
+                .is_some_and(super::super::speech::SpeechSystem::has_pending_preloads)
+        );
+    }
+
+    #[cfg(feature = "speech")]
+    #[test]
+    fn startup_loading_view_drains_and_renders_preload_failure() {
+        let ctx = Context::default();
+        let mut app = test_app();
+        let (bootstrap_tx, bootstrap_rx) = std::sync::mpsc::channel();
+        app.startup_receiver = Some(bootstrap_rx);
+        let (speech, channels) = crate::app::speech::SpeechSystem::with_test_preload();
+        app.speech = Some(speech);
+        channels.fail_preload("invalid model");
+
+        let mut frame = eframe::Frame::_new_kittest();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            eframe::App::update(&mut app, ctx, &mut frame);
+        });
+
+        assert!(app.startup_receiver.is_some());
+        assert!(app.speech_notice.as_ref().is_some_and(|notice| {
+            notice.error && notice.message.contains("profile 1") && notice.message.contains("invalid model")
+        }));
+        assert!(
+            !app.speech
+                .as_ref()
+                .is_some_and(super::super::speech::SpeechSystem::has_pending_preloads)
+        );
+        drop(bootstrap_tx);
+    }
+
+    #[test]
+    fn long_speech_notice_stays_within_a_narrow_viewport() {
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(880.0, 632.0));
+        let ctx = Context::default();
+        let mut app = test_app();
+        app.show_speech_notice(
+            "Speech input error: preloading the `Default` speech model failed: \
+             failed to load a model from a deliberately long temporary path because the file was not found",
+            true,
+        );
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                ..egui::RawInput::default()
+            },
+            |ctx| app.render_speech_notice(ctx),
+        );
+        let output = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                ..egui::RawInput::default()
+            },
+            |ctx| app.render_speech_notice(ctx),
+        );
+        let bounds = output
+            .shapes
+            .iter()
+            .map(|shape| shape.shape.visual_bounding_rect())
+            .filter(|bounds| bounds.is_finite() && bounds.is_positive())
+            .reduce(egui::Rect::union)
+            .expect("speech notice should paint");
+
+        assert!(screen.expand(1.0).contains_rect(bounds), "notice bounds {bounds:?}");
     }
 
     /// Root focus may move directly into a detached Horizon viewport. Keep
