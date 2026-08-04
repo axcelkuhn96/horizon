@@ -392,7 +392,7 @@ fn render_header(ui: &mut egui::Ui, state: &FileTreeState, refresh: &mut bool, s
             egui::Pos2::new(header_rect.min.x, sep_y),
             egui::Pos2::new(header_rect.max.x, sep_y),
         ],
-        egui::Stroke::new(1.0, theme::BORDER_SUBTLE()),
+        egui::Stroke::new(1.0_f32, theme::BORDER_SUBTLE()),
     );
 }
 

@@ -226,12 +226,12 @@ impl HorizonApp {
                             Pos2::new(handle_rect.center().x - grip_half_w, gy),
                             Pos2::new(handle_rect.center().x + grip_half_w, gy),
                         ],
-                        Stroke::new(1.0, grip_color),
+                        Stroke::new(1.0_f32, grip_color),
                     );
                 }
                 let edge_top = Pos2::new(strip_rect.max.x, strip_rect.min.y);
                 let edge_bottom = Pos2::new(strip_rect.max.x, strip_rect.max.y);
-                painter.line_segment([edge_top, edge_bottom], Stroke::new(1.0, theme::BORDER_SUBTLE()));
+                painter.line_segment([edge_top, edge_bottom], Stroke::new(1.0_f32, theme::BORDER_SUBTLE()));
                 ui.advance_cursor_after_rect(strip_rect);
                 if hovered {
                     ui.ctx().set_cursor_icon(CursorIcon::PointingHand);

@@ -1,14 +1,17 @@
 > ## 🛠️ Fork de [@axcelkuhn96](https://github.com/axcelkuhn96)
 >
-> Fork pessoal do [peters/horizon](https://github.com/peters/horizon) com melhorias de **navegação e UX** que eu adicionei. CHANGELOG completo em [CHANGELOG.md](CHANGELOG.md).
+> Fork pessoal do [peters/horizon](https://github.com/peters/horizon) com melhorias de **navegação e UX** que eu adicionei. Sincronizado com o **upstream v0.2.7** (fixes de seleção/scroll do terminal, janelas destacadas, input não-ASCII no X11 — speech/minimap do upstream ficam de fora do build padrão). CHANGELOG completo em [CHANGELOG.md](CHANGELOG.md).
 >
 > **O que eu fiz:**
 > - **Navegação por teclado** entre terminais do workspace (`Ctrl+Shift+Setas`) com foco de digitação imediato (sem mexer no zoom).
-> - **File Explorer** (painel "Files"): árvore de arquivos estilo VSCode com ícones por tipo (Nerd Font), cores de status do git (U/M/A/D), filtro "só não-commitados" agrupado por pasta, e duplo clique abre o arquivo no VS Code. Agora também: **busca de conteúdo** (`Ctrl+Shift+F` com o painel focado), **arrastar/`Ctrl+V`** pra copiar arquivos pra dentro de uma pasta, **arquivos ignorados** (gitignored, ex.: `temp/`, `tmp/`) aparecem **esmaecidos** em vez de sumir, e as **cores de git atualizam sozinhas** (sem precisar dar refresh).
+> - **File Explorer** (painel "Files"): árvore de arquivos estilo VSCode com ícones por tipo (Nerd Font), cores de status do git (U/M/A/D), filtro "só não-commitados" agrupado por pasta, e duplo clique abre o arquivo no VS Code. Agora também: **busca de conteúdo** (`Ctrl+Shift+F` com o painel focado, fecha com `Esc`/X), **arrastar/`Ctrl+V`** pra copiar arquivos pra dentro de uma pasta, **arquivos ignorados** (gitignored, ex.: `temp/`, `tmp/`) aparecem **esmaecidos** em vez de sumir, as **cores de git atualizam sozinhas** (sem precisar dar refresh), e **botão direito** com **Copy Path / Copy Relative Path / Copy Name** (estilo VSCode).
 > - **Pan no touchpad** configurável (dois dedos / `Tab`+dois dedos / toggle `Ctrl+Shift+P`) movendo o canvas sobre os terminais.
 > - **Auto-hide da barra lateral**, com a área liberada virando canvas usável.
 > - **Collapse** por terminal (titlebar) e por grupo de workspace na barra lateral — persistentes.
-> - **Menu de contexto** (botão direito) nos terminais: Copy / Paste / **Paste de imagem** (cola o caminho do print — útil pro Claude Code).
+> - **Menu de contexto** (botão direito) nos terminais: Copy / Paste / **Paste de imagem** (cola o caminho do print — útil pro Claude Code; funciona em Linux, Windows e macOS).
+> - **Terminal**: `Ctrl+click` num caminho de arquivo (inclusive relativo) abre no VS Code; **scrollbar arrastável** pra navegar o scrollback; painel morto avisa "Exited" e reinicia com `Ctrl+Shift+R`.
+> - **Shell claude/claude2 com auto-resume** da sessão ao restaurar o board.
+> - **Windows**: shell padrão `powershell.exe` (terminais funcionam out-of-the-box).
 > - **Layout organizado** dos terminais (2 empilhados + 1 alto, alinhado) e nova paleta de cores ("Ember Forge").
 >
 > ### ⌨️ Atalhos & gestos novos (deste fork)
@@ -28,6 +31,10 @@
 > | Caret ▼/▶ no cabeçalho do workspace (sidebar) | Dobra/expande a lista de terminais daquele workspace |
 > | Botão direito no terminal | Menu: Copy / Paste / **Paste Image** |
 > | `Ctrl+V` com imagem no clipboard | Cola o caminho de um PNG temporário (útil pro Claude Code) |
+> | `Ctrl+click` em caminho de arquivo no terminal | Abre o arquivo no VS Code (funciona com caminho relativo) |
+> | Arrastar a scrollbar do terminal | Navega o scrollback |
+> | `Ctrl+Shift+R` em painel morto/desconectado | Reinicia o processo (shell ou reconexão SSH) |
+> | Botão direito em arquivo no painel Files | Menu: **Copy Path / Copy Relative Path / Copy Name** |
 >
 > Configs em `~/.horizon/config.yaml`: seção `input` (`scroll_pans_over_panels`, `pan_modifier`) e `overlays.sidebar_auto_hide`.
 >

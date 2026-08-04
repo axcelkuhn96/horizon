@@ -217,7 +217,7 @@ pub(super) fn paint_panel_chrome(ui: &mut egui::Ui, chrome: PanelChrome<'_>) {
                 Pos2::new(chrome.titlebar_rect.min.x + 8.0, y),
                 Pos2::new(chrome.titlebar_rect.max.x - 8.0, y),
             ],
-            Stroke::new(1.0, theme::alpha(theme::BORDER_STRONG(), 120)),
+            Stroke::new(1.0_f32, theme::alpha(theme::BORDER_STRONG(), 120)),
         );
     }
 
@@ -404,7 +404,7 @@ fn paint_close_and_resize_controls(
         return;
     }
 
-    let handle_stroke = Stroke::new(1.0, theme::alpha(theme::FG_DIM(), 170));
+    let handle_stroke = Stroke::new(1.0_f32, theme::alpha(theme::FG_DIM(), 170));
     painter.line_segment(
         [
             resize_rect.right_bottom(),
@@ -668,7 +668,7 @@ fn paint_process_exited_badge(
     painter.rect_stroke(
         badge_rect,
         CornerRadius::same(4),
-        Stroke::new(1.0, theme::alpha(color, 140)),
+        Stroke::new(1.0_f32, theme::alpha(color, 140)),
         StrokeKind::Inside,
     );
     painter.text(badge_rect.center(), egui::Align2::CENTER_CENTER, label, font, color);

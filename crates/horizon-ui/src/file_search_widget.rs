@@ -296,7 +296,7 @@ fn show_search_panel_inner(
             egui::Pos2::new(ui.max_rect().min.x, sep_y),
             egui::Pos2::new(ui.max_rect().max.x, sep_y),
         ],
-        egui::Stroke::new(1.0, theme::BORDER_SUBTLE()),
+        egui::Stroke::new(1.0_f32, theme::BORDER_SUBTLE()),
     );
     ui.add_space(4.0);
 
@@ -362,7 +362,7 @@ fn show_search_panel_inner(
             egui::Pos2::new(ui.max_rect().min.x, bot_y),
             egui::Pos2::new(ui.max_rect().max.x, bot_y),
         ],
-        egui::Stroke::new(1.0, theme::BORDER_SUBTLE()),
+        egui::Stroke::new(1.0_f32, theme::BORDER_SUBTLE()),
     );
     ui.add_space(2.0);
 }

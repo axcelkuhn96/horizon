@@ -311,7 +311,7 @@ fn render_process_exited_banner(ui: &egui::Ui, body: egui::Rect) {
     );
     painter.line_segment(
         [banner.left_top(), banner.right_top()],
-        Stroke::new(1.0, theme::alpha(red, 160)),
+        Stroke::new(1.0_f32, theme::alpha(red, 160)),
     );
     painter.text(
         banner.center(),
