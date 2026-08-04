@@ -18,6 +18,7 @@ mod settings;
 mod shortcut_inventory;
 pub(crate) mod shortcuts;
 mod sidebar;
+pub(crate) mod speech;
 mod ssh_upload;
 mod startup_session;
 mod updates;
@@ -35,7 +36,7 @@ use egui::{Color32, Context, Pos2, Rect, Vec2, ViewportId};
 use horizon_core::{
     AgentSessionCatalog, AppShortcuts, AppearanceTheme, Board, CanvasViewState, Config, GitWatcher, ManagedInstall,
     PanelId, PresetConfig, RemoteHostCatalog, ResolvedSession, RuntimeState, SessionLease, SessionStore,
-    ShortcutModifiers, ShutdownProgress, StartupChooser, StartupDecision, WindowConfig, WorkspaceId,
+    ShortcutBinding, ShortcutModifiers, ShutdownProgress, StartupChooser, StartupDecision, WindowConfig, WorkspaceId,
 };
 
 use self::canvas::CanvasGridCache;
@@ -48,7 +49,7 @@ use super::input;
 use super::primary_selection::PrimarySelection;
 use super::remote_hosts_overlay::RemoteHostsOverlay;
 use super::search_overlay::SearchOverlay;
-use super::terminal_widget::TerminalGridCache;
+use super::terminal_widget::{TerminalGridCache, TerminalSelectionDragState};
 use super::theme;
 
 const TOOLBAR_HEIGHT: f32 = 46.0;
@@ -146,6 +147,29 @@ impl DetachedWorkspaceViewportState {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct HeldSpeechBinding {
+    binding: ShortcutBinding,
+    release_deadline: Option<Instant>,
+}
+
+impl HeldSpeechBinding {
+    const fn new(binding: ShortcutBinding) -> Self {
+        Self {
+            binding,
+            release_deadline: None,
+        }
+    }
+}
+
+/// Transient dictation feedback shown bottom-center: outcomes that would
+/// otherwise be invisible (ignored presses, empty transcripts, errors).
+struct SpeechNotice {
+    message: String,
+    error: bool,
+    shown_at: Instant,
+}
+
 #[allow(clippy::struct_excessive_bools)]
 pub struct HorizonApp {
     board: Board,
@@ -175,14 +199,35 @@ pub struct HorizonApp {
     /// panning. See [`effective_scroll_modifiers`].
     latched_scroll_modifiers: egui::Modifiers,
     observed_keyboard_inputs: input::ObservedKeyboardInputs,
+    ime_commit_normalizer: input::ImeCommitNormalizer,
     frame_keyboard_events: HashMap<ViewportId, Vec<input::FrameKeyEvent>>,
     terminal_keyboard_events: Vec<input::TerminalInputEvent>,
+    speech: Option<speech::SpeechSystem>,
+    /// Every push-to-talk chord currently held (used to keep their key
+    /// events, repeats, and releases out of the terminal input stream —
+    /// multiple profile keys can be down simultaneously).
+    speech_held_bindings: Vec<HeldSpeechBinding>,
+    /// The profile whose chord press started the active hold-mode recording;
+    /// releases only stop a recording when set (a no-op press must not stop a
+    /// mic-button recording).
+    speech_engaged_profile: Option<usize>,
+    /// Escape was consumed to cancel a recording this frame.
+    speech_escape_cancelled: bool,
+    /// The cancel-Escape's release has not yet been seen; it must also be
+    /// kept out of the terminal stream (kitty release reporting).
+    speech_escape_release_pending: bool,
+    speech_escape_release_deadline: Option<Instant>,
+    speech_notice: Option<SpeechNotice>,
+    /// Whether any Horizon viewport (root or detached) reported focus this
+    /// frame; evaluated at end of frame to cancel unattended recordings.
+    any_viewport_focused: bool,
     panel_screen_rects: HashMap<PanelId, Rect>,
     terminal_body_screen_rects: HashMap<PanelId, Rect>,
     panel_screen_order: Vec<PanelId>,
     panel_render_order: Vec<(PanelId, usize)>,
     workspace_colors: Vec<(WorkspaceId, Color32)>,
     primary_selection: PrimarySelection,
+    terminal_selection_drag: TerminalSelectionDragState,
     terminal_grid_cache: HashMap<PanelId, TerminalGridCache>,
     editor_preview_cache: HashMap<PanelId, MarkdownPreviewCache>,
     canvas_grid_cache: CanvasGridCache,
@@ -228,6 +273,7 @@ pub struct HorizonApp {
     last_session_catalog_refresh: Option<Instant>,
     last_terminal_output_at: Option<Instant>,
     settings: Option<SettingsEditor>,
+    speech_model_info_cache: settings::SpeechModelInfoCache,
     session_manager: Option<RuntimeSessionManagerState>,
     managed_install: Option<ManagedInstall>,
     surge_update_check_rx: Option<Receiver<UpdateCheckMessage>>,
@@ -353,6 +399,14 @@ impl HorizonApp {
             shortcuts: bootstrap.shortcuts,
             resolved_pan_modifier: resolve_pan_modifier(config),
             scroll_pans_over_panels: config.input.scroll_pans_over_panels,
+            speech: speech::SpeechSystem::from_config(&config.features.speech),
+            speech_held_bindings: Vec::new(),
+            speech_engaged_profile: None,
+            speech_escape_cancelled: false,
+            speech_escape_release_pending: false,
+            speech_escape_release_deadline: None,
+            speech_notice: None,
+            any_viewport_focused: true,
             presets: config.resolved_presets(),
             window_config: config.window.clone(),
             detached_workspaces: BTreeMap::new(),
@@ -369,6 +423,7 @@ impl HorizonApp {
             last_session_catalog_refresh: None,
             last_terminal_output_at: Some(Instant::now()),
             settings: None,
+            speech_model_info_cache: settings::SpeechModelInfoCache::new(),
             session_manager: None,
             managed_install: bootstrap.managed_install,
             surge_update_check_rx: None,
@@ -394,11 +449,13 @@ impl HorizonApp {
             pending_tab_pan_key: CanvasPanSpaceKeyState::Idle,
             latched_scroll_modifiers: egui::Modifiers::default(),
             observed_keyboard_inputs: bootstrap.observed_keyboard_inputs,
+            ime_commit_normalizer: input::ImeCommitNormalizer::default(),
             frame_keyboard_events: HashMap::new(),
             terminal_keyboard_events: Vec::new(),
             git_watchers: HashMap::new(),
             terminal_body_screen_rects: HashMap::new(),
             primary_selection: PrimarySelection::new(),
+            terminal_selection_drag: TerminalSelectionDragState::default(),
             config_last_mtime: bootstrap.config_last_mtime,
             config_last_check: None,
             shutdown_progress: None,
@@ -566,11 +623,15 @@ impl eframe::App for HorizonApp {
         }
 
         if !self.prepare_frame(ctx) {
+            self.poll_speech_runtime(ctx, Vec::new());
+            self.render_speech_notice(ctx);
             return;
         }
 
         if self.startup_chooser.is_some() {
+            self.poll_speech_runtime(ctx, Vec::new());
             self.render_startup_chooser(ctx);
+            self.render_speech_notice(ctx);
             return;
         }
 
@@ -580,6 +641,7 @@ impl eframe::App for HorizonApp {
         self.normalize_workspace_state(ctx);
         self.apply_pending_workspace_changes();
         self.render_active_view(ctx);
+        self.render_speech_notice(ctx);
         self.finalize_frame(ctx, had_terminal_output, workspace_count_before, panel_count_before);
     }
 
@@ -591,6 +653,7 @@ impl eframe::App for HorizonApp {
         self.maybe_rewrite_paste_as_image_path(raw_input);
 
         let viewport_id = raw_input.viewport_id;
+        self.ime_commit_normalizer.normalize(viewport_id, &mut raw_input.events);
         let frame_keyboard_events = self.observed_keyboard_inputs.take_frame_key_events(raw_input);
         if frame_keyboard_events.is_empty() {
             self.frame_keyboard_events.remove(&viewport_id);

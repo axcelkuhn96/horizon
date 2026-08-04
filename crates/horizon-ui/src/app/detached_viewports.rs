@@ -1,3 +1,5 @@
+mod shortcut_actions;
+
 use std::collections::BTreeSet;
 
 use egui::{
@@ -10,6 +12,7 @@ use crate::{branding, theme};
 
 use super::util::{chrome_button, primary_shortcut_label, viewport_local_rect};
 use super::{DetachedWorkspaceViewportState, HorizonApp, TOOLBAR_HEIGHT, WS_BG_PAD, WS_TITLE_HEIGHT};
+use shortcut_actions::detached_shortcut_actions;
 
 const DETACHED_WINDOW_OFFSET: f32 = 48.0;
 
@@ -18,6 +21,17 @@ impl HorizonApp {
         self.board
             .workspace(workspace_id)
             .is_some_and(|workspace| self.detached_workspaces.contains_key(&workspace.local_id))
+    }
+
+    /// Whether any workspace still lives in the root window. The root
+    /// minimap renders only then; the overlay exclusion zone and every
+    /// other consumer must share this predicate, or the minimap's corner
+    /// becomes a phantom zone that eats clicks with nothing drawn there.
+    pub(super) fn any_attached_workspace(&self) -> bool {
+        self.board
+            .workspaces
+            .iter()
+            .any(|workspace| !self.workspace_is_detached(workspace.id))
     }
 
     pub(super) fn workspace_collision_scope(
@@ -109,6 +123,9 @@ impl HorizonApp {
             let local_id_for_viewport = local_id.clone();
 
             ctx.show_viewport_immediate(viewport_id, builder, |viewport_ctx, _class| {
+                // Feed the focus aggregate consumed by the end-of-frame
+                // unattended-recording privacy guard.
+                self.any_viewport_focused |= viewport_ctx.input(|input| input.viewport().focused.unwrap_or(false));
                 self.render_detached_workspace_window(viewport_ctx, workspace_id, &local_id_for_viewport);
             });
         }
@@ -169,6 +186,7 @@ impl HorizonApp {
             return;
         }
 
+        self.handle_detached_shortcuts(ctx, workspace_id);
         self.render_detached_toolbar(ctx, workspace_id, workspace_local_id, &workspace_name);
 
         let canvas_rect = detached_canvas_rect(ctx);
@@ -223,6 +241,20 @@ impl HorizonApp {
         detached_state.initial_fit_pending = false;
     }
 
+    // The root-window shortcut dispatch only sees root-viewport input, so the
+    // shortcuts advertised in the detached toolbar are handled here with the
+    // detached viewport's own input state.
+    fn handle_detached_shortcuts(&mut self, ctx: &Context, workspace_id: WorkspaceId) {
+        let actions = ctx.input(|input| detached_shortcut_actions(&input.events, &self.shortcuts));
+
+        if actions.fit_workspace {
+            let _ = self.fit_workspace_in_rect(workspace_id, detached_canvas_rect(ctx));
+        }
+        if actions.toggle_minimap {
+            self.minimap_visible = !self.minimap_visible;
+        }
+    }
+
     fn render_detached_toolbar(
         &mut self,
         ctx: &Context,
@@ -250,7 +282,7 @@ impl HorizonApp {
                     Pos2::new(ui.max_rect().min.x, ui.max_rect().max.y),
                     Pos2::new(ui.max_rect().max.x, ui.max_rect().max.y),
                 ],
-                Stroke::new(1.0, theme::alpha(theme::BORDER_SUBTLE(), 170)),
+                Stroke::new(1.0_f32, theme::alpha(theme::BORDER_SUBTLE(), 170)),
             );
 
             ui.horizontal(|ui| {

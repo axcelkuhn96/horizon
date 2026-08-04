@@ -71,6 +71,14 @@ impl HorizonApp {
             return;
         };
 
+        // The minimap and the other fixed overlays float above the canvas and
+        // consume their own double-clicks (fit-to-target). Without this the
+        // preset picker opens underneath them too — the same reason raw
+        // panel-focus handling consults `overlay_exclusion_zones`.
+        if self.overlay_exclusion_zones(ctx).contains(screen_pos) {
+            return;
+        }
+
         let canvas_pos = self.screen_to_canvas(canvas_rect, screen_pos);
         let hit_workspace = self
             .workspace_screen_rects
@@ -124,7 +132,7 @@ impl HorizonApp {
             .show(ctx, |ui| {
                 egui::Frame::default()
                     .fill(theme::PANEL_BG())
-                    .stroke(Stroke::new(1.0, theme::BORDER_STRONG()))
+                    .stroke(Stroke::new(1.0_f32, theme::BORDER_STRONG()))
                     .corner_radius(8)
                     .inner_margin(Margin::symmetric(8, 6))
                     .show(ui, |ui| {

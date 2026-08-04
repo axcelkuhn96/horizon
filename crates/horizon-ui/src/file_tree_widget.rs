@@ -1159,7 +1159,15 @@ mod tests {
                 selection: &mut None,
                 row_hits: &mut Vec::new(),
             };
-            render_nodes(ui, &[dir_a.clone(), top_file.clone()], 0, None, &mut sink, None);
+            render_nodes(
+                ui,
+                &[dir_a.clone(), top_file.clone()],
+                0,
+                None,
+                &mut sink,
+                None,
+                Path::new("/tmp"),
+            );
         });
         let depth0 = &geoms[0];
         let depth2 = &geoms[1];

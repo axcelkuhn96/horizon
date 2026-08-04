@@ -208,6 +208,20 @@ impl HorizonApp {
 
     fn prepare_session_switch(&mut self) {
         self.auto_save_runtime_state();
+        // Panel ids restart from 1 in the next board; a transcript finishing
+        // after the switch must not inject into an unrelated same-id panel,
+        // and no microphone may survive the teardown. Rebuilding drops the
+        // workers (cancelling any in-flight inference via their tokens).
+        // Old system retired BEFORE the replacement is constructed:
+        // `from_config` can start loading immediately (preloaded profiles),
+        // and a preloader must find these workers already registered as
+        // retiring.
+        self.speech = None;
+        self.speech = super::speech::SpeechSystem::from_config(&self.template_config.features.speech);
+        // Held bindings persist until their release is consumed by the
+        // terminal filter, so a key-up after the switch cannot leak into a
+        // new-board terminal; only stop-attribution is reset.
+        self.speech_engaged_profile = None;
         let _ = self.board.begin_async_shutdown();
         self.git_watchers.clear();
         self.release_active_session_lease();
@@ -277,7 +291,7 @@ fn render_session_manager_window(
         .frame(
             egui::Frame::NONE
                 .fill(theme::PANEL_BG())
-                .stroke(Stroke::new(1.5, theme::alpha(theme::ACCENT(), 80)))
+                .stroke(Stroke::new(1.5_f32, theme::alpha(theme::ACCENT(), 80)))
                 .corner_radius(CornerRadius::same(20))
                 .shadow(egui::Shadow {
                     offset: [0, 12],
@@ -457,7 +471,7 @@ fn render_remove_all_actions(
 fn render_header(ui: &mut egui::Ui, action: &mut SessionManagerAction) {
     egui::Frame::NONE
         .fill(theme::BG_ELEVATED())
-        .stroke(Stroke::new(1.0, theme::alpha(theme::ACCENT(), 48)))
+        .stroke(Stroke::new(1.0_f32, theme::alpha(theme::ACCENT(), 48)))
         .corner_radius(CornerRadius::same(14))
         .inner_margin(Margin::symmetric(20, 16))
         .show(ui, |ui| {
@@ -483,7 +497,7 @@ fn render_header(ui: &mut egui::Ui, action: &mut SessionManagerAction) {
 fn render_empty_state(ui: &mut egui::Ui) {
     egui::Frame::NONE
         .fill(theme::PANEL_BG_ALT())
-        .stroke(Stroke::new(1.0, theme::BORDER_SUBTLE()))
+        .stroke(Stroke::new(1.0_f32, theme::BORDER_SUBTLE()))
         .corner_radius(CornerRadius::same(12))
         .inner_margin(Margin::same(18))
         .show(ui, |ui| {
@@ -513,7 +527,7 @@ fn render_session_card(
             theme::PANEL_BG_ALT()
         })
         .stroke(Stroke::new(
-            1.0,
+            1.0_f32,
             if selected {
                 theme::blend(theme::BORDER_STRONG(), theme::ACCENT(), 0.78)
             } else {

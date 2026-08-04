@@ -27,6 +27,9 @@ mod runtime_state;
 pub mod search;
 mod session_store;
 mod shortcuts;
+pub mod speech_config;
+pub use speech_config::validate_speech_hotkey;
+pub mod speech_model;
 mod ssh;
 mod terminal;
 mod transcript;
@@ -44,7 +47,8 @@ pub use board::{
 };
 pub use config::{
     AppearanceConfig, AppearanceTheme, Config, FeaturesConfig, InputConfig, OverlaysConfig, PresetConfig,
-    ShortcutsConfig, TerminalConfig, WindowConfig, WorkspaceConfig, scroll_should_pan_canvas,
+    ShortcutsConfig, SpeechBackend, SpeechConfig, SpeechHotkeyMode, SpeechProfile, SpeechTask, TerminalConfig,
+    WindowConfig, WorkspaceConfig, scroll_should_pan_canvas,
 };
 pub use editor::{MarkdownEditor, PanelContent, PreviewMode};
 pub use error::{Error, Result};
@@ -61,7 +65,8 @@ pub use remote_hosts::{
 };
 pub use runtime_state::{
     AgentSessionBinding, AgentSessionCatalog, AgentSessionRecord, DetachedWorkspaceState, PanelState, PanelTemplateRef,
-    RuntimeState, WorkspaceState, WorkspaceTemplateRef, most_recent_unclaimed_session_for, new_local_id,
+    RuntimeState, WorkspaceState, WorkspaceTemplateRef, live_claude_session_ids, most_recent_unclaimed_session_for,
+    new_local_id,
 };
 pub use search::{PanelSearchResult, SearchMatch, SearchOptions, SearchResults, search_board};
 pub use session_store::{

@@ -17,7 +17,10 @@ use alacritty_terminal::term::TermMode;
 use self::context_menu::{apply_terminal_context_action, show_terminal_context_menu};
 use self::ime::{clear_terminal_ime_state, publish_terminal_ime_output};
 pub(crate) use self::input::SSH_RECONNECT_SHORTCUT;
-use self::input::{PointerSupport, handle_terminal_keyboard_input, handle_terminal_pointer_input};
+pub(crate) use self::input::TerminalSelectionDragState;
+use self::input::{
+    PointerSupport, handle_terminal_keyboard_input, handle_terminal_pointer_input, pty_mouse_reporting_enabled,
+};
 use self::layout::{GridMetrics, terminal_interaction, terminal_layout, terminal_viewport_size};
 pub(crate) use self::render::TerminalGridCache;
 use self::render::{render_cursor, render_grid};
@@ -60,6 +63,14 @@ pub(crate) fn terminal_focus_id(ctx: &Context, panel_id: PanelId) -> Option<Id> 
     ctx.data(|data| data.get_temp::<Id>(terminal_focus_request_id(panel_id)))
 }
 
+const fn hover_requires_grid_refresh(body_hovered: bool, mouse_reporting_enabled: bool) -> bool {
+    body_hovered && mouse_reporting_enabled
+}
+
+const fn grid_cache_allowed(content_requires_refresh: bool, hover_requires_refresh: bool, drag_active: bool) -> bool {
+    !(content_requires_refresh || hover_requires_refresh || drag_active)
+}
+
 pub struct TerminalView<'a> {
     panel: &'a mut Panel,
     grid_cache: Option<&'a mut TerminalGridCache>,
@@ -87,6 +98,7 @@ impl<'a> TerminalView<'a> {
         ui: &mut egui::Ui,
         is_active_panel: bool,
         interactive: bool,
+        selection_drag: &mut TerminalSelectionDragState,
         keyboard: TerminalKeyboardContext<'_>,
     ) -> bool {
         let metrics = grid_metrics(ui.ctx());
@@ -124,6 +136,7 @@ impl<'a> TerminalView<'a> {
                     visible_rows: new_rows,
                     visible_cols: new_cols,
                     primary_selection: keyboard.primary_selection,
+                    selection_drag,
                 },
             );
         }
@@ -152,10 +165,10 @@ impl<'a> TerminalView<'a> {
             clear_terminal_ime_state(ui, interaction.body.id);
         }
 
-        let allow_grid_cache = !self.panel.had_recent_output()
-            && self.panel.terminal().is_some_and(|terminal| !terminal.has_selection())
-            && !interaction.body.dragged()
-            && !interaction.scrollbar.dragged();
+        let had_recent_output = self.panel.had_recent_output();
+        let body_hovered = interaction.body.hovered();
+        let modifiers = body_hovered.then(|| ui.input(|input| input.modifiers));
+        let drag_active = interaction.body.dragged() || interaction.scrollbar.dragged();
 
         if ui.is_rect_visible(interaction.layout.outer)
             && let Some(terminal) = self.panel.terminal_mut()
@@ -166,6 +179,12 @@ impl<'a> TerminalView<'a> {
             terminal.with_renderable_content(|content| {
                 let cursor = content.cursor;
                 let display_offset = content.display_offset;
+                let mouse_reporting_enabled =
+                    modifiers.is_some_and(|modifiers| pty_mouse_reporting_enabled(content.mode, modifiers));
+                let hover_requires_refresh = hover_requires_grid_refresh(body_hovered, mouse_reporting_enabled);
+                let content_requires_refresh = had_recent_output || content.selection.is_some();
+                let allow_grid_cache =
+                    grid_cache_allowed(content_requires_refresh, hover_requires_refresh, drag_active);
                 render_grid(
                     ui,
                     interaction.layout.body,
@@ -310,7 +329,9 @@ pub(crate) fn viewport_for_available_space(ctx: &Context, available: Vec2) -> la
 
 #[cfg(test)]
 mod tests {
-    use super::{terminal_focus_request_id, terminal_scrollbar_visible};
+    use super::{
+        grid_cache_allowed, hover_requires_grid_refresh, terminal_focus_request_id, terminal_scrollbar_visible,
+    };
     use alacritty_terminal::term::TermMode;
     use horizon_core::PanelId;
 
@@ -343,5 +364,24 @@ mod tests {
             terminal_focus_request_id(PanelId(1)),
             terminal_focus_request_id(PanelId(2))
         );
+    }
+
+    #[test]
+    fn mouse_reporting_hover_bypasses_grid_cache() {
+        assert!(hover_requires_grid_refresh(true, true));
+        assert!(!grid_cache_allowed(false, true, false));
+    }
+
+    #[test]
+    fn normal_terminal_hover_keeps_grid_cache() {
+        assert!(!hover_requires_grid_refresh(true, false));
+        assert!(!hover_requires_grid_refresh(false, true));
+        assert!(grid_cache_allowed(false, false, false));
+    }
+
+    #[test]
+    fn dynamic_content_and_drags_bypass_grid_cache() {
+        assert!(!grid_cache_allowed(true, false, false));
+        assert!(!grid_cache_allowed(false, false, true));
     }
 }
