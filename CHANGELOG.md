@@ -1,7 +1,21 @@
 # Changelog
 
 Fork pessoal do [peters/horizon](https://github.com/peters/horizon) com melhorias de navegação e UX.
-Patch aditivo sobre o upstream **v0.2.6**.
+Patch aditivo sobre o upstream **v0.2.7**.
+
+## [0.4.0] — 2026-08-04
+
+### Merge do upstream v0.2.7 (peters/horizon)
+- **Speech input opt-in** (upstream #244/#257): ditado por voz local nos painéis de terminal via cargo feature `speech` (variantes CUDA/Vulkan/Metal). Botão de mic na titlebar de cada painel + push-to-talk (F9, hold ou toggle). Transcrição 100% local (transcribe.cpp), injetada no PTY por bracketed-paste. Builds sem a feature compilam um stub inerte — nada muda por padrão. O mic convive com o nosso caret de collapse (mic à esquerda do caret).
+- **Navegação por minimap** (upstream #244, opt-in).
+- **Correções de terminal do upstream**: drag de seleção reescrito (#229), highlight de seleção obsoleto após copiar (#241), seleção mantém alinhamento durante scroll (#258), cache do grid atualiza com mouse-reporting sob hover (#243), pan por wheel/trackpad não aplica mais scroll duplicado no canvas (#240).
+- **Janelas destacadas**: sobrevivem a fullscreen; atalhos e context-menu corrigidos (#242).
+- **Editor aceita input não-ASCII sob X11 ibus/XIM** (#215).
+- **Painel de agente novo sempre inicia sessão fresh** (#226): o binding automático de sessão no launch foi removido pelo upstream — restaurar sessão continua funcionando ao reabrir o board (e o auto-resume do shell claude/claude2 do fork segue intacto).
+- **Toolchain/deps**: surge-core beta.41 → beta.52, tokio 1.53.1, serde 1.0.229, uuid 1.24, regex 1.13, rusqlite 0.40.1, entre outros.
+
+### Notas do merge
+- O `input.rs` do terminal foi dividido em submódulos pelo upstream; as features do fork foram re-portadas: gate de teclado em painel morto + restart com Ctrl+Shift+R (agora em `keyboard.rs`), guard de oclusão do menu de contexto (fix do "Copy") integrado ao novo pipeline de seleção, ctrl+click para abrir arquivo, scrollbar arrastável e paste de imagem preservados.
 
 ## [0.3.3] — 2026-06-10
 
