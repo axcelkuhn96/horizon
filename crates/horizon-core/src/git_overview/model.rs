@@ -12,7 +12,11 @@ pub struct WorktreeInfo {
     pub locked: bool,
     /// The worktree directory or its metadata is gone or invalid.
     pub prunable: bool,
-    pub dirty_count: usize,
+    /// Always computed for the main worktree and the one containing `cwd`;
+    /// `None` for the others until the poller is asked for it.
+    pub dirty_count: Option<usize>,
+    /// Lives under a `.claude/worktrees/` directory (a Claude agent worktree).
+    pub is_agent: bool,
 }
 
 /// Snapshot of the repository containing a working directory.
