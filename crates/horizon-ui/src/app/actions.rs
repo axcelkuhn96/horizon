@@ -8,6 +8,8 @@ mod search;
 mod support;
 mod workspace_templates;
 
+pub(in crate::app) use workspace_templates::TemplateSaved;
+
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 

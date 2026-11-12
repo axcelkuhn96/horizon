@@ -85,4 +85,4 @@ pub use transcript::PanelTranscript;
 pub use usage_dashboard::UsageDashboard;
 pub use usage_stats::{DailyUsage, ToolUsage, UsageSnapshot, format_cost, format_tokens};
 pub use view::{CanvasViewState, DEFAULT_CANVAS_ZOOM, MAX_CANVAS_ZOOM, MIN_CANVAS_ZOOM, clamp_canvas_zoom};
-pub use workspace::{WORKSPACE_COLORS, Workspace, WorkspaceId};
+pub use workspace::{WORKSPACE_COLORS, Workspace, WorkspaceId, workspace_color_hex, workspace_color_index};

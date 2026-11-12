@@ -2,8 +2,8 @@ use crate::config::Config;
 use crate::error::Result;
 use crate::layout::WS_COLLISION_GAP;
 use crate::panel::{DEFAULT_PANEL_SIZE, Panel, PanelId, PanelOptions};
-use crate::runtime_state::WorkspaceState;
-use crate::workspace::{Workspace, WorkspaceId};
+use crate::runtime_state::{WorkspaceState, WorkspaceTemplateRef};
+use crate::workspace::{Workspace, WorkspaceId, workspace_color_index};
 
 use super::{Board, WorkspaceDockSide, vec2_eq};
 
@@ -270,16 +270,66 @@ impl Board {
         self.panel_mut(id).is_some_and(|panel| panel.rename(name))
     }
 
+    /// Records the template names a later [`Self::sync_workspace_metadata`]
+    /// compares against. Does nothing if a baseline already exists (every sync
+    /// refreshes it), so callers seed it with the config the linked workspaces
+    /// were built from.
+    pub fn seed_template_baseline(&mut self, config: &Config) {
+        if self.template_names_baseline.is_none() {
+            self.template_names_baseline = Some(Self::template_names(config));
+        }
+    }
+
+    fn template_names(config: &Config) -> Vec<String> {
+        config
+            .workspaces
+            .iter()
+            .map(|workspace| workspace.name.to_lowercase())
+            .collect()
+    }
+
+    /// Applies live-preview template edits to the workspaces linked to a template.
+    ///
+    /// A workspace follows its template by name (case-insensitive), so
+    /// reordering or deleting templates never retargets another workspace.
+    /// Only when its stored name is gone does it fall back to the stored
+    /// index, and only for a genuine in-place rename: the template count is
+    /// unchanged, the previous list had the workspace's name at that index,
+    /// and the name now there is new. Anything else (a deleted template, or no
+    /// baseline yet) leaves the workspace and its template ref untouched.
     pub fn sync_workspace_metadata(&mut self, config: &Config) {
+        let previous = self.template_names_baseline.replace(Self::template_names(config));
+
         for workspace in &mut self.workspaces {
-            if let Some(template) = &workspace.template
-                && let Some(workspace_config) = config.workspaces.get(template.workspace_index)
-            {
-                if workspace.name != workspace_config.name {
-                    workspace_config.name.clone_into(&mut workspace.name);
-                }
-                workspace.cwd = workspace_config.cwd.as_deref().map(Config::expand_tilde);
+            let Some(template) = &workspace.template else {
+                continue;
+            };
+            let wanted = template.workspace_name.to_lowercase();
+            let matched = config
+                .workspaces
+                .iter()
+                .position(|candidate| candidate.name.to_lowercase() == wanted)
+                .or_else(|| {
+                    let previous = previous.as_ref()?;
+                    let index = template.workspace_index;
+                    let candidate = config.workspaces.get(index)?.name.to_lowercase();
+                    (previous.len() == config.workspaces.len()
+                        && previous.get(index) == Some(&wanted)
+                        && !previous.contains(&candidate))
+                    .then_some(index)
+                });
+            let Some(index) = matched else {
+                continue;
+            };
+            let workspace_config = &config.workspaces[index];
+            if workspace.name != workspace_config.name {
+                workspace_config.name.clone_into(&mut workspace.name);
             }
+            workspace.cwd = workspace_config.cwd.as_deref().map(Config::expand_tilde);
+            workspace.template = Some(WorkspaceTemplateRef {
+                workspace_index: index,
+                workspace_name: workspace_config.name.clone(),
+            });
         }
     }
 
@@ -434,6 +484,9 @@ impl Board {
             workspace.template.clone_from(&workspace_state.template);
             workspace.layout = workspace_state.layout;
             workspace.sidebar_collapsed = workspace_state.sidebar_collapsed;
+            if let Some(color_idx) = workspace_state.color.as_deref().and_then(workspace_color_index) {
+                workspace.color_idx = color_idx;
+            }
         }
         self.retained_empty_workspaces.remove(&id);
         id

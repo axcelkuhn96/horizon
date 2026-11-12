@@ -809,6 +809,7 @@ impl HorizonApp {
 
         if let Ok(config) = Config::load(Some(&self.config_path)) {
             tracing::info!("config file changed, reloading presets");
+            self.board.seed_template_baseline(&self.template_config);
             self.apply_runtime_config(&config);
             self.board.sync_workspace_metadata(&config);
         }

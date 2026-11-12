@@ -86,6 +86,9 @@ pub struct Board {
     pub attention: Vec<AttentionItem>,
     panel_attention_signals: HashMap<PanelId, String>,
     retained_empty_workspaces: HashSet<WorkspaceId>,
+    /// Lowercased template names as of the last metadata sync (or seed); lets
+    /// the sync tell an in-place rename from a deleted template.
+    template_names_baseline: Option<Vec<String>>,
     pub focused: Option<PanelId>,
     pub active_workspace: Option<WorkspaceId>,
     pub attention_enabled: bool,
@@ -110,6 +113,7 @@ impl Board {
             attention: Vec::new(),
             panel_attention_signals: HashMap::new(),
             retained_empty_workspaces: HashSet::new(),
+            template_names_baseline: None,
             focused: None,
             active_workspace: None,
             attention_enabled: false,

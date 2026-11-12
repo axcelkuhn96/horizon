@@ -731,6 +731,7 @@ mod tests {
                 template: None,
                 layout: None,
                 sidebar_collapsed: false,
+                color: None,
                 panels: vec![PanelState {
                     local_id: "panel".to_string(),
                     name: "Claude".to_string(),
@@ -756,6 +757,7 @@ mod tests {
                 template: None,
                 layout: None,
                 sidebar_collapsed: false,
+                color: None,
                 panels: vec![PanelState {
                     local_id: "panel".to_string(),
                     name: "OpenCode".to_string(),
@@ -783,6 +785,7 @@ mod tests {
                 template: None,
                 layout: None,
                 sidebar_collapsed: false,
+                color: None,
                 panels: vec![PanelState {
                     local_id: "shell".to_string(),
                     name: "Shell".to_string(),
@@ -818,6 +821,7 @@ mod tests {
                 template: None,
                 layout: None,
                 sidebar_collapsed: false,
+                color: None,
                 panels: vec![PanelState {
                     local_id: "shell".to_string(),
                     name: "Shell".to_string(),
@@ -852,6 +856,7 @@ mod tests {
                 template: None,
                 layout: None,
                 sidebar_collapsed: false,
+                color: None,
                 panels: vec![PanelState {
                     local_id: "shell".to_string(),
                     name: "Shell".to_string(),
@@ -881,6 +886,7 @@ mod tests {
                 template: None,
                 layout: None,
                 sidebar_collapsed: false,
+                color: None,
                 panels: vec![PanelState {
                     local_id: "panel".to_string(),
                     name: "Pi".to_string(),
@@ -908,6 +914,7 @@ mod tests {
                 template: None,
                 layout: None,
                 sidebar_collapsed: false,
+                color: None,
                 panels: vec![PanelState {
                     local_id: "claude-active".to_string(),
                     name: "Claude".to_string(),
@@ -939,6 +946,7 @@ mod tests {
                 template: None,
                 layout: None,
                 sidebar_collapsed: false,
+                color: None,
                 panels: vec![
                     // Non-agent panel — never bootstrap-eligible.
                     PanelState {
@@ -994,6 +1002,7 @@ mod tests {
                 template: None,
                 layout: None,
                 sidebar_collapsed: false,
+                color: None,
                 panels: vec![
                     PanelState {
                         local_id: "gemini".to_string(),

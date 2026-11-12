@@ -1,5 +1,7 @@
 mod bar;
 mod claude;
+#[allow(unused_imports, reason = "used by the Claude launcher empty state after merge")]
+pub(crate) use claude::select_claude_tab;
 mod general;
 mod presets;
 mod shortcuts;
@@ -68,10 +70,9 @@ pub(super) struct SettingsEditor {
     pub(super) original: String,
     pub(super) status: SettingsStatus,
     active_tab: SettingsTab,
-    editing_config: Option<Config>,
-    #[expect(dead_code, reason = "wired in Task 6")]
+    /// Parsed `buffer`; `pub(super)` so "Save as template" can merge into it.
+    pub(super) editing_config: Option<Config>,
     claude_tab: claude::ClaudeTabState,
-    #[expect(dead_code, reason = "wired in Task 11")]
     workspaces_tab: workspaces::WorkspacesTabState,
 }
 
@@ -93,6 +94,9 @@ impl HorizonApp {
         } else {
             let content = self.load_or_generate_config_yaml();
             let editing_config = Config::from_yaml(&content).ok();
+            if let Some(config) = &editing_config {
+                self.board.seed_template_baseline(config);
+            }
             self.settings = Some(SettingsEditor {
                 original: content.clone(),
                 buffer: content,
@@ -160,6 +164,8 @@ impl HorizonApp {
         if let Some(editor) = self.settings.as_mut() {
             render_settings_panel(ctx, &config_path, editor, &mut self.speech_model_info_cache);
         }
+        self.process_pending_template_open(ctx);
+        self.process_pending_template_browse();
     }
 
     fn apply_live_preview(&mut self, config: &Config) {

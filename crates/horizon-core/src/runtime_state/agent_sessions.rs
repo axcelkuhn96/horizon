@@ -686,6 +686,7 @@ mod tests {
                 template: None,
                 layout: None,
                 sidebar_collapsed: false,
+                color: None,
                 panels: vec![
                     PanelState {
                         local_id: "a".to_string(),
@@ -748,6 +749,7 @@ mod tests {
                 template: None,
                 layout: None,
                 sidebar_collapsed: false,
+                color: None,
                 panels: vec![PanelState {
                     local_id: "a".to_string(),
                     name: "Claude A".to_string(),
@@ -954,6 +956,7 @@ INSERT INTO session (id, title, directory, parent_id, time_updated, time_archive
                 template: None,
                 layout: None,
                 sidebar_collapsed: false,
+                color: None,
                 panels: vec![PanelState {
                     local_id: "claude-active".to_string(),
                     name: "Claude".to_string(),
@@ -999,6 +1002,7 @@ INSERT INTO session (id, title, directory, parent_id, time_updated, time_archive
                 template: None,
                 layout: None,
                 sidebar_collapsed: false,
+                color: None,
                 panels: vec![PanelState {
                     local_id: "claude-unused".to_string(),
                     name: "Claude".to_string(),
