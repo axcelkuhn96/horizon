@@ -10,10 +10,12 @@ use egui::{
     Align2, Color32, CornerRadius, CursorIcon, FontId, Galley, Painter, Pos2, Rect, Sense, Stroke, Vec2, WidgetInfo,
     WidgetType,
 };
+use horizon_core::agent_status::AgentStatus;
 use horizon_core::{AttentionItem, PanelId, PanelKind};
 
 use super::labels::ResolvedLabel;
 use super::{HorizonApp, SidebarActions, WorkspaceSidebarEntry, sidebar_attention_tag};
+use crate::app::agent_status_ui::{SIDEBAR_DOT_RADIUS, SIDEBAR_STATUS_COLUMN, paint_status_dot, status_label};
 use crate::app::hub_ui;
 use crate::app::panels::panel_kind_icon;
 use crate::theme;
@@ -83,10 +85,13 @@ pub(super) struct PanelRowLayout {
     /// Right edge of the dim hint text.
     pub(super) hint_right: f32,
     pub(super) close: Rect,
+    /// Fixed column of the agent status dot, left of the close slot; zero width when the
+    /// workspace has no agent status.
+    pub(super) status: Rect,
 }
 
 #[must_use]
-pub(super) fn panel_row_layout(row: Rect, hint_width: f32) -> PanelRowLayout {
+pub(super) fn panel_row_layout(row: Rect, hint_width: f32, status_width: f32) -> PanelRowLayout {
     let bg_right = row.max.x - BG_INSET;
     let center_y = row.min.y + ROW_HEIGHT / 2.0;
     let close = Rect::from_center_size(
@@ -98,7 +103,15 @@ pub(super) fn panel_row_layout(row: Rect, hint_width: f32) -> PanelRowLayout {
         Vec2::new(ICON_WIDTH, ROW_HEIGHT),
     );
     let label_left = icon.max.x + ICON_GAP;
-    let hint_right = close.min.x - 4.0;
+    let status = Rect::from_min_size(
+        Pos2::new(close.min.x - 4.0 - status_width, row.min.y),
+        Vec2::new(status_width, ROW_HEIGHT),
+    );
+    let hint_right = if status_width > 0.0 {
+        status.min.x
+    } else {
+        close.min.x - 4.0
+    };
     let label_right = if hint_width > 0.0 {
         hint_right - hint_width - HINT_GAP
     } else {
@@ -110,6 +123,7 @@ pub(super) fn panel_row_layout(row: Rect, hint_width: f32) -> PanelRowLayout {
         label_width: (label_right - label_left).max(MIN_LABEL_WIDTH),
         hint_right,
         close,
+        status,
     }
 }
 
@@ -336,10 +350,24 @@ impl HorizonApp {
         let painter = ui.painter_at(row_rect);
         let ppp = ui.ctx().pixels_per_point();
 
+        let (status, status_seen) = self
+            .board
+            .panel(panel.id)
+            .map_or((AgentStatus::Unknown, true), |entry| {
+                (entry.agent_status(), entry.agent_status_seen())
+            });
+        // The column is reserved on every row of a workspace that has an agent status, so rows
+        // do not shift when a state changes.
+        let status_width = if self.workspace_shows_status(workspace) {
+            SIDEBAR_STATUS_COLUMN
+        } else {
+            0.0
+        };
+
         let labels = &mut self.hub.sidebar_labels;
         let hint_galley = labels.hint_galley(panel.id, &painter, ppp);
         let hint_width = hint_galley.as_ref().map_or(0.0, |galley| galley.size().x);
-        let layout = panel_row_layout(row_rect, hint_width);
+        let layout = panel_row_layout(row_rect, hint_width, status_width);
         let label_galley = labels.label_galley(panel.id, &painter, ppp, layout.label_width);
 
         // Row interaction first; the close button is added after it so it wins overlapping clicks.
@@ -362,6 +390,23 @@ impl HorizonApp {
         paint_panel_row_bg(&painter, row_rect, workspace.color, panel.is_focused, hovered);
         paint_row_icon(&painter, layout.icon, panel.icon, workspace.color, panel.is_focused);
         let label_truncated = paint_row_texts(&painter, row_rect, &layout, panel, label_galley, hint_galley);
+        paint_status_dot(
+            &painter,
+            layout.status.center(),
+            SIDEBAR_DOT_RADIUS,
+            status,
+            status_seen,
+        );
+        if status != AgentStatus::Unknown && status_width > 0.0 {
+            // Hover-only, added after the row so it sits on top without taking its clicks.
+            let status_response = ui.interact(
+                layout.status,
+                ui.make_persistent_id(("sidebar_panel_status", panel.id.0)),
+                Sense::hover(),
+            );
+            status_response.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, status_label(status)));
+            status_response.on_hover_text(status_label(status));
+        }
         if show_close {
             paint_close_button(&painter, layout.close, close_hovered);
         }
@@ -405,6 +450,17 @@ impl HorizonApp {
     }
 }
 
+impl HorizonApp {
+    /// `true` when any panel of `workspace` has an agent status to show.
+    fn workspace_shows_status(&self, workspace: &WorkspaceSidebarEntry) -> bool {
+        workspace.panels.iter().any(|entry| {
+            self.board
+                .panel(entry.id)
+                .is_some_and(|panel| panel.agent_status() != AgentStatus::Unknown)
+        })
+    }
+}
+
 fn paint_attention_line(painter: &Painter, row: Rect, left: f32, item: &AttentionItem) {
     let (label, color) = sidebar_attention_tag(item.severity);
     let center_y = row.min.y + ROW_HEIGHT + ATTENTION_EXTRA / 2.0 - 2.0;
@@ -445,7 +501,7 @@ mod tests {
 
     #[test]
     fn layout_keeps_close_slot_at_the_right_and_icon_at_the_child_indent() {
-        let layout = panel_row_layout(row(260.0), 0.0);
+        let layout = panel_row_layout(row(260.0), 0.0, 0.0);
         assert!((layout.icon.min.x - CHILD_X).abs() < f32::EPSILON);
         assert!((layout.label_left - (CHILD_X + LABEL_OFFSET)).abs() < f32::EPSILON);
         assert!(layout.close.max.x <= 260.0 - BG_INSET);
@@ -455,16 +511,29 @@ mod tests {
 
     #[test]
     fn hint_takes_width_from_the_label_not_from_the_close_slot() {
-        let without = panel_row_layout(row(260.0), 0.0);
-        let with = panel_row_layout(row(260.0), 40.0);
+        let without = panel_row_layout(row(260.0), 0.0, 0.0);
+        let with = panel_row_layout(row(260.0), 40.0, 0.0);
         assert!((without.label_width - with.label_width - (40.0 + HINT_GAP)).abs() < 0.01);
         assert!((with.hint_right - without.hint_right).abs() < f32::EPSILON);
         assert!(with.hint_right <= with.close.min.x);
     }
 
     #[test]
+    fn status_column_sits_between_the_hint_and_the_close_slot() {
+        let without = panel_row_layout(row(260.0), 30.0, 0.0);
+        let with = panel_row_layout(row(260.0), 30.0, SIDEBAR_STATUS_COLUMN);
+
+        assert!(without.status.width().abs() < f32::EPSILON);
+        assert!((with.status.width() - SIDEBAR_STATUS_COLUMN).abs() < f32::EPSILON);
+        assert!(with.status.max.x <= with.close.min.x);
+        assert!((with.hint_right - with.status.min.x).abs() < f32::EPSILON);
+        assert!((without.label_width - with.label_width - SIDEBAR_STATUS_COLUMN).abs() < 0.01);
+        assert!((with.status.center().y - 113.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
     fn label_width_never_collapses() {
-        let layout = panel_row_layout(row(80.0), 60.0);
+        let layout = panel_row_layout(row(80.0), 60.0, 0.0);
         assert!(layout.label_width >= MIN_LABEL_WIDTH);
     }
 

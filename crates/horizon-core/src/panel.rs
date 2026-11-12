@@ -1,3 +1,4 @@
+mod agent_status;
 mod env;
 mod spawn;
 
@@ -9,6 +10,7 @@ use std::time::Duration;
 use serde::Deserialize;
 
 use crate::agent_definition;
+use crate::agent_status::AgentStatusState;
 use crate::editor::{MarkdownEditor, PanelContent};
 use crate::error::Result;
 use crate::git_changes::DiffViewer;
@@ -204,6 +206,8 @@ pub struct Panel {
     /// The panel height (`layout.size[1]`) recorded before collapse, so expand
     /// can restore the prior height. `None` when the panel has never collapsed.
     expanded_height: Option<f32>,
+    /// What the agent in this panel is doing; fed by the status hooks and the live-session file.
+    pub(crate) agent_status: AgentStatusState,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -536,6 +540,7 @@ impl Panel {
 
         let rows = terminal.rows();
         let cols = terminal.cols();
+        self.agent_status.clear_on_exit();
 
         // Graceful shutdown of the old terminal.
         let _ = terminal.shutdown_with_timeout(Duration::from_secs(2));
@@ -782,6 +787,7 @@ mod tests {
             env: std::collections::BTreeMap::new(),
             link_socket: None,
             expanded_height: None,
+            agent_status: crate::agent_status::AgentStatusState::default(),
         }
     }
 

@@ -56,6 +56,11 @@ fn install_agent_plugins_impl(horizon_home: &HorizonHome, user_home: Option<&Pat
     let mut updated_files = 0usize;
 
     updated_files += sync_plugin_files(&horizon_home.claude_plugin_dir(), CLAUDE_PLUGIN_FILES)?;
+    // Without a resolvable executable the hooks cannot be written; the status then comes from
+    // Claude's session file alone.
+    if let Ok(exe) = std::env::current_exe() {
+        updated_files += install_claude_hooks(horizon_home, &exe)?;
+    }
     updated_files += sync_plugin_files(&horizon_home.codex_skill_dir(), TEXT_SKILL_FILES)?;
 
     if let Some(home) = user_home {
@@ -68,6 +73,56 @@ fn install_agent_plugins_impl(horizon_home: &HorizonHome, user_home: Option<&Pat
     }
 
     Ok(updated_files)
+}
+
+/// Relative path of the Claude plugin's hooks file.
+const CLAUDE_HOOKS_FILE: &str = "hooks/hooks.json";
+
+/// `exe` as one shell word: single quotes, with embedded single quotes closed, escaped and reopened.
+fn shell_quote(exe: &Path) -> String {
+    format!("'{}'", exe.to_string_lossy().replace('\'', "'\\''"))
+}
+
+/// Contents of the Claude plugin's `hooks/hooks.json`: every hook runs `<exe> hook <event>`.
+///
+/// `PostToolUse` reports `working` again so a permission answer leaves the `waiting` state;
+/// `Notification` is limited to the prompts that block on the user.
+pub(crate) fn render_hooks_json(exe: &Path) -> String {
+    let quoted = shell_quote(exe);
+    let hook = |event: &str, matcher: Option<&str>| {
+        let mut entry = serde_json::json!({
+            "hooks": [{
+                "type": "command",
+                "command": format!("{quoted} hook {event}"),
+                "timeout": 5,
+            }],
+        });
+        if let (Some(matcher), Some(object)) = (matcher, entry.as_object_mut()) {
+            object.insert("matcher".to_owned(), serde_json::Value::String(matcher.to_owned()));
+        }
+        serde_json::Value::Array(vec![entry])
+    };
+    let document = serde_json::json!({
+        "hooks": {
+            "UserPromptSubmit": hook("working", None),
+            "PreToolUse": hook("working", Some("*")),
+            "PostToolUse": hook("working", Some("*")),
+            "Notification": hook("waiting", Some("permission_prompt|elicitation_dialog")),
+            "Stop": hook("done", None),
+            "StopFailure": hook("error", None),
+            "SessionStart": hook("session-start", None),
+            "SessionEnd": hook("session-end", None),
+        },
+    });
+    let mut text = serde_json::to_string_pretty(&document).unwrap_or_else(|_| "{}".to_owned());
+    text.push('\n');
+    text
+}
+
+/// Writes the Claude plugin's hooks file for `exe`; rewritten when the executable moved.
+fn install_claude_hooks(horizon_home: &HorizonHome, exe: &Path) -> std::io::Result<usize> {
+    let path = horizon_home.claude_plugin_dir().join(CLAUDE_HOOKS_FILE);
+    Ok(usize::from(sync_file_if_changed(&path, &render_hooks_json(exe))?))
 }
 
 fn sync_plugin_files(base: &Path, files: &[EmbeddedFile]) -> std::io::Result<usize> {
@@ -102,7 +157,12 @@ fn sync_file_if_changed(path: &Path, content: &str) -> std::io::Result<bool> {
 mod tests {
     use horizon_core::HorizonHome;
 
-    use super::{EmbeddedFile, TEXT_SKILL_FILES, install_agent_plugins_impl, sync_file_if_changed, sync_plugin_files};
+    use std::path::Path;
+
+    use super::{
+        CLAUDE_HOOKS_FILE, EmbeddedFile, TEXT_SKILL_FILES, install_agent_plugins_impl, install_claude_hooks,
+        render_hooks_json, sync_file_if_changed, sync_plugin_files,
+    };
 
     #[test]
     fn sync_file_if_changed_writes_missing_file() {
@@ -190,5 +250,102 @@ mod tests {
                 .expect("horizon codex integration should be synced"),
             TEXT_SKILL_FILES[0].content,
         );
+    }
+
+    fn hook_commands(document: &serde_json::Value, event: &str) -> Vec<String> {
+        document["hooks"][event]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .flat_map(|entry| entry["hooks"].as_array().into_iter().flatten())
+            .filter_map(|hook| hook["command"].as_str().map(str::to_owned))
+            .collect()
+    }
+
+    #[test]
+    fn render_hooks_json_is_valid_json_and_quotes_exe_with_spaces_and_quotes() {
+        let exe = Path::new("/opt/My Apps/it's horizon/horizon");
+
+        let text = render_hooks_json(exe);
+        let document: serde_json::Value = serde_json::from_str(&text).expect("valid json");
+
+        let commands = hook_commands(&document, "Stop");
+        assert_eq!(
+            commands,
+            vec!["'/opt/My Apps/it'\\''s horizon/horizon' hook done".to_owned()]
+        );
+        assert_eq!(document["hooks"]["Stop"][0]["hooks"][0]["timeout"], 5);
+        assert_eq!(document["hooks"]["Stop"][0]["hooks"][0]["type"], "command");
+    }
+
+    #[test]
+    fn render_hooks_json_maps_events() {
+        let document: serde_json::Value =
+            serde_json::from_str(&render_hooks_json(Path::new("/bin/horizon"))).expect("valid json");
+
+        for (event, state) in [
+            ("UserPromptSubmit", "working"),
+            ("PreToolUse", "working"),
+            ("PostToolUse", "working"),
+            ("Notification", "waiting"),
+            ("Stop", "done"),
+            ("StopFailure", "error"),
+            ("SessionStart", "session-start"),
+            ("SessionEnd", "session-end"),
+        ] {
+            assert_eq!(
+                hook_commands(&document, event),
+                vec![format!("'/bin/horizon' hook {state}")],
+                "event {event}"
+            );
+        }
+        assert_eq!(
+            document["hooks"]["Notification"][0]["matcher"],
+            "permission_prompt|elicitation_dialog"
+        );
+        assert!(document["hooks"]["Stop"][0].get("matcher").is_none());
+    }
+
+    #[test]
+    fn plugin_install_writes_rendered_hooks_json() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let horizon_home = HorizonHome::from_root(temp.path().join(".horizon"));
+        let exe = Path::new("/usr/local/bin/horizon");
+
+        assert_eq!(install_claude_hooks(&horizon_home, exe).expect("install"), 1);
+
+        let written = std::fs::read_to_string(horizon_home.claude_plugin_dir().join(CLAUDE_HOOKS_FILE))
+            .expect("hooks file should be installed");
+        assert_eq!(written, render_hooks_json(exe));
+        assert_eq!(
+            install_claude_hooks(&horizon_home, exe).expect("second install"),
+            0,
+            "unchanged hooks are not rewritten"
+        );
+    }
+
+    #[test]
+    fn plugin_install_hooks_json_updates_when_exe_path_changes() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let horizon_home = HorizonHome::from_root(temp.path().join(".horizon"));
+        install_claude_hooks(&horizon_home, Path::new("/old/horizon")).expect("first install");
+
+        let updated = install_claude_hooks(&horizon_home, Path::new("/new/horizon")).expect("second install");
+
+        assert_eq!(updated, 1);
+        let written =
+            std::fs::read_to_string(horizon_home.claude_plugin_dir().join(CLAUDE_HOOKS_FILE)).expect("hooks file");
+        assert!(written.contains("'/new/horizon' hook working"));
+        assert!(!written.contains("/old/horizon"));
+    }
+
+    #[test]
+    fn full_install_writes_the_hooks_file_for_the_running_executable() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let horizon_home = HorizonHome::from_root(temp.path().join(".horizon"));
+
+        install_agent_plugins_impl(&horizon_home, None).expect("install plugins");
+
+        assert!(horizon_home.claude_plugin_dir().join(CLAUDE_HOOKS_FILE).is_file());
     }
 }

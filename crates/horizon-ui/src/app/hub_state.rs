@@ -5,6 +5,7 @@ use std::time::Instant;
 
 use horizon_core::WorkspaceId;
 
+use super::agent_status_ui::StatusUi;
 use super::claude_launcher::ClaudeLauncherState;
 use super::claude_quick_start::QuickStartUi;
 use super::hub_ui;
@@ -46,6 +47,8 @@ pub(super) struct HubState {
     pub(super) minimap_auto_hide: HashMap<egui::Id, MinimapAutoHide>,
     /// Titlebar "Claude" quick-start strip and the busy probes behind its button.
     pub(super) quick_start: QuickStartUi,
+    /// Agent status: the Claude found in each panel, its session name and the pending toasts.
+    pub(super) status_ui: StatusUi,
 }
 
 impl HubState {

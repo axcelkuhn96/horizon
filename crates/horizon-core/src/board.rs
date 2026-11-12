@@ -1,3 +1,4 @@
+mod agent_status;
 mod arrangement;
 mod attention;
 mod geometry;
@@ -6,6 +7,7 @@ mod navigation;
 mod shutdown;
 mod workspaces;
 
+pub use agent_status::{STATUS_ATTENTION_SOURCE, StatusNotice};
 pub use navigation::{Direction, PanelRect, nearest_in_direction};
 pub use shutdown::ShutdownProgress;
 
@@ -96,6 +98,8 @@ pub struct Board {
     next_workspace_id: u64,
     next_attention_id: u64,
     link_socket: Option<PathBuf>,
+    /// Status changes that want a toast; drained by the interface.
+    status_notices: Vec<StatusNotice>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -121,6 +125,7 @@ impl Board {
             next_workspace_id: 1,
             next_attention_id: 1,
             link_socket: None,
+            status_notices: Vec::new(),
         }
     }
 
@@ -337,6 +342,7 @@ impl Board {
             output.had_terminal_output |= panel_output.had_output;
             output.cwd_changed |= panel_output.cwd_changed;
         }
+        self.process_agent_status();
         // Only run attention detection when terminals actually produced new
         // output.  The expensive path — `detect_attention()` — locks the
         // terminal mutex and iterates the full display, so skipping it on

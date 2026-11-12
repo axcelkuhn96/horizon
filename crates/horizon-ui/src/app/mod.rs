@@ -1,4 +1,5 @@
 mod actions;
+mod agent_status_ui;
 mod attention_feed;
 mod canvas;
 mod claude_launcher;

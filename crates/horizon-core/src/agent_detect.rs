@@ -122,6 +122,14 @@ fn is_uuid_like(s: &str) -> bool {
     (32..=128).contains(&len) && s.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
 }
 
+/// A running `claude` process and the account it belongs to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClaudeProcess {
+    /// Pid of the `claude` process itself (the one that owns `<config_dir>/sessions/<pid>.json`).
+    pub pid: u32,
+    pub agent: RunningAgent,
+}
+
 /// Walk the process tree rooted at `child_pid` (the PTY child, typically a
 /// `script` wrapper) until we find a process whose `cmdline` identifies it as a
 /// `claude` CLI invocation, then classify it via [`classify_agent_from_environ`].
@@ -134,7 +142,7 @@ fn is_uuid_like(s: &str) -> bool {
 /// All I/O errors are silently swallowed; the environ is never logged.
 #[cfg(target_os = "linux")]
 #[must_use]
-pub fn detect_running_agent(child_pid: i32, profiles: &[ClaudeProfile]) -> Option<RunningAgent> {
+pub fn detect_claude_process(child_pid: i32, profiles: &[ClaudeProfile]) -> Option<ClaudeProcess> {
     let home = home_dir()?;
     let pid = u32::try_from(child_pid).ok()?;
     let claude_pid = find_claude_pid(pid)?;
@@ -145,13 +153,19 @@ pub fn detect_running_agent(child_pid: i32, profiles: &[ClaudeProfile]) -> Optio
     if let Ok(cmdline) = std::fs::read(format!("/proc/{claude_pid}/cmdline")) {
         agent.session_id = session_id_from_cmdline(&cmdline);
     }
-    Some(agent)
+    Some(ClaudeProcess { pid: claude_pid, agent })
 }
 
 #[cfg(not(target_os = "linux"))]
 #[must_use]
-pub fn detect_running_agent(_child_pid: i32, _profiles: &[ClaudeProfile]) -> Option<RunningAgent> {
+pub fn detect_claude_process(_child_pid: i32, _profiles: &[ClaudeProfile]) -> Option<ClaudeProcess> {
     None
+}
+
+/// [`detect_claude_process`] without the pid: which account runs inside the PTY child.
+#[must_use]
+pub fn detect_running_agent(child_pid: i32, profiles: &[ClaudeProfile]) -> Option<RunningAgent> {
+    detect_claude_process(child_pid, profiles).map(|process| process.agent)
 }
 
 // ── private helpers (Linux-only) ────────────────────────────────────────────

@@ -378,6 +378,7 @@ impl HorizonApp {
         self.poll_git_overviews(ctx);
         self.poll_config_reload();
         self.poll_claude_usage(ctx);
+        self.poll_agent_status();
         self.poll_update_check();
         self.maybe_start_update_check();
 
