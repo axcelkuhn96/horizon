@@ -23,6 +23,13 @@ const CLAUDE_PLUGIN_FILES: &[EmbeddedFile] = &[
             "/assets/plugins/claude-code/skills/horizon-notify/SKILL.md"
         )),
     },
+    EmbeddedFile {
+        relative_path: "skills/horizon-link/SKILL.md",
+        content: include_str!(concat!(
+            env!("OUT_DIR"),
+            "/assets/plugins/claude-code/skills/horizon-link/SKILL.md"
+        )),
+    },
 ];
 
 const TEXT_SKILL_FILES: &[EmbeddedFile] = &[EmbeddedFile {
@@ -138,6 +145,20 @@ mod tests {
 
         assert_eq!(first, 2);
         assert_eq!(second, 0);
+    }
+
+    #[test]
+    fn plugin_install_writes_horizon_link_skill() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let horizon_home = HorizonHome::from_root(temp.path().join(".horizon"));
+
+        install_agent_plugins_impl(&horizon_home, None).expect("install plugins");
+
+        let skill = std::fs::read_to_string(horizon_home.claude_plugin_dir().join("skills/horizon-link/SKILL.md"))
+            .expect("horizon-link skill should be installed");
+        assert!(skill.starts_with("---\nname: horizon-link\n"));
+        assert!(skill.contains("description:"));
+        assert!(skill.contains("HORIZON_PANEL_NAME"));
     }
 
     #[test]
