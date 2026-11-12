@@ -243,6 +243,8 @@ mod tests {
 
     use horizon_core::{Config, PanelKind, PanelResume, TerminalConfig, WorkspaceConfig};
 
+    use crate::app::test_support::{command_options, test_app};
+
     use super::{
         TemplateSaveOutcome, color_hex, existing_template_name, merge_into_settings_buffer, merge_template,
         relative_position, require_terminals, save_template_to_path, template_resume,
@@ -433,5 +435,56 @@ mod tests {
         let error = require_terminals(Vec::new()).expect_err("empty snapshot must be refused");
 
         assert!(error.to_string().contains("No terminals to save"), "{error}");
+    }
+
+    #[test]
+    fn delete_workspace_never_removes_the_last_workspace() {
+        let mut app = test_app();
+        let only = app.board.create_workspace("only");
+        let panel = app
+            .create_panel_with_options(command_options("p", "exec cat"), only)
+            .expect("panel should spawn");
+
+        app.delete_workspace(only);
+
+        assert_eq!(app.board.workspaces.len(), 1);
+        assert!(app.board.workspace(only).is_some());
+        assert!(app.board.panel(panel).is_some(), "the last workspace keeps its panels");
+    }
+
+    #[test]
+    fn delete_workspace_closes_only_its_own_panels() {
+        let mut app = test_app();
+        let doomed = app.board.create_workspace("doomed");
+        let kept = app.board.create_workspace("kept");
+        let doomed_panels: Vec<_> = (0..2)
+            .map(|index| {
+                app.create_panel_with_options(command_options(&format!("d{index}"), "exec cat"), doomed)
+                    .expect("panel should spawn")
+            })
+            .collect();
+        let kept_panel = app
+            .create_panel_with_options(command_options("k", "exec cat"), kept)
+            .expect("panel should spawn");
+
+        app.delete_workspace(doomed);
+
+        assert!(app.board.workspace(doomed).is_none());
+        assert!(app.board.workspace(kept).is_some());
+        assert!(doomed_panels.iter().all(|panel| app.board.panel(*panel).is_none()));
+        assert!(app.board.panel(kept_panel).is_some());
+        assert_eq!(app.board.workspaces.len(), 1);
+    }
+
+    #[test]
+    fn delete_workspace_ignores_an_unknown_workspace() {
+        let mut app = test_app();
+        let first = app.board.create_workspace("a");
+        app.board.create_workspace("b");
+
+        app.delete_workspace(horizon_core::WorkspaceId(9_999));
+
+        assert_eq!(app.board.workspaces.len(), 2);
+        assert!(app.board.workspace(first).is_some());
     }
 }

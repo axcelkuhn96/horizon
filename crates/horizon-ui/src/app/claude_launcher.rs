@@ -648,9 +648,9 @@ fn paint_row(painter: &Painter, rect: Rect, index: usize, row: &mut LauncherRow,
 fn paint_usage_column(painter: &Painter, rect: Rect, usage: &RowUsage) {
     let group_width = USAGE_LABEL_WIDTH + USAGE_BAR_SIZE.x + USAGE_GAP + USAGE_PCT_WIDTH;
     let left = rect.right() - ROW_PADDING_X - group_width;
-    let mut bars = painter.clone();
+    let mut bar_painter = painter.clone();
     if usage.problem.is_some() {
-        bars.multiply_opacity(UNUSABLE_BAR_OPACITY);
+        bar_painter.multiply_opacity(UNUSABLE_BAR_OPACITY);
     }
     for (line, offset) in usage.lines.iter().zip([-10.0_f32, 10.0]) {
         let y = rect.center().y + offset;
@@ -672,7 +672,7 @@ fn paint_usage_column(painter: &Painter, rect: Rect, usage: &RowUsage) {
                 USAGE_BAR_SIZE,
             );
             let fill = hub_ui::severity_color(frac * 100.0, Some(line.severity));
-            hub_ui::mini_bar(&bars, bar, frac, fill);
+            hub_ui::mini_bar(&bar_painter, bar, frac, fill);
         }
         painter.text(
             Pos2::new(left + group_width, y),
@@ -711,6 +711,7 @@ mod tests {
     use horizon_core::PanelKind;
 
     use super::*;
+    use crate::app::test_support::with_key_press;
 
     fn preset(name: &str, alias: Option<&str>, kind: PanelKind) -> PresetConfig {
         PresetConfig {
@@ -972,5 +973,83 @@ mod tests {
             + SEPARATOR_HEIGHT
             + FOOTER_HEIGHT;
         assert!((contents_height(vec![row("conta1")]) - expected).abs() < 0.01);
+    }
+
+    fn launcher_with(names: &[&str], selected: usize) -> ClaudeLauncherState {
+        let mut state = state_with(names.iter().map(|name| row(name)).collect());
+        state.selected = selected;
+        state
+    }
+
+    fn launcher_keys(key: Key, state: &mut ClaudeLauncherState) -> LauncherAction {
+        with_key_press(key, Modifiers::NONE, |ctx| handle_launcher_keys(ctx, state))
+    }
+
+    #[test]
+    fn arrows_move_the_selection_and_wrap_around_the_list() {
+        let mut state = launcher_with(&["a", "b", "c"], 2);
+
+        assert!(matches!(
+            launcher_keys(Key::ArrowDown, &mut state),
+            LauncherAction::None
+        ));
+        assert_eq!(state.selected, 0, "Down from the last row wraps to the first");
+        assert!(state.reveal_selected);
+
+        let mut state = launcher_with(&["a", "b", "c"], 0);
+        launcher_keys(Key::ArrowUp, &mut state);
+        assert_eq!(state.selected, 2, "Up from the first row wraps to the last");
+
+        let mut state = launcher_with(&["a", "b", "c"], 1);
+        launcher_keys(Key::ArrowDown, &mut state);
+        assert_eq!(state.selected, 2);
+    }
+
+    #[test]
+    fn home_and_end_jump_to_the_ends() {
+        let mut state = launcher_with(&["a", "b", "c"], 1);
+        launcher_keys(Key::End, &mut state);
+        assert_eq!(state.selected, 2);
+        launcher_keys(Key::Home, &mut state);
+        assert_eq!(state.selected, 0);
+    }
+
+    #[test]
+    fn enter_launches_the_selected_profile() {
+        let mut state = launcher_with(&["a", "b", "c"], 1);
+
+        assert!(matches!(
+            launcher_keys(Key::Enter, &mut state),
+            LauncherAction::Launch(1)
+        ));
+    }
+
+    #[test]
+    fn number_keys_launch_directly_and_ignore_missing_rows() {
+        let mut state = launcher_with(&["a", "b", "c"], 0);
+        assert!(matches!(
+            launcher_keys(Key::Num3, &mut state),
+            LauncherAction::Launch(2)
+        ));
+
+        let mut state = launcher_with(&["a", "b", "c"], 0);
+        assert!(matches!(launcher_keys(Key::Num4, &mut state), LauncherAction::None));
+        assert_eq!(state.selected, 0);
+    }
+
+    #[test]
+    fn enter_on_an_empty_launcher_opens_settings_and_other_keys_do_nothing() {
+        let mut empty = launcher_with(&[], 0);
+        assert!(matches!(
+            launcher_keys(Key::Enter, &mut empty),
+            LauncherAction::OpenSettings
+        ));
+
+        let mut empty = launcher_with(&[], 0);
+        assert!(matches!(
+            launcher_keys(Key::ArrowDown, &mut empty),
+            LauncherAction::None
+        ));
+        assert!(matches!(launcher_keys(Key::Num1, &mut empty), LauncherAction::None));
     }
 }

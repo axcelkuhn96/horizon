@@ -407,6 +407,7 @@ pub(super) fn paint_link_badge(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::test_support::command_options;
 
     fn info(id: &str, name: &str) -> PanelInfo {
         PanelInfo {
@@ -631,6 +632,51 @@ mod tests {
         assert!(answer_batch(batch, MAX_REQUESTS_PER_FRAME, ok_sent));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_link_server_gives_restored_panels_the_socket() {
+        use std::time::Duration;
+
+        use horizon_core::{Config, PanelKind, PanelState, RuntimeState, WorkspaceState};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("sock").join("1.sock");
+        let server = LinkServer::start(socket.clone()).expect("link server");
+        let state = RuntimeState {
+            workspaces: vec![WorkspaceState {
+                local_id: "w".to_owned(),
+                name: "W".to_owned(),
+                panels: vec![PanelState {
+                    local_id: "p".to_owned(),
+                    name: "restored".to_owned(),
+                    kind: PanelKind::Command,
+                    command: Some("sh".to_owned()),
+                    args: vec!["-c".to_owned(), "echo \"R:$HORIZON_SOCKET\"; exec cat".to_owned()],
+                    ..PanelState::default()
+                }],
+                ..WorkspaceState::default()
+            }],
+            ..RuntimeState::default()
+        };
+
+        let mut app = crate::app::test_support::test_app_with(dir.path(), &Config::default(), state, Some(server));
+
+        assert_eq!(app.board.link_socket(), Some(socket.as_path()));
+        let id = app.board.panels.first().expect("restored panel").id;
+        let needle = format!("R:{}", socket.display());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut seen = false;
+        while !seen && Instant::now() < deadline {
+            let panel = app.board.panel_mut(id).expect("panel");
+            let _ = panel.process_output();
+            seen = panel
+                .terminal()
+                .is_some_and(|terminal| terminal.last_lines_text(24).contains(&needle));
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(seen, "the restored panel never printed {needle}");
+    }
+
     #[test]
     fn sender_label_cleans_caps_and_falls_back() {
         assert_eq!(sender_label(Some("backend")), "backend");
@@ -645,22 +691,11 @@ mod tests {
     }
 
     fn app_with_command_panel() -> (HorizonApp, PanelId) {
-        use horizon_core::{PanelKind, PanelOptions};
-
         let mut app = crate::app::test_support::test_app();
         let workspace = app.board.ensure_workspace();
         let panel = app
             .board
-            .create_panel(
-                PanelOptions {
-                    name: Some("receiver".to_owned()),
-                    kind: PanelKind::Command,
-                    command: Some("sh".to_owned()),
-                    args: vec!["-c".to_owned(), "exec cat".to_owned()],
-                    ..PanelOptions::default()
-                },
-                workspace,
-            )
+            .create_panel(command_options("receiver", "exec cat"), workspace)
             .expect("panel should spawn");
         (app, panel)
     }

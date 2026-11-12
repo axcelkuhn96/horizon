@@ -93,3 +93,130 @@ impl HorizonApp {
         self.mark_runtime_dirty();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+
+    use egui::Context;
+    use horizon_core::WorkspaceId;
+    use horizon_core::git_overview::{RepoOverview, WorktreeInfo};
+
+    use super::super::build_cache;
+    use super::{GitAction, GitActionKind};
+    use crate::app::HorizonApp;
+    use crate::app::test_support::test_app;
+
+    fn worktree(path: &str, prunable: bool) -> WorktreeInfo {
+        WorktreeInfo {
+            path: PathBuf::from(path),
+            branch: Some(path.rsplit('/').next().unwrap_or(path).to_owned()),
+            head_short: Some("abc1234".to_owned()),
+            is_main: false,
+            is_current: false,
+            locked: false,
+            prunable,
+            dirty_count: None,
+            is_agent: false,
+        }
+    }
+
+    fn app_with_worktrees(worktrees: Vec<WorktreeInfo>) -> (HorizonApp, WorkspaceId) {
+        let mut app = test_app();
+        let workspace = app.board.ensure_workspace();
+        let overview = RepoOverview {
+            repo_root: PathBuf::from("/work/api"),
+            branch: Some("main".to_owned()),
+            detached: false,
+            head_short: Some("abc1234".to_owned()),
+            dirty_count: 0,
+            upstream: None,
+            ahead: 0,
+            behind: 0,
+            worktrees,
+        };
+        app.hub.git.caches.insert(workspace, build_cache(&overview));
+        (app, workspace)
+    }
+
+    fn action(workspace: WorkspaceId, path: &str, kind: GitActionKind) -> GitAction {
+        GitAction {
+            workspace,
+            path: Path::new(path).to_path_buf(),
+            kind,
+        }
+    }
+
+    #[test]
+    fn an_action_on_a_worktree_that_is_no_longer_listed_does_nothing() {
+        let (mut app, workspace) = app_with_worktrees(vec![worktree("/work/api-live", false)]);
+        let ctx = Context::default();
+
+        for kind in [
+            GitActionKind::CopyPath,
+            GitActionKind::OpenTerminal,
+            GitActionKind::NewWorkspace,
+        ] {
+            app.apply_git_action(&ctx, &action(workspace, "/work/api-removed", kind));
+        }
+
+        assert!(app.hub.git.copied.is_none());
+        assert!(app.board.panels.is_empty());
+        assert_eq!(app.board.workspaces.len(), 1);
+    }
+
+    #[test]
+    fn a_prunable_worktree_only_allows_copying_its_path() {
+        let (mut app, workspace) = app_with_worktrees(vec![worktree("/work/api-stale", true)]);
+        let ctx = Context::default();
+
+        for kind in [
+            GitActionKind::OpenTerminal,
+            GitActionKind::OpenClaude { preset: 0 },
+            GitActionKind::NewWorkspace,
+        ] {
+            app.apply_git_action(&ctx, &action(workspace, "/work/api-stale", kind));
+        }
+        assert!(app.board.panels.is_empty(), "nothing may open in a prunable worktree");
+        assert_eq!(app.board.workspaces.len(), 1);
+        assert!(app.hub.git.copied.is_none());
+
+        app.apply_git_action(&ctx, &action(workspace, "/work/api-stale", GitActionKind::CopyPath));
+        let copied = app.hub.git.copied.expect("copy feedback");
+        assert_eq!(copied.workspace, workspace);
+    }
+
+    #[test]
+    fn copying_a_listed_worktree_records_its_row() {
+        let (mut app, workspace) = app_with_worktrees(vec![worktree("/work/api-live", false)]);
+        let ctx = Context::default();
+
+        app.apply_git_action(&ctx, &action(workspace, "/work/api-live", GitActionKind::CopyPath));
+
+        let key = app
+            .hub
+            .git
+            .row_for_path(workspace, Path::new("/work/api-live"))
+            .expect("row")
+            .key;
+        let copied = app.hub.git.copied.expect("copy feedback");
+        assert_eq!((copied.workspace, copied.key), (workspace, key));
+    }
+
+    #[test]
+    fn opening_claude_with_an_unknown_preset_does_nothing() {
+        let (mut app, workspace) = app_with_worktrees(vec![worktree("/work/api-live", false)]);
+        let ctx = Context::default();
+
+        app.apply_git_action(
+            &ctx,
+            &action(
+                workspace,
+                "/work/api-live",
+                GitActionKind::OpenClaude { preset: usize::MAX },
+            ),
+        );
+
+        assert!(app.board.panels.is_empty());
+    }
+}

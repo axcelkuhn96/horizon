@@ -3,7 +3,7 @@
 //! Runs before any GUI start-up. Talks to the running instance through the unix socket named
 //! by `HORIZON_SOCKET`: one JSON request line out, one JSON response line back.
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -105,7 +105,7 @@ const MAX_SENDER_CHARS: usize = 64;
 
 /// This panel's name (`HORIZON_PANEL_NAME`) as the sender of a message: escapes and control
 /// characters dropped, capped to [`MAX_SENDER_CHARS`]; `None` when unset or empty.
-fn sender_name(value: Option<OsString>) -> Option<String> {
+fn sender_name(value: Option<&OsStr>) -> Option<String> {
     let name: String = terminal_safe(&value?.to_string_lossy())
         .trim()
         .chars()
@@ -256,7 +256,7 @@ fn execute(args: &[String]) -> Result<String, String> {
     }
     let command = parse_link_args(args)?;
     let socket = socket_path_from(std::env::var_os("HORIZON_SOCKET"))?;
-    let from = sender_name(std::env::var_os("HORIZON_PANEL_NAME"));
+    let from = sender_name(std::env::var_os("HORIZON_PANEL_NAME").as_deref());
     let line = request_line(&command, from.as_deref())?;
     render(exchange(&socket, &line)?)
 }
@@ -456,14 +456,17 @@ mod tests {
 
     #[test]
     fn sender_name_is_cleaned_capped_and_optional() {
+        use std::ffi::OsStr;
+
         assert_eq!(sender_name(None), None);
-        assert_eq!(sender_name(Some(OsString::new())), None);
-        assert_eq!(sender_name(Some(OsString::from("\u{1b}[31m \u{7}"))), None);
+        assert_eq!(sender_name(Some(OsStr::new(""))), None);
+        assert_eq!(sender_name(Some(OsStr::new("\u{1b}[31m \u{7}"))), None);
         assert_eq!(
-            sender_name(Some(OsString::from(" my\u{1b}[31m panel\n "))),
+            sender_name(Some(OsStr::new(" my\u{1b}[31m panel\n "))),
             Some("my panel".to_owned())
         );
-        let long = sender_name(Some(OsString::from("x".repeat(200)))).expect("name");
+        let long = "x".repeat(200);
+        let long = sender_name(Some(OsStr::new(&long))).expect("name");
         assert_eq!(long.chars().count(), super::MAX_SENDER_CHARS);
     }
 

@@ -60,3 +60,85 @@ impl HorizonApp {
         failed_panels
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use egui::Context;
+    use horizon_core::{PanelKind, TerminalConfig, WorkspaceConfig, workspace_color_index};
+
+    use crate::app::test_support::test_app;
+
+    fn command_terminal(name: &str, program: &str, args: &[&str]) -> TerminalConfig {
+        TerminalConfig {
+            name: name.to_owned(),
+            kind: PanelKind::Command,
+            command: Some(program.to_owned()),
+            args: args.iter().map(|arg| (*arg).to_owned()).collect(),
+            ..TerminalConfig::default()
+        }
+    }
+
+    fn template(color: Option<&str>, terminals: Vec<TerminalConfig>) -> WorkspaceConfig {
+        WorkspaceConfig {
+            name: " Backend ".to_owned(),
+            color: color.map(str::to_owned),
+            cwd: None,
+            position: None,
+            terminals,
+            sidebar_collapsed: false,
+        }
+    }
+
+    #[test]
+    fn open_now_applies_the_template_color_and_counts_no_failures() {
+        let mut app = test_app();
+        let ctx = Context::default();
+        let red = "#f38ba8";
+        let slot = workspace_color_index(red).expect("palette color");
+
+        let failed = app.open_template_now(
+            &ctx,
+            &template(Some(red), vec![command_terminal("cat", "sh", &["-c", "exec cat"])]),
+        );
+
+        assert_eq!(failed, 0);
+        let workspace = app.board.workspaces.last().expect("workspace");
+        assert_eq!(workspace.name, "Backend");
+        assert_eq!(workspace.color_idx, slot);
+        assert_eq!(workspace.panels.len(), 1);
+    }
+
+    #[test]
+    fn open_now_counts_terminals_that_fail_to_start_and_keeps_the_rest() {
+        let mut app = test_app();
+        let ctx = Context::default();
+
+        let failed = app.open_template_now(
+            &ctx,
+            &template(
+                None,
+                vec![
+                    command_terminal("ok", "sh", &["-c", "exec cat"]),
+                    command_terminal("broken", "/nonexistent/horizon-test-binary", &[]),
+                    command_terminal("also-broken", "/nonexistent/horizon-test-binary", &[]),
+                ],
+            ),
+        );
+
+        assert_eq!(failed, 2);
+        let workspace = app.board.workspaces.last().expect("workspace");
+        assert_eq!(workspace.panels.len(), 1, "the working terminal still opens");
+    }
+
+    #[test]
+    fn open_now_ignores_a_color_outside_the_palette() {
+        let mut app = test_app();
+        let ctx = Context::default();
+
+        app.open_template_now(&ctx, &template(Some("#123456"), Vec::new()));
+
+        let workspace = app.board.workspaces.last().expect("workspace");
+        assert!(workspace_color_index("#123456").is_none());
+        assert_eq!(workspace.color_idx, 0, "first workspace keeps its default slot");
+    }
+}

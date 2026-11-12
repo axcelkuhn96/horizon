@@ -616,6 +616,7 @@ fn show_footer(ui: &mut Ui, state: &SendToPanelState) -> SendAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::test_support::with_key_press;
 
     fn row(name: &str, workspace: &str, kind: PanelKind) -> TargetRow {
         TargetRow {
@@ -770,5 +771,99 @@ mod tests {
         state.filter = "b".to_owned();
         state.refilter();
         assert!(state.error.is_none());
+    }
+
+    fn three_rows() -> Vec<TargetRow> {
+        vec![
+            row("a", "w", PanelKind::Shell),
+            row("b", "w", PanelKind::Shell),
+            row("c", "w", PanelKind::Shell),
+        ]
+    }
+
+    fn keys(key: Key, modifiers: Modifiers, state: &mut SendToPanelState) -> SendAction {
+        with_key_press(key, modifiers, |ctx| handle_send_keys(ctx, state))
+    }
+
+    #[test]
+    fn tab_moves_the_focus_between_the_list_and_the_message() {
+        let mut state = state_with(three_rows(), "m");
+
+        let action = keys(Key::Tab, Modifiers::NONE, &mut state);
+
+        assert!(matches!(action, SendAction::None));
+        assert!(state.focus == SendFocus::Message);
+        assert!(state.focus_pending, "the next frame must move the keyboard focus");
+
+        let mut state = state_with(three_rows(), "m");
+        let action = with_key_press(Key::Tab, Modifiers::NONE, |ctx| {
+            ctx.memory_mut(|memory| memory.request_focus(message_id()));
+            handle_send_keys(ctx, &mut state)
+        });
+        assert!(matches!(action, SendAction::None));
+        assert!(
+            state.focus == SendFocus::List,
+            "Tab from the message goes back to the list"
+        );
+        assert!(state.focus_pending);
+    }
+
+    #[test]
+    fn arrows_move_the_selection_with_wrap_while_the_list_has_the_focus() {
+        let mut state = state_with(three_rows(), "m");
+
+        keys(Key::ArrowDown, Modifiers::NONE, &mut state);
+        assert_eq!(state.selected, 1);
+        assert!(state.reveal_selected);
+
+        let mut state = state_with(three_rows(), "m");
+        keys(Key::ArrowUp, Modifiers::NONE, &mut state);
+        assert_eq!(state.selected, 2, "Up from the first row wraps to the last");
+    }
+
+    #[test]
+    fn arrows_belong_to_the_message_field_while_it_has_the_focus() {
+        let mut state = state_with(three_rows(), "m");
+
+        let action = with_key_press(Key::ArrowDown, Modifiers::NONE, |ctx| {
+            ctx.memory_mut(|memory| memory.request_focus(message_id()));
+            let action = handle_send_keys(ctx, &mut state);
+            (action, ctx.input(|input| input.key_pressed(Key::ArrowDown)))
+        });
+
+        assert!(matches!(action.0, SendAction::None));
+        assert!(action.1, "the key stays available to the text edit");
+        assert_eq!(state.selected, 0);
+    }
+
+    #[test]
+    fn command_enter_sends_with_enter_and_command_shift_enter_without() {
+        let mut state = state_with(three_rows(), "m");
+        assert!(matches!(
+            keys(Key::Enter, Modifiers::COMMAND, &mut state),
+            SendAction::Send { enter: true }
+        ));
+
+        let mut state = state_with(three_rows(), "m");
+        assert!(matches!(
+            keys(Key::Enter, Modifiers::COMMAND | Modifiers::SHIFT, &mut state),
+            SendAction::Send { enter: false }
+        ));
+    }
+
+    #[test]
+    fn a_plain_enter_does_not_send() {
+        let mut state = state_with(three_rows(), "m");
+
+        let action = with_key_press(Key::Enter, Modifiers::NONE, |ctx| {
+            let action = handle_send_keys(ctx, &mut state);
+            (action, ctx.input(|input| input.key_pressed(Key::Enter)))
+        });
+
+        assert!(matches!(action.0, SendAction::None));
+        assert!(
+            action.1,
+            "Enter is left to the focused widget (a newline in the message)"
+        );
     }
 }

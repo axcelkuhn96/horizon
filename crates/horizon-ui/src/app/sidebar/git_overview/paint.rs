@@ -154,7 +154,7 @@ struct ListOutcome {
 /// `VISIBLE_ROWS` unless `all`.
 fn paint_worktree_list(
     ui: &mut Ui,
-    env: &RowEnv,
+    env: &RowEnv<'_>,
     cache: &GitLineCache,
     all: bool,
     agents_open_now: bool,
