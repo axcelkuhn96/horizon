@@ -10,6 +10,7 @@ use super::claude_quick_start::QuickStartUi;
 use super::hub_ui;
 use super::link::LinkUiState;
 use super::minimap::MinimapAutoHide;
+use super::prompts::PromptsUi;
 use super::sidebar::{GitSidebarState, PanelLabelCache};
 use super::usage_chips::ClaudeUsageState;
 
@@ -46,6 +47,8 @@ pub(super) struct HubState {
     pub(super) minimap_auto_hide: HashMap<egui::Id, MinimapAutoHide>,
     /// Titlebar "Claude" quick-start strip and the busy probes behind its button.
     pub(super) quick_start: QuickStartUi,
+    /// Saved prompts: cached effective list, palette rows and the refusal notice.
+    pub(super) prompts: PromptsUi,
 }
 
 impl HubState {

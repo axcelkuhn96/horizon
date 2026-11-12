@@ -111,7 +111,23 @@ impl Board {
             return Err(LinkError::TooLarge);
         }
         let id = self.link_target(target)?;
-        let panel = self.panel_mut(id).ok_or(LinkError::Closed)?;
+        self.deliver_text(id, text, enter)?;
+        Ok(LinkOk::Sent)
+    }
+
+    /// Types `text` into `panel` the way `link send` does: sanitised, wrapped in bracketed
+    /// paste when the terminal asked for it, followed by Enter only when `enter` is set.
+    ///
+    /// # Errors
+    ///
+    /// [`LinkError::TooLarge`] for text over the request cap, [`LinkError::Closed`] when the
+    /// panel is gone, has no terminal or its process exited, and [`LinkError::BadRequest`]
+    /// for multi-line text that cannot be left unsent (no bracketed paste, no Enter).
+    pub fn deliver_text(&mut self, panel: PanelId, text: &str, enter: bool) -> Result<(), LinkError> {
+        if text.len() > MAX_REQUEST_BYTES {
+            return Err(LinkError::TooLarge);
+        }
+        let panel = self.panel_mut(panel).ok_or(LinkError::Closed)?;
         let bracketed = live_terminal_mode(panel)?.contains(TermMode::BRACKETED_PASTE);
         let text = sanitize_send_text(text);
         // Without bracketed paste a newline is a typed Enter: the lines would execute, which
@@ -129,7 +145,15 @@ impl Board {
         if enter {
             panel.write_input(b"\r");
         }
-        Ok(LinkOk::Sent)
+        Ok(())
+    }
+
+    /// Whether `panel` has a live terminal that asked for bracketed paste, so multi-line text
+    /// reaches it as one paste instead of as typed lines.
+    #[must_use]
+    pub fn bracketed_paste_enabled(&self, panel: PanelId) -> bool {
+        self.panel(panel)
+            .is_some_and(|panel| live_terminal_mode(panel).is_ok_and(|mode| mode.contains(TermMode::BRACKETED_PASTE)))
     }
 
     fn link_read(&self, target: &str, lines: usize) -> Result<LinkOk, LinkError> {

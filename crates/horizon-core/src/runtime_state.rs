@@ -937,6 +937,7 @@ mod tests {
                 ..TerminalConfig::default()
             }],
             sidebar_collapsed: false,
+            prompts: Vec::new(),
         };
 
         let state = WorkspaceState::from_config(0, &workspace, [120.0, 64.0]);
@@ -957,6 +958,7 @@ mod tests {
                 ..TerminalConfig::default()
             }],
             sidebar_collapsed: false,
+            prompts: Vec::new(),
         };
 
         let state = WorkspaceState::from_config(0, &workspace, [120.0, 64.0]);
@@ -1005,6 +1007,7 @@ workspaces:
                 ..TerminalConfig::default()
             }],
             sidebar_collapsed: false,
+            prompts: Vec::new(),
         };
 
         let state = WorkspaceState::from_config(0, &workspace, [120.0, 64.0]);
@@ -1049,6 +1052,7 @@ workspaces:
             position: None,
             terminals: Vec::new(),
             sidebar_collapsed: true,
+            prompts: Vec::new(),
         };
 
         let state = WorkspaceState::from_config(0, &workspace, [120.0, 64.0]);
@@ -1112,6 +1116,7 @@ workspaces:
             position: None,
             terminals: Vec::new(),
             sidebar_collapsed: false,
+            prompts: Vec::new(),
         };
         let state = RuntimeState {
             workspaces: vec![

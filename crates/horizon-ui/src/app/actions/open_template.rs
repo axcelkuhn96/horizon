@@ -86,6 +86,7 @@ mod tests {
             position: None,
             terminals,
             sidebar_collapsed: false,
+            prompts: Vec::new(),
         }
     }
 

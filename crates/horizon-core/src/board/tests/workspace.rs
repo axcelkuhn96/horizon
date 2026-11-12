@@ -167,6 +167,7 @@ fn sync_workspace_metadata_updates_only_templated_workspaces() {
             position: None,
             terminals: Vec::new(),
             sidebar_collapsed: false,
+            prompts: Vec::new(),
         }],
         ..Config::default()
     };
@@ -190,6 +191,7 @@ fn named_template(name: &str, cwd: &str) -> WorkspaceConfig {
         position: None,
         terminals: Vec::new(),
         sidebar_collapsed: false,
+        prompts: Vec::new(),
     }
 }
 

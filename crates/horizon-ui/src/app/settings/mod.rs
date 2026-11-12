@@ -3,6 +3,7 @@ mod claude;
 pub(crate) use claude::select_claude_tab;
 mod general;
 mod presets;
+mod prompts_section;
 mod shortcuts;
 mod speech;
 #[cfg(test)]

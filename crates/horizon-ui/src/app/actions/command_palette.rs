@@ -112,12 +112,14 @@ impl HorizonApp {
             command_palette_workspace_entries(&self.board, &detached_workspace_ids, self.board.active_workspace);
         let panel_entries = command_palette_panel_entries(&self.board, &detached_workspace_ids);
         let preset_entries = command_palette_preset_entries(&self.presets);
+        self.hub.prompts.refresh(&self.template_config, &self.board);
 
         let action = palette.show(
             ctx,
             &workspace_entries,
             &panel_entries,
             &preset_entries,
+            &self.hub.prompts.entries,
             &self.action_commands_cache,
         );
         match action {
@@ -218,6 +220,8 @@ impl HorizonApp {
             CommandId::SearchFileContents => self.open_explorer_search(),
             CommandId::PasteIntoExplorer => self.paste_files_into_explorer(),
             CommandId::OpenClaudeLauncher => self.toggle_claude_launcher(),
+            CommandId::InsertPrompt(index) => self.insert_prompt_by_index(ctx, index, false),
+            CommandId::InsertPromptAndSend(index) => self.insert_prompt_by_index(ctx, index, true),
             CommandId::ToggleScrollPan => {
                 self.scroll_pans_over_panels = !self.scroll_pans_over_panels;
                 tracing::info!(

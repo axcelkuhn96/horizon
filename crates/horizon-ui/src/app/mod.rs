@@ -15,6 +15,7 @@ mod minimap;
 mod panel_chrome;
 mod panels;
 mod persistence;
+mod prompts;
 mod remote_hosts;
 mod root_chrome;
 mod session;

@@ -53,11 +53,12 @@ pub use board::{
     Board, Direction, PanelRect, ShutdownProgress, WorkspaceDockSide, WorkspaceLayout, nearest_in_direction,
 };
 pub use config::{
-    AppearanceConfig, AppearanceTheme, CLAUDE_BASE_PRESET_NAME, ClaudeProfile, Config, FeaturesConfig, InputConfig,
-    OverlaysConfig, PanelSnapshotForTemplate, PresetConfig, ShortcutsConfig, SpeechBackend, SpeechConfig,
+    AppearanceConfig, AppearanceTheme, CLAUDE_BASE_PRESET_NAME, ClaudeProfile, Config, EffectivePrompt, FeaturesConfig,
+    InputConfig, MAX_PROMPT_NAME_CHARS, MAX_PROMPT_TEXT_BYTES, OverlaysConfig, PanelSnapshotForTemplate, PresetConfig,
+    PromptIssue, PromptIssueKind, PromptScope, SavedPrompt, ShortcutsConfig, SpeechBackend, SpeechConfig,
     SpeechHotkeyMode, SpeechProfile, SpeechTask, TerminalConfig, WindowConfig, WorkspaceConfig, claude_profile_preset,
-    discover_claude_profiles, expand_config_dir, grid_position, move_item, scroll_should_pan_canvas,
-    template_from_workspace, terminal_from_preset, upsert_template, validate_claude_profiles,
+    discover_claude_profiles, effective_prompts, expand_config_dir, grid_position, move_item, scroll_should_pan_canvas,
+    template_from_workspace, terminal_from_preset, upsert_template, validate_claude_profiles, validate_prompts,
 };
 pub use editor::{MarkdownEditor, PanelContent, PreviewMode};
 pub use error::{Error, Result};

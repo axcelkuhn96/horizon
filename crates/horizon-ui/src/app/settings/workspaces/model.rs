@@ -150,6 +150,7 @@ pub(super) fn add_template(workspaces: &mut Vec<WorkspaceConfig>) -> usize {
         position: None,
         terminals: Vec::new(),
         sidebar_collapsed: false,
+        prompts: Vec::new(),
     };
     upsert_template(workspaces, template, None);
     index
@@ -319,6 +320,7 @@ mod tests {
             position: None,
             terminals: Vec::new(),
             sidebar_collapsed: false,
+            prompts: Vec::new(),
         }
     }
 

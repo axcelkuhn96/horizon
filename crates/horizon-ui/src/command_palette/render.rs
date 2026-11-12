@@ -125,7 +125,11 @@ pub(super) fn render_result_row(
                 egui::Align2::LEFT_CENTER,
                 &item.detail,
                 egui::FontId::proportional(11.0),
-                theme::FG_DIM(),
+                if item.detail_accent {
+                    theme::ACCENT()
+                } else {
+                    theme::FG_DIM()
+                },
             );
         }
     }

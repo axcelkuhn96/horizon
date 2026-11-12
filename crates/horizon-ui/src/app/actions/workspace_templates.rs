@@ -261,6 +261,7 @@ mod tests {
                 ..TerminalConfig::default()
             }],
             sidebar_collapsed: false,
+            prompts: Vec::new(),
         }
     }
 

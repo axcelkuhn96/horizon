@@ -1023,6 +1023,7 @@ workspaces:
                 ..TerminalConfig::default()
             }],
             sidebar_collapsed: false,
+            prompts: Vec::new(),
         });
 
         let yaml = config.to_yaml().expect("should serialize");

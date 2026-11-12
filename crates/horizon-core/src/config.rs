@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 mod claude_profiles;
 mod features;
 mod input;
+mod prompts;
 mod workspace_template;
 pub use workspace_template::{
     PanelSnapshotForTemplate, grid_position, move_item, template_from_workspace, terminal_from_preset, upsert_template,
@@ -17,6 +18,10 @@ pub use claude_profiles::{
 };
 pub use features::FeaturesConfig;
 pub use input::{InputConfig, scroll_should_pan_canvas};
+pub use prompts::{
+    EffectivePrompt, MAX_PROMPT_NAME_CHARS, MAX_PROMPT_TEXT_BYTES, PromptIssue, PromptIssueKind, PromptScope,
+    SavedPrompt, effective_prompts, validate_prompts,
+};
 
 use crate::config_migration::{self, CURRENT_CONFIG_VERSION};
 use crate::error::{Error, Result};
@@ -48,6 +53,9 @@ pub struct Config {
     pub workspaces: Vec<WorkspaceConfig>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub claude_profiles: Vec<ClaudeProfile>,
+    /// Saved prompts available in every workspace.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prompts: Vec<SavedPrompt>,
 }
 
 /// Existing config files without a `version` field are treated as v1
@@ -70,6 +78,7 @@ impl Default for Config {
             presets: default_presets(),
             workspaces: Vec::new(),
             claude_profiles: Vec::new(),
+            prompts: Vec::new(),
         }
     }
 }
@@ -545,6 +554,9 @@ pub struct WorkspaceConfig {
     /// Sidebar-only: does not affect canvas panels. Persists across relaunch.
     #[serde(default)]
     pub sidebar_collapsed: bool,
+    /// Saved prompts of this workspace; they shadow global ones of the same name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prompts: Vec<SavedPrompt>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -702,6 +714,7 @@ impl Config {
         crate::speech_config::validate_speech(&self.features.speech, &shortcuts)?;
         validate_ssh_connections(&self.presets, &self.workspaces)?;
         validate_claude_profiles(&self.claude_profiles)?;
+        prompts::validate_all_prompts(&self.prompts, &self.workspaces)?;
         Ok(())
     }
 
