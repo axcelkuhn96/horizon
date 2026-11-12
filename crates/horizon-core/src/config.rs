@@ -6,6 +6,9 @@ use serde::{Deserialize, Serialize};
 mod claude_profiles;
 mod input;
 mod workspace_template;
+pub use workspace_template::{
+    PanelSnapshotForTemplate, grid_position, move_item, template_from_workspace, terminal_from_preset, upsert_template,
+};
 
 pub use claude_profiles::{
     CLAUDE_BASE_PRESET_NAME, ClaudeProfile, claude_profile_preset, discover_claude_profiles, expand_config_dir,
