@@ -19,6 +19,16 @@ pub fn load_cache(path: &Path) -> Vec<ProfileUsage> {
     serde_json::from_str(&raw).unwrap_or_default()
 }
 
+/// `<name>.<pid>.tmp` next to `path`, so two Horizon instances never share a temp file.
+fn tmp_path(path: &Path) -> io::Result<std::path::PathBuf> {
+    let mut tmp_name = path
+        .file_name()
+        .ok_or_else(|| io::Error::other("cache path has no file name"))?
+        .to_owned();
+    tmp_name.push(format!(".{}.tmp", std::process::id()));
+    Ok(path.with_file_name(tmp_name))
+}
+
 /// Atomically writes the snapshot (temp file in the same dir, then rename); mode 0600 on unix.
 ///
 /// # Errors
@@ -29,13 +39,8 @@ pub fn save_cache(path: &Path, usage: &[ProfileUsage]) -> io::Result<()> {
     if let Some(dir) = dir {
         fs::create_dir_all(dir)?;
     }
-    let mut tmp_name = path
-        .file_name()
-        .ok_or_else(|| io::Error::other("cache path has no file name"))?
-        .to_owned();
-    tmp_name.push(".tmp");
-    let tmp = path.with_file_name(tmp_name);
-    // A stale temp file could carry looser permissions; start from a fresh one.
+    let tmp = tmp_path(path)?;
+    // A stale temp file from this pid could carry looser permissions; start from a fresh one.
     let _ = fs::remove_file(&tmp);
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
@@ -92,6 +97,21 @@ mod tests {
         }
         let leftovers: Vec<_> = std::fs::read_dir(path.parent().unwrap()).unwrap().collect();
         assert_eq!(leftovers.len(), 1, "temp file must be renamed away");
+    }
+
+    #[test]
+    fn temp_file_is_per_process_and_foreign_temp_files_survive() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("claude-usage-cache.json");
+        let tmp = tmp_path(&path).unwrap();
+        assert_eq!(
+            tmp.file_name().unwrap().to_string_lossy(),
+            format!("claude-usage-cache.json.{}.tmp", std::process::id())
+        );
+        let foreign = dir.path().join("claude-usage-cache.json.999999.tmp");
+        std::fs::write(&foreign, "other instance mid-write").unwrap();
+        save_cache(&path, &[sample("a")]).unwrap();
+        assert_eq!(std::fs::read_to_string(&foreign).unwrap(), "other instance mid-write");
     }
 
     #[test]

@@ -14,6 +14,9 @@ use crate::config::{ClaudeProfile, expand_config_dir};
 /// Production usage endpoint. Tests pass a loopback stub URL instead.
 pub const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 
+/// The only host that ever receives the bearer token outside of tests.
+const PRODUCTION_HOST: &str = "api.anthropic.com";
+
 const BETA_HEADER: &str = "oauth-2025-04-20";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_BODY_BYTES: u64 = 1024 * 1024;
@@ -21,8 +24,11 @@ const MAX_BODY_BYTES: u64 = 1024 * 1024;
 /// GETs `base_url` with the OAuth token and returns the raw response body.
 ///
 /// Never follows redirects, so the bearer token only ever reaches the host in
-/// `base_url`. Only `https://` is accepted, plus plain `http://` to a loopback
-/// host (local test stub); URLs carrying userinfo are refused.
+/// `base_url`. Outside tests only `https://api.anthropic.com/...` is accepted
+/// (no userinfo, no explicit port); plain `http://` to a loopback host (local
+/// stub) is accepted only when compiled for tests, and then bypasses any proxy.
+/// Proxies for the production host come from the environment (`HTTPS_PROXY`);
+/// SOCKS proxies are unsupported because ureq's `socks-proxy` feature is off.
 ///
 /// # Errors
 /// `Http(code)` for any non-2xx status (including 3xx); `Timeout` / `Network`
@@ -31,13 +37,19 @@ pub fn fetch_usage(base_url: &str, token: &AccessToken) -> Result<String, UsageE
     if !is_permitted_url(base_url) {
         return Err(UsageError::Network);
     }
-    let agent: Agent = Agent::config_builder()
+    let builder = Agent::config_builder()
         .timeout_global(Some(REQUEST_TIMEOUT))
         .max_redirects(0)
         .max_redirects_will_error(false)
-        .http_status_as_error(false)
-        .build()
-        .into();
+        .http_status_as_error(false);
+    // The cleartext loopback stub (tests only) must never go through a proxy.
+    #[cfg(test)]
+    let builder = if base_url.starts_with("http://") {
+        builder.proxy(None)
+    } else {
+        builder
+    };
+    let agent: Agent = builder.build().into();
     let mut response = agent
         .get(base_url)
         .header("Authorization", format!("Bearer {}", token.expose()))
@@ -64,22 +76,33 @@ fn map_transport_error(error: ureq::Error) -> UsageError {
     }
 }
 
-/// `https://` anywhere, or `http://` to a loopback host only; never userinfo.
 fn is_permitted_url(url: &str) -> bool {
-    let (secure, rest) = match (url.strip_prefix("https://"), url.strip_prefix("http://")) {
-        (Some(rest), _) => (true, rest),
-        (None, Some(rest)) => (false, rest),
-        (None, None) => return false,
-    };
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
-    if authority.is_empty() || authority.contains('@') {
-        return false;
-    }
-    if secure {
+    #[cfg(test)]
+    if is_test_loopback_url(url) {
         return true;
     }
-    let host = authority.rsplit_once(':').map_or(authority, |(host, _)| host);
-    matches!(host, "127.0.0.1" | "localhost" | "[::1]")
+    is_production_url(url)
+}
+
+/// Authority (`host[:port]`) of an `http(s)://` URL, rejecting empty ones and userinfo.
+fn authority_of<'a>(url: &'a str, scheme: &str) -> Option<&'a str> {
+    let rest = url.strip_prefix(scheme)?;
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    (!authority.is_empty() && !authority.contains('@')).then_some(authority)
+}
+
+/// `https://api.anthropic.com/...` exactly: no userinfo, no port, no lookalike host.
+fn is_production_url(url: &str) -> bool {
+    authority_of(url, "https://") == Some(PRODUCTION_HOST)
+}
+
+/// `http://` to a loopback host (the local stub); compiled for tests only.
+#[cfg(test)]
+fn is_test_loopback_url(url: &str) -> bool {
+    authority_of(url, "http://").is_some_and(|authority| {
+        let host = authority.rsplit_once(':').map_or(authority, |(host, _)| host);
+        matches!(host, "127.0.0.1" | "localhost" | "[::1]")
+    })
 }
 
 /// Refreshes one profile's usage.
@@ -96,6 +119,18 @@ pub fn refresh_profile(
     now_ms: i64,
     previous: Option<&ProfileUsage>,
 ) -> ProfileUsage {
+    refresh_profile_detailed(profile, home, base_url, now_ms, previous).0
+}
+
+/// Like [`refresh_profile`], also reporting whether the server answered HTTP 429
+/// (the poller backs off on it). A rate-limited profile is `Stale` with its previous values.
+pub(super) fn refresh_profile_detailed(
+    profile: &ClaudeProfile,
+    home: &Path,
+    base_url: &str,
+    now_ms: i64,
+    previous: Option<&ProfileUsage>,
+) -> (ProfileUsage, bool) {
     let config_dir = expand_config_dir(&profile.config_dir, home);
     let (display_name, email) = read_account(&config_dir, home);
     let kept = |state: UsageState| ProfileUsage {
@@ -113,32 +148,36 @@ pub fn refresh_profile(
         Ok(credentials) => credentials,
         Err(error) => {
             tracing::debug!(profile = %profile.name, %error, "claude credentials unavailable");
-            return ProfileUsage {
+            let missing = ProfileUsage {
                 five_hour: UsageWindow::default(),
                 seven_day: UsageWindow::default(),
                 severity: None,
                 fetched_at_ms: None,
                 ..kept(UsageState::Missing)
             };
+            return (missing, false);
         }
     };
     if credentials.token.is_empty() || token_expired(credentials.expires_at_ms, now_ms) {
-        return kept(UsageState::Expired);
+        return (kept(UsageState::Expired), false);
     }
 
     let parsed = fetch_usage(base_url, &credentials.token).and_then(|body| parse_usage_response(&body));
     match parsed {
-        Ok((five_hour, seven_day, severity)) => ProfileUsage {
-            five_hour,
-            seven_day,
-            severity,
-            fetched_at_ms: Some(now_ms),
-            ..kept(UsageState::Ok)
-        },
-        Err(UsageError::Http(401 | 403)) => kept(UsageState::Expired),
+        Ok((five_hour, seven_day, severity)) => (
+            ProfileUsage {
+                five_hour,
+                seven_day,
+                severity,
+                fetched_at_ms: Some(now_ms),
+                ..kept(UsageState::Ok)
+            },
+            false,
+        ),
+        Err(UsageError::Http(401 | 403)) => (kept(UsageState::Expired), false),
         Err(error) => {
             tracing::debug!(profile = %profile.name, %error, "claude usage refresh failed");
-            kept(UsageState::Stale)
+            (kept(UsageState::Stale), error == UsageError::Http(429))
         }
     }
 }
@@ -368,6 +407,41 @@ mod tests {
         ] {
             assert_eq!(fetch_usage(url, &token), Err(UsageError::Network), "{url}");
         }
+    }
+
+    #[test]
+    fn production_validator_is_host_locked() {
+        assert!(is_production_url(USAGE_URL));
+        for url in [
+            "http://127.0.0.1:8080/api/oauth/usage",
+            "http://localhost/api/oauth/usage",
+            "http://api.anthropic.com/api/oauth/usage",
+            "https://example.com/api/oauth/usage",
+            "https://api.anthropic.com.evil.com/api/oauth/usage",
+            "https://api.anthropic.com@evil.com/api/oauth/usage",
+            "https://user:pw@api.anthropic.com/api/oauth/usage",
+            "https://api.anthropic.com:8443/api/oauth/usage",
+            "https://evil.com/?u=https://api.anthropic.com/",
+            "https://",
+            "",
+        ] {
+            assert!(!is_production_url(url), "{url}");
+        }
+    }
+
+    #[test]
+    fn http_429_is_reported_as_rate_limited_and_keeps_values() {
+        let fx = fixture(TEST_TOKEN, FAR_FUTURE_MS);
+        let stub = Stub::new(429, "Retry-After: 120\r\n", "{}");
+        let (usage, limited) =
+            refresh_profile_detailed(&fx.profile, fx.home.path(), &stub.url, NOW_MS, Some(&previous()));
+        assert!(limited);
+        assert_eq!(usage.state, UsageState::Stale);
+        assert_eq!(usage.five_hour.percent, Some(50.0));
+        assert_eq!(usage.fetched_at_ms, Some(500));
+        let stub = Stub::new(500, "", "{}");
+        let (_, limited) = refresh_profile_detailed(&fx.profile, fx.home.path(), &stub.url, NOW_MS, Some(&previous()));
+        assert!(!limited);
     }
 
     #[test]

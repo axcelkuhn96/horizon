@@ -18,7 +18,7 @@ pub use model::{
     ProfileUsage, UsageState, UsageWindow, parse_rfc3339_unix, parse_usage_response, remaining_percent,
     used_percent_label,
 };
-pub use poller::UsagePoller;
+pub use poller::{MIN_POLL_INTERVAL, UsagePoller};
 
 /// Failure reading credentials or fetching/parsing usage. Variants carry no
 /// secret material, so they are safe to log and display.
