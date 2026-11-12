@@ -2,8 +2,8 @@ mod env;
 mod spawn;
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -18,12 +18,13 @@ use crate::terminal::{AgentNotification, Terminal, TerminalSpawnOptions};
 use crate::usage_dashboard::UsageDashboard;
 use crate::workspace::WorkspaceId;
 
-use self::env::merge_spawn_env;
+use self::env::{horizon_injected_env, merge_spawn_env};
 pub use self::spawn::current_unix_millis;
 #[cfg(test)]
 use self::spawn::platform_default_shell;
 use self::spawn::{
     AgentLaunchContext, kitty_keyboard_for_kind, resolve_launch_command, scrollback_limit_for_kind, spawn_panel,
+    spawn_panel_linked,
 };
 
 const DEFAULT_CELL_WIDTH: u16 = 8;
@@ -197,6 +198,9 @@ pub struct Panel {
     pub collapsed: bool,
     /// Extra PTY environment from the preset; reused on restart and persisted.
     pub env: BTreeMap<String, String>,
+    /// Panel-link socket exposed to the PTY as `HORIZON_SOCKET`; set by the board at
+    /// spawn and refreshed before a restart.
+    pub(crate) link_socket: Option<PathBuf>,
     /// The panel height (`layout.size[1]`) recorded before collapse, so expand
     /// can restore the prior height. `None` when the panel has never collapsed.
     expanded_height: Option<f32>,
@@ -268,6 +272,20 @@ impl Panel {
     /// Returns an error if the terminal runtime cannot be created.
     pub fn spawn(id: PanelId, workspace_id: WorkspaceId, opts: PanelOptions) -> Result<Self> {
         spawn_panel(id, workspace_id, opts)
+    }
+
+    /// Like [`Panel::spawn`], exposing the panel-link socket to the PTY as `HORIZON_SOCKET`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the terminal runtime cannot be created.
+    pub(crate) fn spawn_linked(
+        id: PanelId,
+        workspace_id: WorkspaceId,
+        opts: PanelOptions,
+        link_socket: Option<&Path>,
+    ) -> Result<Self> {
+        spawn_panel_linked(id, workspace_id, opts, link_socket)
     }
 
     /// Build a terminal-backed placeholder for a panel that failed to restore.
@@ -550,7 +568,8 @@ impl Panel {
             );
         }
 
-        let env = merge_spawn_env(self.kind, &self.env, &HashMap::new());
+        let injected = horizon_injected_env(&self.local_id, &self.title, self.link_socket.as_deref());
+        let env = merge_spawn_env(self.kind, &self.env, &injected);
         self.content = PanelContent::Terminal(Terminal::spawn(TerminalSpawnOptions {
             program,
             args: launch_args,
@@ -754,6 +773,7 @@ mod tests {
             ssh_status: None,
             collapsed: false,
             env: std::collections::BTreeMap::new(),
+            link_socket: None,
             expanded_height: None,
         }
     }

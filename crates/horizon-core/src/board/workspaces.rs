@@ -60,7 +60,10 @@ impl Board {
     ///
     /// Returns an error if the underlying PTY-backed panel cannot be spawned.
     pub fn create_panel(&mut self, opts: PanelOptions, workspace: WorkspaceId) -> Result<PanelId> {
-        self.create_panel_with(opts, workspace, Panel::spawn)
+        let link_socket = self.link_socket.clone();
+        self.create_panel_with(opts, workspace, |id, workspace, opts| {
+            Panel::spawn_linked(id, workspace, opts, link_socket.as_deref())
+        })
     }
 
     pub(super) fn create_failed_restore_panel(

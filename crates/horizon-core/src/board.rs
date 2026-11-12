@@ -1,6 +1,7 @@
 mod arrangement;
 mod attention;
 mod geometry;
+mod link;
 mod navigation;
 mod shutdown;
 mod workspaces;
@@ -9,7 +10,7 @@ pub use navigation::{Direction, PanelRect, nearest_in_direction};
 pub use shutdown::ShutdownProgress;
 
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
@@ -91,6 +92,7 @@ pub struct Board {
     next_panel_id: u64,
     next_workspace_id: u64,
     next_attention_id: u64,
+    link_socket: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -114,6 +116,7 @@ impl Board {
             next_panel_id: 1,
             next_workspace_id: 1,
             next_attention_id: 1,
+            link_socket: None,
         }
     }
 
@@ -240,6 +243,7 @@ impl Board {
             .iter_mut()
             .find(|p| p.id == id)
             .ok_or_else(|| Error::Pty(format!("panel {} not found", id.0)))?;
+        panel.link_socket.clone_from(&self.link_socket);
         panel.restart()
     }
 
