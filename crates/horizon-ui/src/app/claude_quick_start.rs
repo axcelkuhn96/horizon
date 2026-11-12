@@ -150,6 +150,10 @@ pub(super) enum Stage {
     Profiles,
     /// `New` / `Continue` / `Resume…` for the chosen profile (index into the profile list).
     Modes { profile: usize },
+    /// One chip per saved prompt (the "Insert prompt" page).
+    Prompts,
+    /// `Insert` / `Insert & send` for the chosen prompt (index into the prompt list).
+    PromptModes { prompt: usize },
 }
 
 /// One user intent on the strip, already decoded from a click or a key.
@@ -162,6 +166,12 @@ pub(super) enum StripEvent {
     /// The profile name on the mode page: back to the chips.
     Back,
     Mode(QuickStartMode),
+    /// The `Insert prompt ▸` entry after the profile chips.
+    OpenPrompts,
+    /// `Insert` (`send` false) or `Insert & send` on the prompt page.
+    Insert {
+        send: bool,
+    },
     /// Esc, the close button or a click outside.
     Dismiss,
 }
@@ -173,7 +183,39 @@ pub(super) struct StartRequest {
     pub(super) mode: QuickStartMode,
 }
 
+/// A saved prompt the strip asks the app to type into the panel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct PromptInsert {
+    pub(super) prompt: usize,
+    pub(super) send: bool,
+}
+
 impl Stage {
+    /// Whether this stage lists saved prompts rather than profiles.
+    #[must_use]
+    pub(super) fn is_prompt_stage(self) -> bool {
+        matches!(self, Self::Prompts | Self::PromptModes { .. })
+    }
+
+    /// The prompt pages of the strip with `prompts` prompts listed: `None` when `event` is not
+    /// one of theirs (then [`Self::apply`] decides), else the next stage plus the insert to do.
+    #[must_use]
+    pub(super) fn apply_prompts(self, event: StripEvent, prompts: usize) -> Option<(Self, Option<PromptInsert>)> {
+        match (self, event) {
+            (Self::Profiles, StripEvent::OpenPrompts) if prompts > 0 => Some((Self::Prompts, None)),
+            (Self::Prompts, StripEvent::Pick(index)) if index < prompts => {
+                Some((Self::PromptModes { prompt: index }, None))
+            }
+            (Self::Prompts, StripEvent::Back) => Some((Self::Profiles, None)),
+            (Self::PromptModes { .. }, StripEvent::Back) => Some((Self::Prompts, None)),
+            (Self::PromptModes { prompt }, StripEvent::Insert { send }) => Some((
+                Self::Collapsed,
+                (prompt < prompts).then_some(PromptInsert { prompt, send }),
+            )),
+            _ => None,
+        }
+    }
+
     /// Next stage after `event` with `profiles` profiles listed, plus the start to perform.
     #[must_use]
     pub(super) fn apply(self, event: StripEvent, profiles: usize) -> (Self, Option<StartRequest>) {
@@ -181,6 +223,8 @@ impl Stage {
             (_, StripEvent::Dismiss) => (Self::Collapsed, None),
             (Self::Collapsed, StripEvent::Toggle) if profiles > 0 => (Self::Profiles, None),
             (Self::Collapsed, _) | (_, StripEvent::Toggle) => (Self::Collapsed, None),
+            // The prompt pages only react to what `apply_prompts` handles.
+            (stage @ (Self::Prompts | Self::PromptModes { .. }), _) => (stage, None),
             (stage, StripEvent::Pick(index)) => {
                 if index < profiles {
                     (Self::Modes { profile: index }, None)
@@ -194,7 +238,7 @@ impl Stage {
                 let request = (profile < profiles).then_some(StartRequest { profile, mode });
                 (Self::Collapsed, request)
             }
-            (stage, StripEvent::Mode(_)) => (stage, None),
+            (stage, StripEvent::Mode(_) | StripEvent::OpenPrompts | StripEvent::Insert { .. }) => (stage, None),
         }
     }
 }
@@ -292,6 +336,81 @@ mod tests {
         for stage in [Stage::Collapsed, Stage::Profiles, Stage::Modes { profile: 0 }] {
             assert_eq!(stage.apply(StripEvent::Dismiss, 3), (Stage::Collapsed, None));
         }
+    }
+
+    fn insert(prompt: usize, send: bool) -> Option<PromptInsert> {
+        Some(PromptInsert { prompt, send })
+    }
+
+    #[test]
+    fn the_prompt_entry_opens_the_prompt_page_only_when_there_are_prompts() {
+        assert_eq!(
+            Stage::Profiles.apply_prompts(StripEvent::OpenPrompts, 2),
+            Some((Stage::Prompts, None))
+        );
+        assert_eq!(Stage::Profiles.apply_prompts(StripEvent::OpenPrompts, 0), None);
+        assert_eq!(Stage::Collapsed.apply_prompts(StripEvent::OpenPrompts, 2), None);
+        assert_eq!(
+            Stage::Profiles.apply(StripEvent::OpenPrompts, 3),
+            (Stage::Profiles, None),
+            "the profile page ignores it when apply_prompts declined"
+        );
+    }
+
+    #[test]
+    fn picking_a_prompt_opens_its_modes_only_inside_the_list() {
+        assert_eq!(
+            Stage::Prompts.apply_prompts(StripEvent::Pick(1), 2),
+            Some((Stage::PromptModes { prompt: 1 }, None))
+        );
+        assert_eq!(Stage::Prompts.apply_prompts(StripEvent::Pick(2), 2), None);
+        assert_eq!(
+            Stage::Prompts.apply(StripEvent::Pick(2), 2),
+            (Stage::Prompts, None),
+            "a stale pick never starts a profile"
+        );
+    }
+
+    #[test]
+    fn insert_buttons_type_the_chosen_prompt_and_collapse() {
+        let stage = Stage::PromptModes { prompt: 1 };
+
+        assert_eq!(
+            stage.apply_prompts(StripEvent::Insert { send: false }, 2),
+            Some((Stage::Collapsed, insert(1, false)))
+        );
+        assert_eq!(
+            stage.apply_prompts(StripEvent::Insert { send: true }, 2),
+            Some((Stage::Collapsed, insert(1, true)))
+        );
+        assert_eq!(
+            stage.apply_prompts(StripEvent::Insert { send: true }, 1),
+            Some((Stage::Collapsed, None)),
+            "a stale index types nothing"
+        );
+        assert_eq!(Stage::Prompts.apply_prompts(StripEvent::Insert { send: true }, 2), None);
+    }
+
+    #[test]
+    fn back_walks_out_of_the_prompt_pages_one_step_at_a_time() {
+        assert_eq!(
+            Stage::PromptModes { prompt: 0 }.apply_prompts(StripEvent::Back, 2),
+            Some((Stage::Prompts, None))
+        );
+        assert_eq!(
+            Stage::Prompts.apply_prompts(StripEvent::Back, 2),
+            Some((Stage::Profiles, None))
+        );
+    }
+
+    #[test]
+    fn dismiss_and_toggle_collapse_the_prompt_pages() {
+        for stage in [Stage::Prompts, Stage::PromptModes { prompt: 0 }] {
+            assert!(stage.is_prompt_stage());
+            assert_eq!(stage.apply(StripEvent::Dismiss, 3), (Stage::Collapsed, None));
+            assert_eq!(stage.apply(StripEvent::Toggle, 3), (Stage::Collapsed, None));
+        }
+        assert!(!Stage::Profiles.is_prompt_stage());
     }
 
     #[test]

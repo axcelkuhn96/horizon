@@ -5,16 +5,19 @@ use std::time::Instant;
 
 use egui::{Color32, Context};
 use horizon_core::link::{LinkRequest, LinkResponse};
-use horizon_core::{PanelId, PanelKind};
+use horizon_core::{PanelId, PanelKind, PromptScope};
 
 use crate::app::HorizonApp;
 use crate::app::claude_launcher::{RowUsage, claude_profile_names, find_profile_preset, is_profile_preset};
 use crate::app::hub_ui;
+use crate::theme;
 
 use super::command::{ShellSyntax, quick_start_command};
 use super::state::{Expanded, Row};
 use super::titlebar;
-use super::{Availability, QuickStartMode, Stage, StartFailure, StartRequest, StripEvent, quick_start_visible};
+use super::{
+    Availability, PromptInsert, QuickStartMode, Stage, StartFailure, StartRequest, StripEvent, quick_start_visible,
+};
 
 impl HorizonApp {
     /// Titlebar button state for `panel_id`: `None` hides it. The shell is probed for a running
@@ -65,19 +68,50 @@ impl HorizonApp {
             .collect()
     }
 
+    /// One row per saved prompt of `panel_id`'s workspace: the workspace ones in the accent colour,
+    /// the global ones dim; the tooltip shows the scope and the first line of the text.
+    fn build_prompt_rows(&mut self, panel_id: PanelId) -> Vec<Row> {
+        self.hub
+            .prompts
+            .refresh_for(&self.template_config, &self.board, Some(panel_id));
+        self.hub
+            .prompts
+            .effective()
+            .iter()
+            .map(|prompt| Row {
+                name: prompt.name.clone(),
+                accent: if prompt.scope == PromptScope::Workspace {
+                    theme::ACCENT()
+                } else {
+                    theme::FG_DIM()
+                },
+                account: None,
+                dim: false,
+                tooltip: format!(
+                    "{}\n{}",
+                    prompt.scope.label(),
+                    crate::app::prompts::first_line(&prompt.text)
+                ),
+            })
+            .collect()
+    }
+
     fn open_quick_start_strip(&mut self, panel_id: PanelId) {
         let names = claude_profile_names(&self.presets);
         if names.is_empty() {
             return;
         }
         let rows = self.build_quick_rows(names);
-        self.hub.quick_start.expanded = Some(Expanded::new(panel_id, rows, self.hub.rows_version));
+        let prompts = self.build_prompt_rows(panel_id);
+        let mut expanded = Expanded::new(panel_id, rows, self.hub.rows_version);
+        expanded.set_prompts(prompts);
+        self.hub.quick_start.expanded = Some(expanded);
     }
 
     /// Rebuilds the open strip's rows when the profile list or the usage data moved.
     pub(super) fn refresh_quick_start_rows(&mut self, panel_id: PanelId) {
         let version = self.hub.rows_version;
-        let current = match self
+        let (current, prompt_stage) = match self
             .hub
             .quick_start
             .expanded
@@ -85,10 +119,14 @@ impl HorizonApp {
             .filter(|expanded| expanded.panel_id == panel_id && expanded.rows_version != version)
         {
             None => return,
-            Some(expanded) => match expanded.stage {
-                Stage::Modes { profile } => expanded.rows.get(profile).map(|row| row.name.clone()),
-                Stage::Collapsed | Stage::Profiles => None,
-            },
+            Some(expanded) => (
+                match expanded.stage {
+                    Stage::Modes { profile } => expanded.rows.get(profile).map(|row| row.name.clone()),
+                    Stage::Collapsed | Stage::Profiles | Stage::Prompts | Stage::PromptModes { .. } => None,
+                },
+                // The prompt pages list no profiles, so a usage refresh must not close them.
+                expanded.stage.is_prompt_stage().then_some(expanded.stage),
+            ),
         };
         let names = claude_profile_names(&self.presets);
         if names.is_empty() {
@@ -98,7 +136,8 @@ impl HorizonApp {
         let remembered = current.and_then(|current| names.iter().position(|name| *name == current));
         let rows = self.build_quick_rows(names);
         if let Some(expanded) = self.hub.quick_start.expanded.as_mut() {
-            let stage = remembered.map_or(Stage::Profiles, |profile| Stage::Modes { profile });
+            let stage =
+                prompt_stage.unwrap_or_else(|| remembered.map_or(Stage::Profiles, |profile| Stage::Modes { profile }));
             expanded.replace_rows(stage, rows, version);
         }
     }
@@ -116,6 +155,19 @@ impl HorizonApp {
             }
             return;
         }
+        if event == StripEvent::OpenPrompts {
+            // The list may have changed since the strip opened.
+            let prompts = self.build_prompt_rows(panel_id);
+            if let Some(expanded) = self
+                .hub
+                .quick_start
+                .expanded
+                .as_mut()
+                .filter(|expanded| expanded.panel_id == panel_id)
+            {
+                expanded.set_prompts(prompts);
+            }
+        }
         let Some(expanded) = self
             .hub
             .quick_start
@@ -125,12 +177,23 @@ impl HorizonApp {
         else {
             return;
         };
-        let (next, request) = expanded.stage.apply(event, expanded.rows.len());
+        let (next, request, inserted) = match expanded.stage.apply_prompts(event, expanded.prompts.len()) {
+            Some((next, insert)) => (next, None, insert),
+            None => {
+                let (next, request) = expanded.stage.apply(event, expanded.rows.len());
+                (next, request, None)
+            }
+        };
         let started = request
             .and_then(|StartRequest { profile, mode }| expanded.rows.get(profile).map(|row| (row.name.clone(), mode)));
+        let typed = inserted
+            .and_then(|PromptInsert { prompt, send }| expanded.prompts.get(prompt).map(|row| (row.name.clone(), send)));
         expanded.stage = next;
         if next == Stage::Collapsed {
             self.hub.quick_start.expanded = None;
+        }
+        if let Some((name, send)) = typed {
+            self.insert_prompt_named(ctx, panel_id, &name, send);
         }
         if let Some((name, mode)) = started
             && let Err(failure) = self.run_claude_quick_start(ctx, panel_id, &name, mode)

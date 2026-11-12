@@ -997,3 +997,60 @@ fn a_shell_that_stopped_running_claude_is_refused_and_ends_a_pending_ask() {
     );
     setup.board.shutdown_terminal_panels();
 }
+
+#[test]
+fn deliver_text_matches_link_send_behaviour() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let file = dir.path().join("in");
+    let mut board = Board::new();
+    let id = command_panel(&mut board, "sink", &sink_script(&file, true));
+    assert!(screen_contains(&mut board, id, "ready"));
+    assert!(board.bracketed_paste_enabled(id));
+
+    board.deliver_text(id, "line1\nline2", true).expect("deliver");
+
+    assert!(
+        file_equals(&file, "\u{1b}[200~line1\nline2\u{1b}[201~\r"),
+        "{:?}",
+        std::fs::read(&file)
+    );
+}
+
+#[test]
+fn deliver_text_without_enter_leaves_the_text_unsent() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let file = dir.path().join("in");
+    let mut board = Board::new();
+    let id = command_panel(&mut board, "sink", &sink_script(&file, false));
+    assert!(screen_contains(&mut board, id, "ready"));
+    assert!(!board.bracketed_paste_enabled(id));
+
+    board.deliver_text(id, "a\u{1b}[31mb", false).expect("deliver");
+    assert!(
+        matches!(
+            board.deliver_text(id, "x\ny", false),
+            Err(crate::link::LinkError::BadRequest(_))
+        ),
+        "multi-line text without bracketed paste must not be typed"
+    );
+
+    assert!(file_equals(&file, "a[31mb"), "{:?}", std::fs::read(&file));
+}
+
+#[test]
+fn deliver_text_closed_panel_errors() {
+    let mut board = Board::new();
+    let id = command_panel(&mut board, "gone", "exit 0");
+    assert!(wait_until(|| {
+        let panel = board.panel_mut(id).expect("panel");
+        let _ = panel.process_output();
+        panel.child_exited()
+    }));
+
+    assert_eq!(board.deliver_text(id, "x", true), Err(crate::link::LinkError::Closed));
+    assert_eq!(
+        board.deliver_text(PanelId(9_999), "x", true),
+        Err(crate::link::LinkError::Closed)
+    );
+    assert!(!board.bracketed_paste_enabled(id));
+}

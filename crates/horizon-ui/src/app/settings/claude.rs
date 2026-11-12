@@ -15,14 +15,14 @@ use egui::{
     Align, Color32, Context, CornerRadius, FontId, Frame, Layout, Margin, Pos2, Rect, RichText, Sense, Stroke,
     StrokeKind, TextEdit, Ui, Vec2,
 };
-use horizon_core::{ClaudeProfile, discover_claude_profiles};
+use horizon_core::{ClaudeProfile, SavedPrompt, discover_claude_profiles};
 
 use self::browse::{BrowseState, render_browse};
 use self::profiles::{
     CredentialState, InfoCache, IssueField, ProfileInfo, RowIssue, add_profile, merge_detected, move_profile,
     remove_profile, row_issue,
 };
-use super::{SettingsEditor, SettingsTab, dim_label, section_card};
+use super::{SettingsEditor, SettingsTab, dim_label, prompts_section, section_card};
 use crate::app::hub_ui::{self, IconKind};
 use crate::theme;
 
@@ -136,6 +136,7 @@ pub(super) fn show(ui: &mut Ui, editor: &mut SettingsEditor) {
 
     let mut changed = poll_detect(tab, &mut config.claude_profiles, &home);
     changed |= render(ui, &mut config.claude_profiles, tab, &home);
+    changed |= render_saved_prompts(ui, &mut config.prompts);
     if changed && let Ok(yaml) = config.to_yaml() {
         *buffer = yaml;
     }
@@ -252,6 +253,26 @@ fn render(ui: &mut Ui, profiles: &mut Vec<ClaudeProfile>, tab: &mut ClaudeTabSta
     }
     changed |= render_browse(ui.ctx(), profiles, &mut tab.browse);
     changed
+}
+
+/// "Saved prompts" section at the end of the tab: prompts available in every workspace.
+fn render_saved_prompts(ui: &mut Ui, prompts: &mut Vec<SavedPrompt>) -> bool {
+    ui.add_space(16.0);
+    ui.separator();
+    ui.add_space(10.0);
+    ui.label(
+        RichText::new("Saved prompts")
+            .color(theme::FG_SOFT())
+            .size(13.0)
+            .strong(),
+    );
+    ui.add_space(4.0);
+    dim_label(
+        ui,
+        "Insert one into the focused terminal from the command palette (Prompt: name). Workspace prompts with the same name win.",
+    );
+    ui.add_space(10.0);
+    prompts_section::show(ui, "global", prompts)
 }
 
 fn detect_button(ui: &mut Ui, detecting: bool) -> bool {

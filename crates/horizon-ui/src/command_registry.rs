@@ -48,6 +48,10 @@ pub enum CommandId {
     // Claude
     /// Open the Claude profile launcher overlay.
     OpenClaudeLauncher,
+    /// Paste the saved prompt at this index of the effective list into the focused terminal.
+    InsertPrompt(usize),
+    /// Like [`Self::InsertPrompt`], then press Enter.
+    InsertPromptAndSend(usize),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -55,6 +59,7 @@ pub enum Category {
     Workspace,
     Panel,
     Preset,
+    Prompt,
     Action,
 }
 
@@ -64,6 +69,7 @@ impl Category {
             Self::Workspace => "WORKSPACES",
             Self::Panel => "PANELS",
             Self::Preset => "PRESETS",
+            Self::Prompt => "PROMPTS",
             Self::Action => "ACTIONS",
         }
     }

@@ -46,7 +46,7 @@ pub fn migrate_if_needed(config: &mut Config, config_path: &Path) -> Result<bool
 
     config.version = CURRENT_CONFIG_VERSION;
 
-    config.validate()?;
+    config.validate_without_prompts()?;
 
     if let Err(error) = write_back(config, config_path) {
         tracing::warn!(%error, "could not write migrated config back to disk");
@@ -1023,6 +1023,7 @@ workspaces:
                 ..TerminalConfig::default()
             }],
             sidebar_collapsed: false,
+            prompts: Vec::new(),
         });
 
         let yaml = config.to_yaml().expect("should serialize");

@@ -69,7 +69,7 @@ fn paint_item(painter: &Painter, item: &ViewItem) {
         }
         ItemKind::Chip(_) => paint_chip(&painter, item),
         ItemKind::Back => paint_back(&painter, item),
-        ItemKind::Mode(_) => paint_mode(&painter, item),
+        ItemKind::Mode(_) | ItemKind::PromptsEntry | ItemKind::Insert { .. } => paint_mode(&painter, item),
         ItemKind::Close => paint_close(&painter, item),
         ItemKind::More(_) => paint_more(&painter, item),
     }

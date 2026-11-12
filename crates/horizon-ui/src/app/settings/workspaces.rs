@@ -379,11 +379,26 @@ fn editor_column(ui: &mut Ui, config: &mut Config, state: &mut WorkspacesTabStat
     ui.add_space(14.0);
     changed |= terminals_section(ui, config, state, index);
 
+    ui.add_space(14.0);
+    changed |= prompts_block(ui, config, index);
+
     ui.add_space(12.0);
     ui.separator();
     ui.add_space(8.0);
     footer(ui, config, state, index);
     changed
+}
+
+/// "Prompts" of the selected template: available only while a workspace of that name is focused.
+fn prompts_block(ui: &mut Ui, config: &mut Config, index: usize) -> bool {
+    ui.label(RichText::new("Prompts").size(13.0).strong().color(theme::FG_SOFT()));
+    ui.add_space(4.0);
+    super::dim_label(
+        ui,
+        "Shown in the command palette for this workspace, before the global prompts.",
+    );
+    ui.add_space(8.0);
+    super::prompts_section::show(ui, ("workspace", index), &mut config.workspaces[index].prompts)
 }
 
 fn name_row(ui: &mut Ui, config: &mut Config, state: &mut WorkspacesTabState, index: usize) -> bool {
@@ -668,6 +683,7 @@ mod tests {
             position: None,
             terminals: Vec::new(),
             sidebar_collapsed: false,
+            prompts: Vec::new(),
         }
     }
 

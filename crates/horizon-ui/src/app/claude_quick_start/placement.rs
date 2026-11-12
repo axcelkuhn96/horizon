@@ -21,6 +21,15 @@ const ID_SIZE: f32 = 10.0;
 const MODE_SIZE: f32 = 10.5;
 const LAUNCH_SIZE: f32 = 10.5;
 pub(super) const LAUNCH_CAPTION: &str = "Claude";
+/// The entry after the profile chips that opens the saved prompts.
+const PROMPTS_CAPTION: &str = "Insert prompt \u{25b8}";
+/// The entry never takes more than this; a longer caption is elided.
+const PROMPTS_ENTRY_MAX: f32 = 100.0;
+/// Buttons of a prompt's page.
+const PROMPT_ACTIONS: [(ItemKind, &str); 2] = [
+    (ItemKind::Insert { send: false }, "Insert"),
+    (ItemKind::Insert { send: true }, "Insert & send"),
+];
 
 /// What a strip item is, and so what a click on it means.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -36,6 +45,12 @@ pub(super) enum ItemKind {
     Close,
     /// `+N` for profiles that did not fit.
     More(usize),
+    /// The `Insert prompt ▸` entry after the profile chips.
+    PromptsEntry,
+    /// `Insert` (`send` false) or `Insert & send` on a prompt's page.
+    Insert {
+        send: bool,
+    },
 }
 
 impl ItemKind {
@@ -51,6 +66,8 @@ impl ItemKind {
             Self::Mode(mode) => Some(StripEvent::Mode(mode)),
             Self::Close => Some(StripEvent::Dismiss),
             Self::More(_) => None,
+            Self::PromptsEntry => Some(StripEvent::OpenPrompts),
+            Self::Insert { send } => Some(StripEvent::Insert { send }),
         }
     }
 }
@@ -110,15 +127,38 @@ fn fitted(painter: &Painter, galley: &Arc<Galley>, text: &str, size: f32, room: 
 }
 
 /// Layout of an open strip (`Collapsed` is the caller's cached launch layout).
-pub(super) fn build_layout(painter: &Painter, stage: Stage, rows: &[Row], room: f32) -> StripLayout {
+pub(super) fn build_layout(painter: &Painter, stage: Stage, rows: &[Row], prompts: &[Row], room: f32) -> StripLayout {
     match stage {
         Stage::Collapsed => StripLayout::launch(launch_caption(painter)),
         Stage::Modes { profile } => rows.get(profile).map_or_else(
             || profiles_layout(painter, rows, room),
             |row| modes_layout(painter, row, room),
         ),
-        Stage::Profiles => profiles_layout(painter, rows, room),
+        Stage::Profiles if prompts.is_empty() => profiles_layout(painter, rows, room),
+        Stage::Profiles => profiles_with_prompts_entry(painter, rows, room),
+        Stage::Prompts => profiles_layout(painter, prompts, room),
+        Stage::PromptModes { prompt } => prompts.get(prompt).map_or_else(
+            || profiles_layout(painter, prompts, room),
+            |row| actions_layout(painter, row, room, &PROMPT_ACTIONS),
+        ),
     }
+}
+
+/// The profile chips with the `Insert prompt ▸` entry after them.
+fn profiles_with_prompts_entry(painter: &Painter, rows: &[Row], room: f32) -> StripLayout {
+    let caption = measure(painter, PROMPTS_CAPTION, MODE_SIZE);
+    let width = (caption.size().x + MODE_PAD * 2.0).min(PROMPTS_ENTRY_MAX);
+    let mut layout = profiles_layout(painter, rows, room - width - ITEM_GAP);
+    let text = fitted(painter, &caption, PROMPTS_CAPTION, MODE_SIZE, width - MODE_PAD * 2.0);
+    layout.items.push(Placed {
+        kind: ItemKind::PromptsEntry,
+        x: layout.width + ITEM_GAP,
+        w: width,
+        text,
+        id: None,
+    });
+    layout.width += ITEM_GAP + width;
+    layout
 }
 
 fn profiles_layout(painter: &Painter, rows: &[Row], room: f32) -> StripLayout {
@@ -183,10 +223,20 @@ fn profiles_layout(painter: &Painter, rows: &[Row], room: f32) -> StripLayout {
 }
 
 fn modes_layout(painter: &Painter, row: &Row, room: f32) -> StripLayout {
-    let name = measure(painter, &row.name, NAME_SIZE);
-    let captions: Vec<Arc<Galley>> = QuickStartMode::ALL
+    let actions: Vec<(ItemKind, &str)> = QuickStartMode::ALL
         .iter()
-        .map(|mode| measure(painter, mode.inline_label(), MODE_SIZE))
+        .map(|mode| (ItemKind::Mode(*mode), mode.inline_label()))
+        .collect();
+    actions_layout(painter, row, room, &actions)
+}
+
+/// The second page of the strip: the row's name (back to the list), one button per action and
+/// the close button.
+fn actions_layout(painter: &Painter, row: &Row, room: f32, actions: &[(ItemKind, &str)]) -> StripLayout {
+    let name = measure(painter, &row.name, NAME_SIZE);
+    let captions: Vec<Arc<Galley>> = actions
+        .iter()
+        .map(|(_, label)| measure(painter, label, MODE_SIZE))
         .collect();
     let natural: Vec<f32> = captions
         .iter()
@@ -201,15 +251,15 @@ fn modes_layout(painter: &Painter, row: &Row, room: f32) -> StripLayout {
         id: None,
     }];
     let mut x = lead + ITEM_GAP;
-    for ((mode, caption), width) in QuickStartMode::ALL.iter().zip(&captions).zip(&widths) {
+    for (((kind, label), caption), width) in actions.iter().zip(&captions).zip(&widths) {
         let inner = width - MODE_PAD * 2.0;
         let text = if caption.size().x <= inner {
             Arc::clone(caption)
         } else {
-            hub_ui::elided(painter, mode.inline_label(), FontId::proportional(MODE_SIZE), inner)
+            hub_ui::elided(painter, label, FontId::proportional(MODE_SIZE), inner)
         };
         items.push(Placed {
-            kind: ItemKind::Mode(*mode),
+            kind: *kind,
             x,
             w: *width,
             text: Some(text),
@@ -242,5 +292,11 @@ mod tests {
         assert_eq!(ItemKind::More(2).event(), None);
         assert_eq!(ItemKind::Close.event(), Some(StripEvent::Dismiss));
         assert_eq!(ItemKind::Chip(3).event(), Some(StripEvent::Pick(3)));
+        assert_eq!(ItemKind::PromptsEntry.event(), Some(StripEvent::OpenPrompts));
+        assert_eq!(
+            ItemKind::Insert { send: true }.event(),
+            Some(StripEvent::Insert { send: true })
+        );
+        assert!(ItemKind::PromptsEntry.interactive() && ItemKind::Insert { send: false }.interactive());
     }
 }

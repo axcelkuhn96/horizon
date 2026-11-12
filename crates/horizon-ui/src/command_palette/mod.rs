@@ -44,6 +44,20 @@ pub struct PresetEntry {
     pub keywords: Vec<String>,
 }
 
+/// A saved prompt offered as `Prompt: <name>`; `index` is its place in the effective prompt list.
+pub struct PromptEntry {
+    pub index: usize,
+    pub label: String,
+    /// Scope hint shown after the label (`workspace` or `global`).
+    pub detail: String,
+    /// Workspace-scoped prompts get the accent colour on their hint.
+    pub workspace_scoped: bool,
+    pub keywords: Vec<String>,
+}
+
+/// Footer hint while a saved prompt is selected.
+const PROMPT_HINT: &str = "  Enter  insert    Ctrl+Enter  insert & send";
+
 // ── Palette state ───────────────────────────────────────────────────
 
 pub struct CommandPalette {
@@ -74,6 +88,8 @@ struct ResultItem {
     shortcut: Option<String>,
     category: Category,
     accent: Option<Color32>,
+    /// Paint `detail` in the accent colour instead of the dim one.
+    detail_accent: bool,
 }
 
 // ── Implementation ──────────────────────────────────────────────────
@@ -93,10 +109,11 @@ impl CommandPalette {
         workspaces: &[WorkspaceEntry],
         panels: &[PanelEntry],
         presets: &[PresetEntry],
+        prompts: &[PromptEntry],
         actions: &[CommandEntry],
     ) -> PaletteAction {
         let (mode, search_query) = parse_mode(&self.query);
-        let items = build_results(mode, search_query, workspaces, panels, presets, actions);
+        let items = build_results(mode, search_query, workspaces, panels, presets, prompts, actions);
         let layout = palette_layout(ctx.input(egui::InputState::viewport_rect));
 
         if self.show_backdrop(ctx, layout.screen) {
@@ -186,7 +203,7 @@ impl CommandPalette {
         ui.allocate_space(Vec2::new(layout.inner.width(), INPUT_HEIGHT));
         ui.add_space(4.0);
 
-        self.render_hint(ui, layout.inner.width());
+        self.render_hint(ui, layout.inner.width(), items);
         ui.add_space(4.0);
 
         match self.render_results(ui, items, layout) {
@@ -234,13 +251,18 @@ impl CommandPalette {
         }
     }
 
-    fn render_hint(&self, ui: &mut egui::Ui, width: f32) {
+    fn render_hint(&self, ui: &mut egui::Ui, width: f32, items: &[ResultItem]) {
         let (mode, _) = parse_mode(&self.query);
-        if mode != PaletteMode::All {
+        let on_prompt = items
+            .get(self.selected)
+            .is_some_and(|item| item.category == Category::Prompt);
+        let hint = if on_prompt {
+            PROMPT_HINT
+        } else if mode == PaletteMode::All {
+            "  >  presets + actions    @  panels"
+        } else {
             return;
-        }
-
-        let hint = "  >  presets + actions    @  panels";
+        };
         let rect = Rect::from_min_size(ui.cursor().min, Vec2::new(width, 16.0));
         ui.painter().text(
             rect.left_center() + Vec2::new(4.0, 0.0),
@@ -253,12 +275,13 @@ impl CommandPalette {
     }
 
     fn handle_keyboard(&mut self, ctx: &Context, items: &[ResultItem]) -> Option<PaletteAction> {
-        let (up, down, enter, escape) = ctx.input(|input| {
+        let (up, down, enter, escape, with_command) = ctx.input(|input| {
             (
                 input.key_pressed(egui::Key::ArrowUp),
                 input.key_pressed(egui::Key::ArrowDown),
                 input.key_pressed(egui::Key::Enter),
                 input.key_pressed(egui::Key::Escape),
+                input.modifiers.command,
             )
         });
 
@@ -272,7 +295,10 @@ impl CommandPalette {
             self.selected += 1;
         }
         if enter && !items.is_empty() {
-            return Some(PaletteAction::Execute(items[self.selected].id.clone()));
+            return Some(PaletteAction::Execute(enter_command(
+                &items[self.selected].id,
+                with_command,
+            )));
         }
 
         None
@@ -309,6 +335,14 @@ impl CommandPalette {
     }
 }
 
+/// The command Enter runs on `id`; with Ctrl/Cmd held a prompt is also sent, not just inserted.
+fn enter_command(id: &CommandId, with_command: bool) -> CommandId {
+    match id {
+        CommandId::InsertPrompt(index) if with_command => CommandId::InsertPromptAndSend(*index),
+        other => other.clone(),
+    }
+}
+
 // ── Mode parsing ────────────────────────────────────────────────────
 
 fn parse_mode(query: &str) -> (PaletteMode, &str) {
@@ -330,6 +364,7 @@ fn build_results(
     workspaces: &[WorkspaceEntry],
     panels: &[PanelEntry],
     presets: &[PresetEntry],
+    prompts: &[PromptEntry],
     actions: &[CommandEntry],
 ) -> Vec<ResultItem> {
     let mut items = Vec::new();
@@ -350,6 +385,7 @@ fn build_results(
                     shortcut: None,
                     category: Category::Workspace,
                     accent: Some(ws.color),
+                    detail_accent: false,
                 });
             }
         }
@@ -372,6 +408,7 @@ fn build_results(
                     shortcut: None,
                     category: Category::Panel,
                     accent: None,
+                    detail_accent: false,
                 });
             }
         }
@@ -388,9 +425,12 @@ fn build_results(
                     shortcut: None,
                     category: Category::Preset,
                     accent: None,
+                    detail_accent: false,
                 });
             }
         }
+
+        push_prompt_results(&mut items, &query_lower, prompts);
 
         for action in actions {
             let keyword_refs: Vec<&str> = action.keywords.iter().map(String::as_str).collect();
@@ -402,12 +442,31 @@ fn build_results(
                     shortcut: action.shortcut.clone(),
                     category: Category::Action,
                     accent: None,
+                    detail_accent: false,
                 });
             }
         }
     }
 
     items
+}
+
+/// Adds the saved prompts that match `query` as `Prompt: <name>` rows, keeping their order.
+fn push_prompt_results(items: &mut Vec<ResultItem>, query: &str, prompts: &[PromptEntry]) {
+    for prompt in prompts {
+        let keyword_refs: Vec<&str> = prompt.keywords.iter().map(String::as_str).collect();
+        if matches_query(query, &prompt.label, &keyword_refs) {
+            items.push(ResultItem {
+                id: CommandId::InsertPrompt(prompt.index),
+                label: prompt.label.clone(),
+                detail: prompt.detail.clone(),
+                shortcut: None,
+                category: Category::Prompt,
+                accent: None,
+                detail_accent: prompt.workspace_scoped,
+            });
+        }
+    }
 }
 
 fn matches_query(query: &str, label: &str, extras: &[&str]) -> bool {
@@ -523,6 +582,13 @@ mod tests {
             workspace_name: "dev".into(),
             cwd: Some("/home".into()),
         }];
+        let prompts = vec![PromptEntry {
+            index: 0,
+            label: "Prompt: review".into(),
+            detail: "global".into(),
+            workspace_scoped: false,
+            keywords: vec!["Review this diff".into()],
+        }];
         let presets = vec![PresetEntry {
             index: 0,
             label: "SSH: prod-api".into(),
@@ -531,14 +597,75 @@ mod tests {
         }];
         let actions = crate::command_registry::action_commands(&AppShortcuts::default(), "Ctrl");
 
-        let results = build_results(PaletteMode::ActionsOnly, "", &workspaces, &panels, &presets, &actions);
+        let results = build_results(
+            PaletteMode::ActionsOnly,
+            "",
+            &workspaces,
+            &panels,
+            &presets,
+            &prompts,
+            &actions,
+        );
         assert!(
             results
                 .iter()
-                .all(|r| matches!(r.category, Category::Preset | Category::Action))
+                .all(|r| matches!(r.category, Category::Preset | Category::Prompt | Category::Action))
         );
+        assert!(results.iter().any(|r| r.category == Category::Prompt));
 
-        let results = build_results(PaletteMode::PanelsOnly, "", &workspaces, &panels, &presets, &actions);
+        let results = build_results(
+            PaletteMode::PanelsOnly,
+            "",
+            &workspaces,
+            &panels,
+            &presets,
+            &prompts,
+            &actions,
+        );
         assert!(results.iter().all(|r| r.category == Category::Panel));
+    }
+
+    #[test]
+    fn prompts_match_by_label_and_by_text_and_keep_their_order() {
+        let prompt = |index, label: &str, keyword: &str| PromptEntry {
+            index,
+            label: label.into(),
+            detail: "global".into(),
+            workspace_scoped: false,
+            keywords: vec![keyword.into()],
+        };
+        let prompts = [
+            prompt(0, "Prompt: review", "check the diff"),
+            prompt(1, "Prompt: deploy", "ship"),
+        ];
+        let ids = |query: &str| {
+            let mut items = Vec::new();
+            push_prompt_results(&mut items, query, &prompts);
+            items.into_iter().map(|item| item.id).collect::<Vec<_>>()
+        };
+
+        assert_eq!(ids(""), [CommandId::InsertPrompt(0), CommandId::InsertPrompt(1)]);
+        assert_eq!(ids("prompt: dep"), [CommandId::InsertPrompt(1)]);
+        assert_eq!(ids("diff"), [CommandId::InsertPrompt(0)]);
+        assert!(ids("zzz").is_empty());
+    }
+
+    #[test]
+    fn ctrl_enter_sends_a_prompt_and_leaves_other_commands_alone() {
+        assert_eq!(
+            enter_command(&CommandId::InsertPrompt(2), false),
+            CommandId::InsertPrompt(2)
+        );
+        assert_eq!(
+            enter_command(&CommandId::InsertPrompt(2), true),
+            CommandId::InsertPromptAndSend(2)
+        );
+        assert_eq!(enter_command(&CommandId::ToggleSidebar, true), CommandId::ToggleSidebar);
+    }
+
+    #[test]
+    fn the_prompt_hint_names_both_keys() {
+        assert!(PROMPT_HINT.contains("Enter  insert"));
+        assert!(PROMPT_HINT.contains("Ctrl+Enter  insert & send"));
     }
 }

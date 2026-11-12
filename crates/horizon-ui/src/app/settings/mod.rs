@@ -3,6 +3,7 @@ mod claude;
 pub(crate) use claude::select_claude_tab;
 mod general;
 mod presets;
+mod prompts_section;
 mod shortcuts;
 mod speech;
 #[cfg(test)]
@@ -87,12 +88,12 @@ enum SettingsAction {
 impl HorizonApp {
     pub(super) fn toggle_settings(&mut self) {
         if let Some(editor) = self.settings.take() {
-            if let Ok(config) = Config::from_yaml(&editor.original) {
+            if let Ok(config) = Config::from_yaml_lenient(&editor.original) {
                 self.apply_live_preview(&config);
             }
         } else {
             let content = self.load_or_generate_config_yaml();
-            let editing_config = Config::from_yaml(&content).ok();
+            let editing_config = Config::from_yaml_lenient(&content).ok();
             if let Some(config) = &editing_config {
                 self.board.seed_template_baseline(config);
             }
@@ -110,7 +111,7 @@ impl HorizonApp {
 
     fn load_or_generate_config_yaml(&self) -> String {
         if let Ok(content) = std::fs::read_to_string(&self.config_path)
-            && Config::from_yaml(&content).is_ok()
+            && Config::from_yaml_lenient(&content).is_ok()
         {
             return content;
         }
@@ -177,7 +178,7 @@ impl HorizonApp {
             SettingsAction::None => {}
             SettingsAction::Close => {
                 if let Some(editor) = self.settings.take()
-                    && let Ok(config) = Config::from_yaml(&editor.original)
+                    && let Ok(config) = Config::from_yaml_lenient(&editor.original)
                 {
                     self.apply_live_preview(&config);
                 }
@@ -185,7 +186,7 @@ impl HorizonApp {
             SettingsAction::Revert => {
                 let original = self.settings.as_ref().map(|e| e.original.clone());
                 if let Some(original) = original {
-                    let parsed = Config::from_yaml(&original).ok();
+                    let parsed = Config::from_yaml_lenient(&original).ok();
                     if let Some(ref config) = parsed {
                         self.apply_live_preview(config);
                     }
@@ -400,7 +401,7 @@ fn render_gui_tab(
 /// not parse, the GUI tabs show their "unable to parse" state.
 fn switch_tab(editor: &mut SettingsEditor, tab: SettingsTab) {
     if editor.active_tab == SettingsTab::Yaml && tab != SettingsTab::Yaml {
-        editor.editing_config = Config::from_yaml(&editor.buffer).ok();
+        editor.editing_config = Config::from_yaml_lenient(&editor.buffer).ok();
     }
     editor.active_tab = tab;
 }
@@ -488,6 +489,16 @@ mod tests {
         switch_tab(&mut editor, SettingsTab::Claude);
         assert!(editor.active_tab == SettingsTab::Claude);
         assert!(editor.editing_config.is_some());
+    }
+
+    #[test]
+    fn a_bad_saved_prompt_stays_editable_instead_of_clearing_the_editing_config() {
+        let yaml = "prompts:\n  - name: a\n    text: one\n  - name: A\n    text: two\n";
+        assert!(Config::from_yaml(yaml).is_err(), "the save path stays strict");
+        let mut editor = editor(yaml, SettingsTab::Yaml);
+        switch_tab(&mut editor, SettingsTab::Claude);
+        let config = editor.editing_config.expect("kept for the editor to mark");
+        assert_eq!(config.prompts.len(), 2);
     }
 
     #[test]

@@ -89,19 +89,32 @@ pub fn template_from_workspace(
             })
             .collect(),
         sidebar_collapsed: false,
+        prompts: Vec::new(),
     }
 }
 
 /// Replace the entry matching `linked_name` (case-insensitive) with `template`,
 /// or append `template` when there is no link or no match. Never removes others.
-pub fn upsert_template(workspaces: &mut Vec<WorkspaceConfig>, template: WorkspaceConfig, linked_name: Option<&str>) {
+///
+/// Saved prompts are not part of a live workspace, so a replaced entry keeps its own when
+/// `template` carries none.
+pub fn upsert_template(
+    workspaces: &mut Vec<WorkspaceConfig>,
+    mut template: WorkspaceConfig,
+    linked_name: Option<&str>,
+) {
     let linked = linked_name.and_then(|linked| {
         workspaces
             .iter()
             .position(|workspace| workspace.name.eq_ignore_ascii_case(linked))
     });
     match linked {
-        Some(index) => workspaces[index] = template,
+        Some(index) => {
+            if template.prompts.is_empty() {
+                template.prompts = std::mem::take(&mut workspaces[index].prompts);
+            }
+            workspaces[index] = template;
+        }
         None => workspaces.push(template),
     }
 }
@@ -136,6 +149,7 @@ mod tests {
             position: None,
             terminals: Vec::new(),
             sidebar_collapsed: false,
+            prompts: Vec::new(),
         }
     }
 
@@ -277,6 +291,22 @@ mod tests {
 
         let names: Vec<&str> = workspaces.iter().map(|w| w.name.as_str()).collect();
         assert_eq!(names, ["Alpha", "Beta", "Gamma"]);
+    }
+
+    #[test]
+    fn upsert_keeps_the_saved_prompts_of_the_replaced_template() {
+        let mut existing = workspace("Alpha");
+        existing.prompts = vec![crate::SavedPrompt {
+            name: "review".to_string(),
+            text: "Review this.".to_string(),
+        }];
+        let mut workspaces = vec![existing];
+
+        upsert_template(&mut workspaces, workspace("Alpha"), Some("alpha"));
+
+        assert_eq!(workspaces.len(), 1);
+        assert_eq!(workspaces[0].prompts.len(), 1);
+        assert_eq!(workspaces[0].prompts[0].name, "review");
     }
 
     #[test]

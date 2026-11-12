@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 mod claude_profiles;
 mod features;
 mod input;
+mod prompts;
 mod workspace_template;
 pub use workspace_template::{
     PanelSnapshotForTemplate, grid_position, move_item, template_from_workspace, terminal_from_preset, upsert_template,
@@ -17,6 +18,10 @@ pub use claude_profiles::{
 };
 pub use features::FeaturesConfig;
 pub use input::{InputConfig, scroll_should_pan_canvas};
+pub use prompts::{
+    EffectivePrompt, MAX_PROMPT_NAME_CHARS, MAX_PROMPT_TEXT_BYTES, PromptIssue, PromptIssueKind, PromptScope,
+    SavedPrompt, effective_prompts, skipped_prompts, validate_prompts,
+};
 
 use crate::config_migration::{self, CURRENT_CONFIG_VERSION};
 use crate::error::{Error, Result};
@@ -48,6 +53,9 @@ pub struct Config {
     pub workspaces: Vec<WorkspaceConfig>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub claude_profiles: Vec<ClaudeProfile>,
+    /// Saved prompts available in every workspace.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prompts: Vec<SavedPrompt>,
 }
 
 /// Existing config files without a `version` field are treated as v1
@@ -70,6 +78,7 @@ impl Default for Config {
             presets: default_presets(),
             workspaces: Vec::new(),
             claude_profiles: Vec::new(),
+            prompts: Vec::new(),
         }
     }
 }
@@ -545,6 +554,9 @@ pub struct WorkspaceConfig {
     /// Sidebar-only: does not affect canvas panels. Persists across relaunch.
     #[serde(default)]
     pub sidebar_collapsed: bool,
+    /// Saved prompts of this workspace; they shadow global ones of the same name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prompts: Vec<SavedPrompt>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -638,7 +650,11 @@ impl Config {
             config_migration::migrate_if_needed(&mut config, config_path)?;
         }
 
-        config.validate()?;
+        // A bad hand-edited prompt must not make the whole file unloadable (the app would fall
+        // back to defaults and a later save would overwrite it), nor be dropped (a later save
+        // would delete the user's text): it stays in the config as written, `effective_prompts`
+        // skips it at use time and the Settings editor marks it.
+        config.validate_without_prompts()?;
         Ok(config)
     }
 
@@ -650,6 +666,19 @@ impl Config {
     pub fn from_yaml(contents: &str) -> Result<Self> {
         let config = Self::deserialize_yaml(contents)?;
         config.validate()?;
+        Ok(config)
+    }
+
+    /// Like [`Self::from_yaml`], but a prompt that is unsafe to keep (control characters, oversize,
+    /// duplicate name) does not fail it: the prompt stays as written so the Settings editor can
+    /// show and fix it instead of losing it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if deserialization or any non-prompt validation fails.
+    pub fn from_yaml_lenient(contents: &str) -> Result<Self> {
+        let config = Self::deserialize_yaml(contents)?;
+        config.validate_without_prompts()?;
         Ok(config)
     }
 
@@ -697,6 +726,14 @@ impl Config {
     ///
     /// Returns an error if any configured shortcut is invalid or duplicated.
     pub fn validate(&self) -> Result<()> {
+        self.validate_without_prompts()?;
+        prompts::validate_all_prompts(&self.prompts, &self.workspaces)?;
+        Ok(())
+    }
+
+    /// [`Self::validate`] minus the saved prompts, which are checked strictly only when the user
+    /// saves (a hand-edited bad one must not make the file unloadable).
+    pub(crate) fn validate_without_prompts(&self) -> Result<()> {
         let shortcuts = self.shortcuts.resolve()?;
         self.input.resolve_pan_modifier()?;
         crate::speech_config::validate_speech(&self.features.speech, &shortcuts)?;

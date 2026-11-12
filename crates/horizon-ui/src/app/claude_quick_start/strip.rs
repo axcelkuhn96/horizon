@@ -104,7 +104,20 @@ fn row_of(rows: &[Row], stage: Stage, kind: ItemKind) -> Option<&Row> {
     match (kind, stage) {
         (ItemKind::Chip(index), _) => rows.get(index),
         (ItemKind::Back | ItemKind::Mode(_), Stage::Modes { profile }) => rows.get(profile),
+        (ItemKind::Back | ItemKind::Insert { .. }, Stage::PromptModes { prompt }) => rows.get(prompt),
         _ => None,
+    }
+}
+
+/// [`accessible_label`], except that the chips, star and name of the prompt pages speak of
+/// prompts rather than profiles.
+fn stage_label(stage: Stage, kind: ItemKind, row: Option<&Row>) -> std::borrow::Cow<'static, str> {
+    let name = row.map_or("", |row| row.name.as_str());
+    match (stage, kind) {
+        (Stage::Prompts, ItemKind::Chip(_)) => format!("Insert the prompt {name}").into(),
+        (Stage::Prompts, ItemKind::Mark) => "Collapse the saved prompts".into(),
+        (Stage::PromptModes { .. }, ItemKind::Back) => format!("{name}: back to the prompts").into(),
+        _ => accessible_label(kind, row),
     }
 }
 
@@ -118,18 +131,31 @@ fn accessible_label(kind: ItemKind, row: Option<&Row>) -> std::borrow::Cow<'stat
         ItemKind::Mode(mode) => format!("{} Claude session with {name}", mode.label()).into(),
         ItemKind::Close => "Close the Claude quick start".into(),
         ItemKind::More(count) => format!("{count} more profiles").into(),
+        ItemKind::PromptsEntry => "Insert a saved prompt".into(),
+        ItemKind::Insert { send: false } => format!("Insert the prompt {name}").into(),
+        ItemKind::Insert { send: true } => format!("Insert the prompt {name} and press Enter").into(),
     }
 }
 
-fn with_hover_text(response: Response, kind: ItemKind, row: Option<&Row>, availability: Availability) -> Response {
+fn with_hover_text(
+    response: Response,
+    stage: Stage,
+    kind: ItemKind,
+    row: Option<&Row>,
+    availability: Availability,
+) -> Response {
     match kind {
         ItemKind::Launch => response.on_hover_text(availability.tooltip()),
         ItemKind::Mark => response.on_hover_text("Collapse"),
+        ItemKind::PromptsEntry => response.on_hover_text("Insert a saved prompt into this terminal"),
+        ItemKind::Insert { send: false } => response.on_hover_text("Type the prompt without pressing Enter"),
+        ItemKind::Insert { send: true } => response.on_hover_text("Type the prompt and press Enter"),
         ItemKind::Chip(_) => response.on_hover_ui(|ui| {
             if let Some(row) = row {
                 ui.label(&row.tooltip);
             }
         }),
+        ItemKind::Back if matches!(stage, Stage::PromptModes { .. }) => response.on_hover_text("Back to prompts"),
         ItemKind::Back => response.on_hover_text("Back to profiles"),
         ItemKind::Mode(mode) => response.on_hover_text(mode.hint()),
         ItemKind::Close => response.on_hover_text("Close (Esc)"),
@@ -153,8 +179,8 @@ fn sense_item(frame: &Frame<'_>, rows: &[Row], index: usize, placed: &Placed) ->
         if live { Sense::click() } else { Sense::hover() },
     );
     let row = row_of(rows, frame.stage, placed.kind);
-    response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, live, accessible_label(placed.kind, row)));
-    let response = with_hover_text(response, placed.kind, row, frame.availability);
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, live, stage_label(frame.stage, placed.kind, row)));
+    let response = with_hover_text(response, frame.stage, placed.kind, row, frame.availability);
     let event = if live && response.clicked() {
         placed.kind.event()
     } else {
@@ -253,7 +279,7 @@ impl HorizonApp {
             .expanded
             .as_ref()
             .filter(|expanded| expanded.panel_id == frame.panel_id)
-            .map_or(&[][..], |expanded| expanded.rows.as_slice());
+            .map_or(&[][..], |expanded| expanded.rows_for(frame.stage));
         if let [only] = layout.items.as_slice()
             && only.kind == ItemKind::Launch
         {
@@ -317,6 +343,33 @@ mod tests {
             .is_none()
         );
         assert!(row_of(&rows, Stage::Modes { profile: 0 }, ItemKind::Close).is_none());
+    }
+
+    #[test]
+    fn prompt_pages_resolve_their_row_and_speak_of_prompts() {
+        let rows = vec![row(), row()];
+        let page = Stage::PromptModes { prompt: 1 };
+
+        assert!(row_of(&rows, page, ItemKind::Back).is_some());
+        assert!(row_of(&rows, page, ItemKind::Insert { send: true }).is_some());
+        assert!(row_of(&rows, Stage::PromptModes { prompt: 5 }, ItemKind::Back).is_none());
+        assert!(row_of(&rows, Stage::Prompts, ItemKind::Chip(0)).is_some());
+        assert_eq!(
+            stage_label(Stage::Prompts, ItemKind::Chip(0), Some(&row())),
+            "Insert the prompt claude2"
+        );
+        assert_eq!(
+            stage_label(Stage::Profiles, ItemKind::Chip(0), Some(&row())),
+            "Start Claude with claude2"
+        );
+        assert_eq!(
+            stage_label(page, ItemKind::Insert { send: true }, Some(&row())),
+            "Insert the prompt claude2 and press Enter"
+        );
+        assert_eq!(
+            stage_label(Stage::Profiles, ItemKind::PromptsEntry, None),
+            "Insert a saved prompt"
+        );
     }
 
     #[test]
