@@ -349,7 +349,7 @@ impl AskTable {
 /// does not, everything is one line so a newline cannot run as a separate command.
 #[must_use]
 pub fn ask_message(id: &str, from_name: &str, question: &str, bracketed: bool) -> String {
-    let hint = format!("(reply with: horizon link reply {id} \"<answer>\")");
+    let hint = format!("(reply with: horizon link reply {id} '<answer>')");
     if bracketed {
         format!("[ask {id} from {from_name}] {question}\n{hint}")
     } else {
@@ -390,7 +390,7 @@ mod tests {
         let text = ask_message("a1b2c3", "backend", "what port?", true);
         assert!(text.starts_with("[ask a1b2c3 from backend] what port?"), "{text}");
         assert!(
-            text.ends_with("(reply with: horizon link reply a1b2c3 \"<answer>\")"),
+            text.ends_with("(reply with: horizon link reply a1b2c3 '<answer>')"),
             "{text}"
         );
         assert!(text.contains('\n'));

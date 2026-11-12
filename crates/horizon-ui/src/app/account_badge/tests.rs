@@ -278,6 +278,27 @@ fn cache_rebuilds_only_when_key_changes() {
 }
 
 #[test]
+fn env_dir_is_resolved_once_per_env() {
+    let mut cache = AccountBadgeCache::default();
+    let home = Path::new("/home/u");
+    let panel = PanelId(3);
+    let mut env = BTreeMap::new();
+    env.insert("CLAUDE_CONFIG_DIR".to_owned(), "/home/u/.claude-work".to_owned());
+
+    let first = cache.env_dir(panel, &env, home);
+    let again = cache.env_dir(panel, &env, home);
+    assert_eq!(&*first, Path::new("/home/u/.claude-work"));
+    assert!(Arc::ptr_eq(&first, &again), "an unchanged env reuses the resolved dir");
+
+    env.insert("CLAUDE_CONFIG_DIR".to_owned(), "/home/u/.claude-other".to_owned());
+    let changed = cache.env_dir(panel, &env, home);
+    assert_eq!(&*changed, Path::new("/home/u/.claude-other"));
+
+    cache.forget(panel);
+    assert!(cache.env_dirs.is_empty());
+}
+
+#[test]
 fn cache_evicts_closed_panels_when_the_count_moves() {
     let mut cache = AccountBadgeCache::default();
     for id in [1, 2] {

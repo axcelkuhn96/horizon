@@ -7,8 +7,9 @@
 //! `(config dir, usage version, pixels_per_point)` and rebuilt only when that key moves; painting
 //! reuses the cached geometry and allocates nothing.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::f32::consts::{FRAC_PI_2, TAU};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -422,6 +423,9 @@ struct Entry {
 #[derive(Default)]
 pub(super) struct AccountBadgeCache {
     entries: HashMap<PanelId, Entry>,
+    /// Config dir resolved from a panel's `env`, with the hash of the env it came from: an
+    /// undetected Claude panel is looked at every frame, so the path is not rebuilt each time.
+    env_dirs: HashMap<PanelId, (u64, Arc<Path>)>,
     /// Panel count at the last eviction sweep.
     swept_for: usize,
     /// `$HOME`, read once (`home_read` says whether).
@@ -447,6 +451,23 @@ impl AccountBadgeCache {
 
     fn forget(&mut self, panel_id: PanelId) {
         self.entries.remove(&panel_id);
+        self.env_dirs.remove(&panel_id);
+    }
+
+    /// The config dir `env` selects for `panel_id` (see [`claude_config_dir_for_env`]), resolved
+    /// again only when the env changed.
+    fn env_dir(&mut self, panel_id: PanelId, env: &BTreeMap<String, String>, home: &Path) -> Arc<Path> {
+        let mut hasher = DefaultHasher::new();
+        env.hash(&mut hasher);
+        let hash = hasher.finish();
+        if let Some((cached, dir)) = self.env_dirs.get(&panel_id)
+            && *cached == hash
+        {
+            return Arc::clone(dir);
+        }
+        let dir: Arc<Path> = Arc::from(claude_config_dir_for_env(env, home));
+        self.env_dirs.insert(panel_id, (hash, Arc::clone(&dir)));
+        dir
     }
 
     /// Drops the entries of closed panels; sweeps only when the panel count moved.
@@ -456,6 +477,7 @@ impl AccountBadgeCache {
         }
         self.swept_for = panel_count;
         self.entries.retain(|panel_id, _| live(*panel_id));
+        self.env_dirs.retain(|panel_id, _| live(*panel_id));
     }
 
     /// The user's home directory (read from the environment on first use).
@@ -492,7 +514,7 @@ impl HorizonApp {
         let env_dir = home
             .as_deref()
             .filter(|_| kind == PanelKind::Claude && detected.is_none())
-            .map(|home| claude_config_dir_for_env(&panel.env, home));
+            .map(|home| self.hub.account_badges.env_dir(panel_id, &panel.env, home));
         let pixels_per_point = painter.ctx().pixels_per_point();
         let key = BadgeKey {
             dir: detected.or(env_dir.as_deref()),
@@ -505,7 +527,7 @@ impl HorizonApp {
         let (version, ppp_bits) = (key.version, key.ppp_bits);
         let dir = key.dir.map(Path::to_path_buf);
         let detected = detected.map(Path::to_path_buf);
-        let env_dir = env_dir.or_else(|| {
+        let env_dir = env_dir.map(|dir| dir.to_path_buf()).or_else(|| {
             home.as_deref()
                 .filter(|_| kind == PanelKind::Claude)
                 .map(|home| claude_config_dir_for_env(&panel.env, home))

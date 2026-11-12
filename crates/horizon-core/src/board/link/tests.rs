@@ -567,7 +567,7 @@ fn ask_text_is_sanitized_like_send() {
         text.contains(" from asker] what[31m port?\n(reply with: horizon link reply "),
         "{text:?}"
     );
-    assert!(text.ends_with("\"<answer>\")\u{1b}[201~\r"), "{text:?}");
+    assert!(text.ends_with("'<answer>')\u{1b}[201~\r"), "{text:?}");
     assert!(!text.contains('\u{7}'));
     setup.board.shutdown_terminal_panels();
 }
@@ -995,6 +995,44 @@ fn a_shell_that_stopped_running_claude_is_refused_and_ends_a_pending_ask() {
         !message.contains("send"),
         "the refusal must not point at typing into shells: {message}"
     );
+    setup.board.shutdown_terminal_panels();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_backgrounded_claude_under_a_shell_is_not_an_agent_and_ask_is_refused() {
+    let mut setup = ask_setup();
+    let workspace = setup.board.panel(setup.asker).expect("asker").workspace_id;
+    // Job control puts the `&` job in its own group, behind the shell that owns the terminal.
+    let script = "set -m; printf '\\033[?2004h'; stty raw -echo; echo ready; \
+                  (exec -a claude sleep 10) & exec cat >/dev/null";
+    let hand = shell_panel(&mut setup.board, workspace, "hand", script);
+    assert!(screen_contains(&mut setup.board, hand, "ready"));
+    let pid = setup.board.panel(hand).expect("hand").child_pid().expect("pid");
+    assert!(
+        wait_until(|| crate::agent_detect::detect_claude_process(pid, &[]).is_some()),
+        "the background claude never started"
+    );
+
+    assert!(!runs_agent(&setup.board, hand));
+    assert!(
+        setup
+            .board
+            .agent_panels_in_workspace(workspace)
+            .iter()
+            .all(|id| *id != hand)
+    );
+    let hand_id = panel_local_id(&setup.board, hand);
+    let request = ask_request(&setup, setup.asker, &hand_id, "are you there?");
+    let (refusal, effect) = serve(&mut setup, request);
+    assert!(effect.is_none(), "an ask must not be typed into a shell prompt");
+    assert!(matches!(
+        refusal.try_recv(),
+        Ok(LinkResponse::Err {
+            code: LinkErrorCode::BadRequest,
+            ..
+        })
+    ));
     setup.board.shutdown_terminal_panels();
 }
 
