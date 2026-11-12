@@ -6,7 +6,7 @@
 use egui::Context;
 use horizon_core::{
     Board, Config, EffectivePrompt, PanelId, PromptScope, SavedPrompt, WorkspaceConfig, WorkspaceTemplateRef,
-    effective_prompts,
+    effective_prompts, skipped_prompts,
 };
 
 use super::HorizonApp;
@@ -110,6 +110,16 @@ impl PromptsUi {
         self.global = global.to_vec();
         self.workspace = workspace.to_vec();
         self.effective = effective_prompts(global, workspace);
+        for (scope, list) in [("prompts", global), ("workspace prompts", workspace)] {
+            for issue in skipped_prompts(list) {
+                tracing::warn!(
+                    scope,
+                    prompt = issue.index + 1,
+                    problem = issue.kind.message(),
+                    "ignoring invalid saved prompt (kept in the config as written)"
+                );
+            }
+        }
         self.entries = palette_entries(&self.effective);
         self.builds += 1;
     }

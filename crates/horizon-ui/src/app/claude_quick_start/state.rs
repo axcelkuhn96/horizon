@@ -71,6 +71,8 @@ pub(super) struct Expanded {
     pub(super) panel_id: PanelId,
     pub(super) stage: Stage,
     pub(super) rows: Vec<Row>,
+    /// One row per saved prompt, listed by the prompt pages.
+    pub(super) prompts: Vec<Row>,
     /// `HubState::rows_version` the rows were built from.
     pub(super) rows_version: u64,
     layout: Option<(LayoutKey, Arc<StripLayout>)>,

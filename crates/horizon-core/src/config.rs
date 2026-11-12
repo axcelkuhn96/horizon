@@ -20,7 +20,7 @@ pub use features::FeaturesConfig;
 pub use input::{InputConfig, scroll_should_pan_canvas};
 pub use prompts::{
     EffectivePrompt, MAX_PROMPT_NAME_CHARS, MAX_PROMPT_TEXT_BYTES, PromptIssue, PromptIssueKind, PromptScope,
-    SavedPrompt, effective_prompts, validate_prompts,
+    SavedPrompt, effective_prompts, skipped_prompts, validate_prompts,
 };
 
 use crate::config_migration::{self, CURRENT_CONFIG_VERSION};
@@ -651,9 +651,10 @@ impl Config {
         }
 
         // A bad hand-edited prompt must not make the whole file unloadable (the app would fall
-        // back to defaults and a later save would overwrite it): drop it with a warning instead.
-        prompts::drop_invalid_all_prompts(&mut config.prompts, &mut config.workspaces);
-        config.validate()?;
+        // back to defaults and a later save would overwrite it), nor be dropped (a later save
+        // would delete the user's text): it stays in the config as written, `effective_prompts`
+        // skips it at use time and the Settings editor marks it.
+        config.validate_without_prompts()?;
         Ok(config)
     }
 
@@ -665,6 +666,19 @@ impl Config {
     pub fn from_yaml(contents: &str) -> Result<Self> {
         let config = Self::deserialize_yaml(contents)?;
         config.validate()?;
+        Ok(config)
+    }
+
+    /// Like [`Self::from_yaml`], but a prompt that is unsafe to keep (control characters, oversize,
+    /// duplicate name) does not fail it: the prompt stays as written so the Settings editor can
+    /// show and fix it instead of losing it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if deserialization or any non-prompt validation fails.
+    pub fn from_yaml_lenient(contents: &str) -> Result<Self> {
+        let config = Self::deserialize_yaml(contents)?;
+        config.validate_without_prompts()?;
         Ok(config)
     }
 
@@ -712,12 +726,19 @@ impl Config {
     ///
     /// Returns an error if any configured shortcut is invalid or duplicated.
     pub fn validate(&self) -> Result<()> {
+        self.validate_without_prompts()?;
+        prompts::validate_all_prompts(&self.prompts, &self.workspaces)?;
+        Ok(())
+    }
+
+    /// [`Self::validate`] minus the saved prompts, which are checked strictly only when the user
+    /// saves (a hand-edited bad one must not make the file unloadable).
+    pub(crate) fn validate_without_prompts(&self) -> Result<()> {
         let shortcuts = self.shortcuts.resolve()?;
         self.input.resolve_pan_modifier()?;
         crate::speech_config::validate_speech(&self.features.speech, &shortcuts)?;
         validate_ssh_connections(&self.presets, &self.workspaces)?;
         validate_claude_profiles(&self.claude_profiles)?;
-        prompts::validate_all_prompts(&self.prompts, &self.workspaces)?;
         Ok(())
     }
 

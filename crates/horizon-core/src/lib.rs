@@ -58,7 +58,8 @@ pub use config::{
     PromptIssue, PromptIssueKind, PromptScope, SavedPrompt, ShortcutsConfig, SpeechBackend, SpeechConfig,
     SpeechHotkeyMode, SpeechProfile, SpeechTask, TerminalConfig, WindowConfig, WorkspaceConfig, claude_profile_preset,
     discover_claude_profiles, effective_prompts, expand_config_dir, grid_position, move_item, scroll_should_pan_canvas,
-    template_from_workspace, terminal_from_preset, upsert_template, validate_claude_profiles, validate_prompts,
+    skipped_prompts, template_from_workspace, terminal_from_preset, upsert_template, validate_claude_profiles,
+    validate_prompts,
 };
 pub use editor::{MarkdownEditor, PanelContent, PreviewMode};
 pub use error::{Error, Result};

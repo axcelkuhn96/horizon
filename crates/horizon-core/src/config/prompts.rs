@@ -152,68 +152,61 @@ fn is_usable(prompt: &SavedPrompt) -> bool {
     !prompt.name.trim().is_empty() && !prompt.text.trim().is_empty()
 }
 
+/// Why `prompt` must not be offered, when it is unsafe or unusable to keep: a hard problem
+/// (control characters, oversize) or a name an earlier usable prompt of the same list already
+/// has. Unfinished drafts are skipped too but report nothing here (they are not an error).
+/// `seen` collects the names of the usable prompts so far.
+fn skip_reason(prompt: &SavedPrompt, seen: &mut HashSet<String>) -> Option<PromptIssueKind> {
+    let hard = validate_prompts(std::slice::from_ref(prompt))
+        .into_iter()
+        .map(|issue| issue.kind)
+        .find(|kind| kind.is_hard());
+    hard.or_else(|| {
+        (is_usable(prompt) && !seen.insert(name_key(&prompt.name))).then_some(PromptIssueKind::DuplicateName)
+    })
+}
+
+/// The prompts of `list` that can be offered: complete, safe and, for a repeated name, the first.
+fn usable_prompts(list: &[SavedPrompt]) -> Vec<&SavedPrompt> {
+    let mut seen = HashSet::new();
+    list.iter()
+        .filter(|prompt| skip_reason(prompt, &mut seen).is_none() && is_usable(prompt))
+        .collect()
+}
+
+/// The prompts of `list` that [`effective_prompts`] leaves out because they are unsafe or
+/// repeat a name (unfinished drafts are not listed). They stay in the config as written; this
+/// is for logging them.
+#[must_use]
+pub fn skipped_prompts(list: &[SavedPrompt]) -> Vec<PromptIssue> {
+    let mut seen = HashSet::new();
+    list.iter()
+        .enumerate()
+        .filter_map(|(index, prompt)| skip_reason(prompt, &mut seen).map(|kind| PromptIssue { index, kind }))
+        .collect()
+}
+
 /// The prompts available in a workspace: its own first, then the global ones it does not
 /// shadow. A workspace prompt hides the global prompt of the same name (case-insensitively).
-/// Unfinished drafts (empty name or text) are skipped, so inserting one can never send a bare Enter.
+/// Unfinished drafts (empty name or text) are skipped, so inserting one can never send a bare
+/// Enter; so are prompts with control characters or oversize text and later repeats of a name
+/// within one list. Those stay in the config as written (see [`skipped_prompts`]).
 #[must_use]
 pub fn effective_prompts(global: &[SavedPrompt], workspace: &[SavedPrompt]) -> Vec<EffectivePrompt> {
-    let shadowed: HashSet<String> = workspace
-        .iter()
-        .filter(|prompt| is_usable(prompt))
-        .map(|prompt| name_key(&prompt.name))
-        .collect();
-    let own = workspace
-        .iter()
-        .filter(|prompt| is_usable(prompt))
-        .map(|prompt| (prompt, PromptScope::Workspace));
-    let inherited = global
-        .iter()
-        .filter(|prompt| is_usable(prompt))
-        .filter(|prompt| !shadowed.contains(&name_key(&prompt.name)))
-        .map(|prompt| (prompt, PromptScope::Global));
-    own.chain(inherited)
+    let own = usable_prompts(workspace);
+    let shadowed: HashSet<String> = own.iter().map(|prompt| name_key(&prompt.name)).collect();
+    let inherited = usable_prompts(global)
+        .into_iter()
+        .filter(|prompt| !shadowed.contains(&name_key(&prompt.name)));
+    own.into_iter()
+        .map(|prompt| (prompt, PromptScope::Workspace))
+        .chain(inherited.map(|prompt| (prompt, PromptScope::Global)))
         .map(|(prompt, scope)| EffectivePrompt {
             name: prompt.name.trim().to_owned(),
             text: prompt.text.clone(),
             scope,
         })
         .collect()
-}
-
-/// Drops the prompts of `list` that are unsafe to keep (control characters, oversize, duplicate
-/// name; unfinished drafts stay), logging each one. Used at load so a hand-edited bad prompt
-/// never stops the whole config from loading.
-pub fn drop_invalid_prompts(list: &mut Vec<SavedPrompt>, scope: &str) {
-    let mut seen = HashSet::new();
-    let mut index = 0;
-    list.retain(|prompt| {
-        index += 1;
-        let issue = validate_prompts(std::slice::from_ref(prompt))
-            .into_iter()
-            .map(|issue| issue.kind)
-            .find(|kind| kind.is_hard())
-            .or_else(|| {
-                let name = prompt.name.trim();
-                (!name.is_empty() && !seen.insert(name_key(name))).then_some(PromptIssueKind::DuplicateName)
-            });
-        if let Some(kind) = issue {
-            tracing::warn!(
-                scope,
-                prompt = index,
-                problem = kind.message(),
-                "ignoring invalid saved prompt"
-            );
-        }
-        issue.is_none()
-    });
-}
-
-/// Applies [`drop_invalid_prompts`] to the global list and every workspace template's list.
-pub fn drop_invalid_all_prompts(global: &mut Vec<SavedPrompt>, workspaces: &mut [WorkspaceConfig]) {
-    drop_invalid_prompts(global, "prompts");
-    for workspace in workspaces {
-        drop_invalid_prompts(&mut workspace.prompts, &format!("workspace '{}'", workspace.name));
-    }
 }
 
 /// Validates the global list and every workspace template's list. Only hard problems fail;
@@ -372,19 +365,37 @@ mod tests {
     }
 
     #[test]
-    fn drop_invalid_keeps_drafts_and_the_first_of_a_duplicate() {
-        let mut list = vec![
+    fn effective_prompts_skip_unsafe_ones_and_repeated_names() {
+        let list = [
             prompt("a", "one"),
             prompt("A", "dup"),
-            prompt("b", "x\r\ny"),
+            prompt("b", "x\u{1b}y"),
             prompt("c", &"z".repeat(MAX_PROMPT_TEXT_BYTES + 1)),
             prompt("draft", ""),
             prompt("d", "fine"),
         ];
 
-        drop_invalid_prompts(&mut list, "prompts");
+        let names: Vec<_> = effective_prompts(&list, &[]).into_iter().map(|p| p.name).collect();
 
-        let names: Vec<_> = list.iter().map(|p| p.name.as_str()).collect();
-        assert_eq!(names, ["a", "draft", "d"]);
+        assert_eq!(names, ["a", "d"]);
+        let skipped: Vec<_> = skipped_prompts(&list).iter().map(|i| (i.index, i.kind)).collect();
+        assert_eq!(
+            skipped,
+            [
+                (1, PromptIssueKind::DuplicateName),
+                (2, PromptIssueKind::TextHasControlChars),
+                (3, PromptIssueKind::TextTooLong),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_draft_does_not_make_a_later_prompt_a_duplicate() {
+        let list = [prompt("a", ""), prompt("a", "real")];
+
+        let names: Vec<_> = effective_prompts(&list, &[]).into_iter().map(|p| p.name).collect();
+
+        assert_eq!(names, ["a"]);
+        assert!(skipped_prompts(&list).is_empty());
     }
 }

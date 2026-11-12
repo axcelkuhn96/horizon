@@ -120,7 +120,7 @@ fn load_yaml(yaml: &str) -> Config {
 }
 
 #[test]
-fn load_drops_invalid_prompts_instead_of_failing() {
+fn load_keeps_invalid_prompts_verbatim_and_use_time_skips_them() {
     let long = "a".repeat(8193);
     let yaml = format!(
         "prompts:\n  - name: ok\n    text: fine\n  - name: OK\n    text: duplicate\n  - name: big\n    text: {long}\n  - name: esc\n    text: \"a\\u001bb\"\n  - name: crlf\n    text: \"a\\r\\nb\"\n  - name: draft\n    text: \"\"\nworkspaces:\n  - name: Alpha\n    terminals: []\n    prompts:\n      - name: w\n        text: \"x\\u0000y\"\n      - name: keep\n        text: keep this\n"
@@ -129,10 +129,32 @@ fn load_drops_invalid_prompts_instead_of_failing() {
     let config = load_yaml(&yaml);
 
     let names: Vec<_> = config.prompts.iter().map(|p| p.name.as_str()).collect();
-    assert_eq!(names, ["ok", "draft"]);
-    assert_eq!(config.prompts[0].text, "fine");
+    assert_eq!(names, ["ok", "OK", "big", "esc", "crlf", "draft"]);
+    assert_eq!(config.prompts[2].text, long);
     let workspace: Vec<_> = config.workspaces[0].prompts.iter().map(|p| p.name.as_str()).collect();
-    assert_eq!(workspace, ["keep"]);
+    assert_eq!(workspace, ["w", "keep"]);
+
+    let reparsed: Config = serde_yaml::from_str(&config.to_yaml().expect("serialize")).expect("parse");
+    assert_eq!(
+        reparsed.prompts, config.prompts,
+        "saving writes the bad prompts back unchanged"
+    );
+    assert_eq!(reparsed.workspaces[0].prompts, config.workspaces[0].prompts);
+
+    let usable: Vec<_> = effective_prompts(&config.prompts, &config.workspaces[0].prompts)
+        .into_iter()
+        .map(|p| p.name)
+        .collect();
+    assert_eq!(usable, ["keep", "ok"]);
+}
+
+#[test]
+fn only_the_strict_parse_refuses_bad_prompts() {
+    let yaml = "prompts:\n  - name: a\n    text: one\n  - name: A\n    text: two\n";
+
+    assert!(Config::from_yaml(yaml).is_err());
+    let config = Config::from_yaml_lenient(yaml).expect("lenient keeps the file editable");
+    assert_eq!(config.prompts.len(), 2);
 }
 
 #[test]

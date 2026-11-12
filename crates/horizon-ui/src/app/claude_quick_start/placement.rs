@@ -45,6 +45,12 @@ pub(super) enum ItemKind {
     Close,
     /// `+N` for profiles that did not fit.
     More(usize),
+    /// The `Insert prompt ▸` entry after the profile chips.
+    PromptsEntry,
+    /// `Insert` (`send` false) or `Insert & send` on a prompt's page.
+    Insert {
+        send: bool,
+    },
 }
 
 impl ItemKind {
