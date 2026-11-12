@@ -6,6 +6,7 @@ use horizon_core::WorkspaceId;
 
 use super::claude_launcher::ClaudeLauncherState;
 use super::hub_ui;
+use super::sidebar::GitSidebarState;
 
 /// Accent slots for the visible profile list, recomputed only when the list changes.
 #[derive(Default)]
@@ -28,6 +29,8 @@ pub(super) struct HubState {
     /// Bumped when the profile list or usage data behind the launcher rows
     /// changes; the open launcher rebuilds its rows when it moves.
     pub(super) rows_version: u64,
+    /// Git line and worktrees list state of the sidebar.
+    pub(super) git: GitSidebarState,
 }
 
 impl HubState {

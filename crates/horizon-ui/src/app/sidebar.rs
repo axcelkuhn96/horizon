@@ -1,4 +1,5 @@
 mod auto_hide;
+mod git_overview;
 mod menu;
 mod routing;
 mod toolbar;
@@ -30,6 +31,7 @@ use auto_hide::{
     SIDEBAR_AUTO_HIDE_DELAY, SIDEBAR_STRIP_HOVER_WIDTH, SIDEBAR_STRIP_WIDTH, SidebarReveal, reserved_sidebar_width,
     sidebar_reveal_state,
 };
+pub(super) use git_overview::GitSidebarState;
 use workspace_menu::{WorkspaceMenuAction, WorkspaceMenuEnv};
 
 struct WorkspaceSidebarEntry {
@@ -68,6 +70,7 @@ struct SidebarActions {
     arrange_layout: Option<(WorkspaceId, WorkspaceLayout)>,
     toggle_sidebar_collapse: Option<WorkspaceId>,
     workspace_menu: Option<WorkspaceMenuAction>,
+    git_action: Option<git_overview::GitAction>,
 }
 
 #[derive(Clone, Copy)]
@@ -422,6 +425,9 @@ impl HorizonApp {
                 caret_rect = row.caret_rect;
             },
         );
+        if workspace.sidebar_collapsed {
+            git_overview::paint_collapsed_dirty_dot(ui, &self.hub.git, workspace.id, row_rect);
+        }
 
         let row_response = ui.interact(
             row_rect,
@@ -475,6 +481,9 @@ impl HorizonApp {
     ) {
         if !workspace.sidebar_collapsed {
             ui.add_space(2.0);
+            if let Some(action) = git_overview::render_git_section(ui, &mut self.hub.git, &self.presets, workspace.id) {
+                actions.git_action = Some(action);
+            }
             for panel in &workspace.panels {
                 self.render_sidebar_panel(ui, workspace, workspace_data, panel, actions);
             }
@@ -856,6 +865,9 @@ impl HorizonApp {
         }
         if let Some(action) = actions.workspace_menu {
             self.apply_workspace_menu_action(ctx, action);
+        }
+        if let Some(action) = actions.git_action {
+            self.apply_git_action(ctx, action);
         }
     }
 }
