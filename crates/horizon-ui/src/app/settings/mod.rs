@@ -93,6 +93,9 @@ impl HorizonApp {
         } else {
             let content = self.load_or_generate_config_yaml();
             let editing_config = Config::from_yaml(&content).ok();
+            if let Some(config) = &editing_config {
+                self.board.seed_template_baseline(config);
+            }
             self.settings = Some(SettingsEditor {
                 original: content.clone(),
                 buffer: content,

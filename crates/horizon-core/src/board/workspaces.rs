@@ -270,20 +270,35 @@ impl Board {
         self.panel_mut(id).is_some_and(|panel| panel.rename(name))
     }
 
+    /// Records the template names a later [`Self::sync_workspace_metadata`]
+    /// compares against. Does nothing if a baseline already exists (every sync
+    /// refreshes it), so callers seed it with the config the linked workspaces
+    /// were built from.
+    pub fn seed_template_baseline(&mut self, config: &Config) {
+        if self.template_names_baseline.is_none() {
+            self.template_names_baseline = Some(Self::template_names(config));
+        }
+    }
+
+    fn template_names(config: &Config) -> Vec<String> {
+        config
+            .workspaces
+            .iter()
+            .map(|workspace| workspace.name.to_lowercase())
+            .collect()
+    }
+
     /// Applies live-preview template edits to the workspaces linked to a template.
     ///
     /// A workspace follows its template by name (case-insensitive), so
     /// reordering or deleting templates never retargets another workspace.
-    /// Only when its stored name is gone (the template was renamed) does it
-    /// fall back to the stored index, and only if no other linked workspace
-    /// already owns the template at that index.
+    /// Only when its stored name is gone does it fall back to the stored
+    /// index, and only for a genuine in-place rename: the template count is
+    /// unchanged, the previous list had the workspace's name at that index,
+    /// and the name now there is new. Anything else (a deleted template, or no
+    /// baseline yet) leaves the workspace and its template ref untouched.
     pub fn sync_workspace_metadata(&mut self, config: &Config) {
-        let linked_names: Vec<String> = self
-            .workspaces
-            .iter()
-            .filter_map(|workspace| workspace.template.as_ref())
-            .map(|template| template.workspace_name.to_lowercase())
-            .collect();
+        let previous = self.template_names_baseline.replace(Self::template_names(config));
 
         for workspace in &mut self.workspaces {
             let Some(template) = &workspace.template else {
@@ -295,15 +310,13 @@ impl Board {
                 .iter()
                 .position(|candidate| candidate.name.to_lowercase() == wanted)
                 .or_else(|| {
+                    let previous = previous.as_ref()?;
                     let index = template.workspace_index;
-                    config
-                        .workspaces
-                        .get(index)
-                        .filter(|candidate| {
-                            let name = candidate.name.to_lowercase();
-                            !linked_names.contains(&name)
-                        })
-                        .map(|_| index)
+                    let candidate = config.workspaces.get(index)?.name.to_lowercase();
+                    (previous.len() == config.workspaces.len()
+                        && previous.get(index) == Some(&wanted)
+                        && !previous.contains(&candidate))
+                    .then_some(index)
                 });
             let Some(index) = matched else {
                 continue;

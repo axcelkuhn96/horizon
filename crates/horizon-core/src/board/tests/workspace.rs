@@ -154,6 +154,11 @@ fn sync_workspace_metadata_updates_only_templated_workspaces() {
         workspace.cwd = Some(PathBuf::from("/tmp/manual"));
     }
 
+    board.seed_template_baseline(&Config {
+        workspaces: vec![named_template("template", "/tmp/old")],
+        ..Config::default()
+    });
+
     let config = Config {
         workspaces: vec![WorkspaceConfig {
             name: "synced".to_string(),
@@ -204,6 +209,10 @@ fn linked_board(templates: &[WorkspaceConfig]) -> (Board, Vec<WorkspaceId>) {
             id
         })
         .collect();
+    board.seed_template_baseline(&Config {
+        workspaces: templates.to_vec(),
+        ..Config::default()
+    });
     (board, ids)
 }
 
@@ -289,6 +298,109 @@ fn sync_workspaces_metadata_rename_falls_back_to_index_and_updates_ref() {
         renamed.template.as_ref().map(|t| t.workspace_name.as_str()),
         Some("gamma")
     );
+}
+
+#[test]
+fn sync_workspaces_metadata_delete_with_unlinked_neighbour_does_not_retarget() {
+    let a = named_template("alpha", "/tmp/a");
+    let b = named_template("beta", "/tmp/b");
+    let fresh = named_template("new", "/tmp/n");
+    let (mut board, ids) = linked_board(&[a.clone(), b]);
+    // The baseline is [alpha, beta]; a sync of the full list advances it.
+    let full = Config {
+        workspaces: vec![a.clone(), named_template("beta", "/tmp/b"), fresh.clone()],
+        ..Config::default()
+    };
+    board.sync_workspace_metadata(&full);
+
+    let after_delete = Config {
+        workspaces: vec![a, fresh],
+        ..Config::default()
+    };
+    // Run several frames: sync rewrites refs every frame in the app.
+    for _ in 0..3 {
+        board.sync_workspace_metadata(&after_delete);
+    }
+
+    let beta = board.workspace(ids[1]).expect("beta");
+    assert_eq!(beta.name, "beta", "deleted template must not rename its workspace");
+    assert_eq!(beta.cwd, Some(PathBuf::from("/tmp/b")));
+    let template = beta.template.as_ref().expect("template ref");
+    assert_eq!(template.workspace_name, "beta", "template ref must not be rewritten");
+    assert_eq!(template.workspace_index, 1);
+    let alpha = board.workspace(ids[0]).expect("alpha");
+    assert_eq!(alpha.name, "alpha");
+    assert_eq!(alpha.template.as_ref().map(|t| t.workspace_index), Some(0));
+}
+
+#[test]
+fn sync_workspaces_metadata_renaming_a_neighbour_after_delete_does_not_retarget() {
+    let a = named_template("alpha", "/tmp/a");
+    let b = named_template("beta", "/tmp/b");
+    let fresh = named_template("new", "/tmp/n");
+    let (mut board, ids) = linked_board(&[a.clone(), b.clone()]);
+    board.sync_workspace_metadata(&Config {
+        workspaces: vec![a.clone(), b, fresh.clone()],
+        ..Config::default()
+    });
+    board.sync_workspace_metadata(&Config {
+        workspaces: vec![a.clone(), fresh],
+        ..Config::default()
+    });
+    // The unlinked leftover template is then renamed in place.
+    board.sync_workspace_metadata(&Config {
+        workspaces: vec![a, named_template("renamed", "/tmp/r")],
+        ..Config::default()
+    });
+
+    let beta = board.workspace(ids[1]).expect("beta");
+    assert_eq!(beta.name, "beta");
+    assert_eq!(beta.cwd, Some(PathBuf::from("/tmp/b")));
+}
+
+#[test]
+fn sync_workspaces_metadata_without_baseline_never_falls_back_to_index() {
+    let mut board = Board::new();
+    let id = board.create_workspace("alpha");
+    let workspace = board.workspace_mut(id).expect("workspace");
+    workspace.template = Some(WorkspaceTemplateRef {
+        workspace_index: 0,
+        workspace_name: "alpha".to_string(),
+    });
+
+    board.sync_workspace_metadata(&Config {
+        workspaces: vec![named_template("gamma", "/tmp/g")],
+        ..Config::default()
+    });
+
+    assert_eq!(board.workspace(id).expect("workspace").name, "alpha");
+}
+
+#[test]
+fn sync_workspaces_metadata_revert_after_delete_restores_the_link() {
+    let a = named_template("alpha", "/tmp/a");
+    let b = named_template("beta", "/tmp/b");
+    let fresh = named_template("new", "/tmp/n");
+    let full = Config {
+        workspaces: vec![a.clone(), b.clone(), fresh.clone()],
+        ..Config::default()
+    };
+    let (mut board, ids) = linked_board(&[a.clone(), b]);
+    board.sync_workspace_metadata(&full);
+    board.sync_workspace_metadata(&Config {
+        workspaces: vec![a, fresh],
+        ..Config::default()
+    });
+
+    board.sync_workspace_metadata(&full);
+
+    let beta = board.workspace(ids[1]).expect("beta");
+    assert_eq!(beta.name, "beta");
+    assert_eq!(beta.cwd, Some(PathBuf::from("/tmp/b")));
+    let template = beta.template.as_ref().expect("template ref");
+    assert_eq!(template.workspace_name, "beta");
+    assert_eq!(template.workspace_index, 1);
+    assert_eq!(board.workspaces.len(), 2, "no workspace is created or removed");
 }
 
 #[test]
