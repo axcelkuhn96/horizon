@@ -13,7 +13,9 @@ use super::UsageError;
 const CREDENTIALS_FILE: &str = ".credentials.json";
 const ACCOUNT_FILE: &str = ".claude.json";
 const EXPIRY_MARGIN_MS: i64 = 60_000;
-const MAX_FILE_BYTES: u64 = 1024 * 1024;
+const MAX_CREDENTIALS_BYTES: u64 = 1024 * 1024;
+/// `.claude.json` is 80-200 KB in practice and keeps growing.
+const MAX_ACCOUNT_BYTES: u64 = 8 * 1024 * 1024;
 
 /// OAuth access token. Opaque: redacted `Debug`, no `Display`, no `Serialize`.
 pub struct AccessToken(String);
@@ -57,13 +59,9 @@ struct OauthEntry {
     expires_at: Option<i64>,
 }
 
-fn read_small_file(path: &Path) -> Option<String> {
+fn read_small_file(path: &Path, max_bytes: u64) -> Option<String> {
     let mut buf = String::new();
-    File::open(path)
-        .ok()?
-        .take(MAX_FILE_BYTES)
-        .read_to_string(&mut buf)
-        .ok()?;
+    File::open(path).ok()?.take(max_bytes).read_to_string(&mut buf).ok()?;
     Some(buf)
 }
 
@@ -76,7 +74,7 @@ fn read_small_file(path: &Path) -> Option<String> {
 /// `Missing` when the file is absent, unreadable, a dangling symlink or empty;
 /// `Malformed` when the content is not the expected JSON shape.
 pub fn read_credentials(config_dir: &Path) -> Result<Credentials, UsageError> {
-    let raw = read_small_file(&config_dir.join(CREDENTIALS_FILE)).ok_or(UsageError::Missing)?;
+    let raw = read_small_file(&config_dir.join(CREDENTIALS_FILE), MAX_CREDENTIALS_BYTES).ok_or(UsageError::Missing)?;
     if raw.trim().is_empty() {
         return Err(UsageError::Missing);
     }
@@ -114,13 +112,26 @@ struct Account {
     email_address: Option<String>,
 }
 
-/// `(display_name, email)` from `<config_dir>/.claude.json`; `(None, None)` on any problem.
-#[must_use]
-pub fn read_account(config_dir: &Path) -> (Option<String>, Option<String>) {
-    let parsed = read_small_file(&config_dir.join(ACCOUNT_FILE))
+fn account_from(path: &Path) -> Option<Account> {
+    read_small_file(path, MAX_ACCOUNT_BYTES)
         .and_then(|raw| serde_json::from_str::<AccountFile>(&raw).ok())
-        .and_then(|file| file.account);
-    parsed.map_or((None, None), |a| {
+        .and_then(|file| file.account)
+}
+
+/// `(display_name, email)` of the logged-in account; `(None, None)` on any problem.
+///
+/// Claude Code keeps `oauthAccount` in `<config_dir>/.claude.json`, except for
+/// the default profile (`<home>/.claude`) whose file lives at `<home>/.claude.json`;
+/// that one is read first, falling back to the in-dir file.
+#[must_use]
+pub fn read_account(config_dir: &Path, home: &Path) -> (Option<String>, Option<String>) {
+    let in_dir = || account_from(&config_dir.join(ACCOUNT_FILE));
+    let account = if config_dir == home.join(".claude") {
+        account_from(&home.join(ACCOUNT_FILE)).or_else(in_dir)
+    } else {
+        in_dir()
+    };
+    account.map_or((None, None), |a| {
         (
             a.display_name.filter(|s| !s.is_empty()),
             a.email_address.filter(|s| !s.is_empty()),
@@ -213,9 +224,10 @@ mod tests {
     #[test]
     fn read_account_missing_file_is_none() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(read_account(dir.path()), (None, None));
+        let home = tempfile::tempdir().unwrap();
+        assert_eq!(read_account(dir.path(), home.path()), (None, None));
         write(dir.path(), ACCOUNT_FILE, "{bad");
-        assert_eq!(read_account(dir.path()), (None, None));
+        assert_eq!(read_account(dir.path(), home.path()), (None, None));
     }
 
     #[test]
@@ -226,9 +238,66 @@ mod tests {
             ACCOUNT_FILE,
             r#"{"oauthAccount":{"displayName":"Test User","emailAddress":"t@example.com"}}"#,
         );
+        let home = tempfile::tempdir().unwrap();
         assert_eq!(
-            read_account(dir.path()),
+            read_account(dir.path(), home.path()),
             (Some("Test User".to_owned()), Some("t@example.com".to_owned()))
+        );
+    }
+
+    #[test]
+    fn read_account_default_profile_prefers_home_claude_json() {
+        let home = tempfile::tempdir().unwrap();
+        let config = home.path().join(".claude");
+        std::fs::create_dir(&config).unwrap();
+        write(
+            home.path(),
+            ACCOUNT_FILE,
+            r#"{"oauthAccount":{"displayName":"Home","emailAddress":"home@example.com"}}"#,
+        );
+        write(
+            &config,
+            ACCOUNT_FILE,
+            r#"{"oauthAccount":{"displayName":"Inner","emailAddress":"inner@example.com"}}"#,
+        );
+        let expected = (Some("Home".to_owned()), Some("home@example.com".to_owned()));
+        assert_eq!(read_account(&config, home.path()), expected);
+        assert_eq!(read_account(&home.path().join(".claude/"), home.path()), expected);
+        // Non-default dir ignores $HOME/.claude.json.
+        let other = home.path().join(".claude-work");
+        std::fs::create_dir(&other).unwrap();
+        assert_eq!(read_account(&other, home.path()), (None, None));
+    }
+
+    #[test]
+    fn read_account_default_profile_falls_back_to_config_dir() {
+        let home = tempfile::tempdir().unwrap();
+        let config = home.path().join(".claude");
+        std::fs::create_dir(&config).unwrap();
+        write(
+            &config,
+            ACCOUNT_FILE,
+            r#"{"oauthAccount":{"displayName":"Inner","emailAddress":"inner@example.com"}}"#,
+        );
+        assert_eq!(
+            read_account(&config, home.path()),
+            (Some("Inner".to_owned()), Some("inner@example.com".to_owned()))
+        );
+    }
+
+    #[test]
+    fn read_account_accepts_large_claude_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let padding = "x".repeat(2 * 1024 * 1024);
+        write(
+            dir.path(),
+            ACCOUNT_FILE,
+            &format!(r#"{{"pad":"{padding}","oauthAccount":{{"displayName":"Big","emailAddress":"b@example.com"}}}}"#),
+        );
+        assert_eq!(
+            read_account(dir.path(), home.path()),
+            (Some("Big".to_owned()), Some("b@example.com".to_owned()))
         );
     }
 
