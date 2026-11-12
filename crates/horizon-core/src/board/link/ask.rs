@@ -11,7 +11,7 @@ use alacritty_terminal::term::TermMode;
 
 use crate::link::{
     AskEnd, AskTable, LinkEffect, LinkEffectKind, LinkError, LinkOk, LinkRequest, LinkResponse, MAX_REQUEST_BYTES,
-    ask_message, sanitize_send_text, strip_escapes,
+    TargetState, ask_message, sanitize_send_text, strip_escapes,
 };
 use crate::panel::PanelId;
 use crate::workspace::WorkspaceId;
@@ -215,12 +215,21 @@ impl Board {
     /// whose deadline passed; returns what ended so the UI can drop its markers.
     pub fn resolve_link_asks(&self, asks: &mut AskTable, now: Instant) -> Vec<AskEnd> {
         let asker_alive = |id: PanelId| self.panel(id).is_some_and(|panel| !panel.child_exited());
-        // An asked shell whose `claude` exited is back at a prompt: it can no longer answer.
-        let target_alive = |id: PanelId| {
-            self.panel(id)
-                .is_some_and(|panel| !panel.child_exited() && Self::panel_runs_agent(panel))
+        // Cheap, runs every frame: only presence and the exited flag.
+        let target_state = |id: PanelId| match self.panel(id) {
+            Some(panel) if !panel.child_exited() => {
+                if panel.kind.is_agent() {
+                    TargetState::Agent
+                } else {
+                    TargetState::Shell
+                }
+            }
+            _ => TargetState::Gone,
         };
-        let mut ended = asks.resolve_closed(asker_alive, target_alive);
+        // An asked shell whose `claude` exited is back at a prompt: it can no longer answer.
+        // This walks `/proc`; the table throttles it to once per second per target.
+        let shell_runs_agent = |id: PanelId| self.panel(id).is_some_and(Self::panel_runs_agent);
+        let mut ended = asks.resolve_closed(now, asker_alive, target_state, shell_runs_agent);
         ended.extend(asks.sweep_expired(now, SWEEP_CAP));
         ended
     }

@@ -3,7 +3,7 @@
 //! Connection threads only block on a channel; every table access happens on the UI
 //! thread, which answers or fails each ask through the stored sender.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
@@ -18,6 +18,8 @@ pub const MAX_ASKS_TOTAL: usize = 32;
 /// Resolved ask ids remembered so a late reply says "expired" rather than "unknown".
 const EXPIRED_MEMORY: usize = 64;
 const ID_LEN: usize = 6;
+/// How long the answer to "does this shell still run an agent?" (a `/proc` walk) is reused.
+pub const AGENT_CHECK_EVERY: Duration = Duration::from_secs(1);
 
 /// What a link request did to the panels, for the badges and the visual link line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,10 +72,67 @@ impl PendingAsk {
     }
 }
 
+/// What the board can tell about an ask target without any costly check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TargetState {
+    /// Panel closed or its process exited.
+    Gone,
+    /// An agent panel: alive as long as its process runs.
+    Agent,
+    /// A shell: alive only while an agent runs in it, which costs a `/proc` walk.
+    Shell,
+}
+
+/// Last answer of the costly "shell runs an agent" check per target, so a frame loop does
+/// not repeat it every frame.
+#[derive(Default)]
+struct AgentChecks {
+    last: HashMap<PanelId, (Instant, bool)>,
+}
+
+impl AgentChecks {
+    /// The cached answer for `panel` while younger than [`AGENT_CHECK_EVERY`]; otherwise
+    /// runs `probe` and remembers its answer.
+    fn check(&mut self, panel: PanelId, now: Instant, probe: impl FnOnce() -> bool) -> bool {
+        if let Some(&(at, runs)) = self.last.get(&panel)
+            && now.saturating_duration_since(at) < AGENT_CHECK_EVERY
+        {
+            return runs;
+        }
+        let runs = probe();
+        self.last.insert(panel, (now, runs));
+        runs
+    }
+
+    /// Whether an ask to `target` can no longer be answered; only a shell costs a probe.
+    fn target_closed(
+        &mut self,
+        target: PanelId,
+        now: Instant,
+        state: TargetState,
+        probe: impl FnOnce() -> bool,
+    ) -> bool {
+        match state {
+            TargetState::Gone => true,
+            TargetState::Agent => false,
+            TargetState::Shell => !self.check(target, now, probe),
+        }
+    }
+
+    fn next_check(&self) -> Option<Instant> {
+        self.last.values().map(|(at, _)| *at + AGENT_CHECK_EVERY).min()
+    }
+
+    fn keep_only(&mut self, keep: impl Fn(PanelId) -> bool) {
+        self.last.retain(|panel, _| keep(*panel));
+    }
+}
+
 #[derive(Default)]
 pub struct AskTable {
     asks: Vec<PendingAsk>,
     expired: VecDeque<String>,
+    agent_checks: AgentChecks,
 }
 
 fn new_id() -> String {
@@ -205,21 +264,28 @@ impl AskTable {
     }
 
     /// Fails every ask whose client vanished or whose asker is no longer `asker_alive`
-    /// (`AskCancelled`), or whose target is no longer `target_alive` (`AskTargetClosed`).
-    /// A target is alive only while its panel is open, its process runs and an agent is
-    /// still in it.
+    /// (`AskCancelled`), or whose target is gone or no longer runs an agent
+    /// (`AskTargetClosed`). `target_state` must be cheap (it runs every frame); for a
+    /// shell target `shell_runs_agent` is the costly check, reused for
+    /// [`AGENT_CHECK_EVERY`] (see [`Self::next_agent_check`]).
     pub fn resolve_closed(
         &mut self,
+        now: Instant,
         asker_alive: impl Fn(PanelId) -> bool,
-        target_alive: impl Fn(PanelId) -> bool,
+        target_state: impl Fn(PanelId) -> TargetState,
+        shell_runs_agent: impl Fn(PanelId) -> bool,
     ) -> Vec<AskEnd> {
         let mut ended = Vec::new();
         let mut index = 0;
         while index < self.asks.len() {
             let ask = &self.asks[index];
+            let target = ask.target;
             let error = if ask.is_abandoned() || !asker_alive(ask.asker) {
                 LinkError::AskCancelled
-            } else if !target_alive(ask.target) {
+            } else if self
+                .agent_checks
+                .target_closed(target, now, target_state(target), || shell_runs_agent(target))
+            {
                 LinkError::AskTargetClosed
             } else {
                 index += 1;
@@ -230,7 +296,17 @@ impl AskTable {
             ended.push(ask.end());
             self.remember_expired(ask.id);
         }
+        let asks = &self.asks;
+        self.agent_checks
+            .keep_only(|panel| asks.iter().any(|ask| ask.target == panel));
         ended
+    }
+
+    /// When the costly check of a shell target is due again; the UI wakes then because
+    /// nothing else repaints an idle window.
+    #[must_use]
+    pub fn next_agent_check(&self) -> Option<Instant> {
+        self.agent_checks.next_check()
     }
 
     /// Fails up to `cap` asks past their deadline with `AskTimeout`.
@@ -429,7 +505,18 @@ mod tests {
         let (_, untouched) = insert(&mut table, 5, 6, now);
 
         let alive = |panel: PanelId| panel != PanelId(2) && panel != PanelId(3);
-        let ended = table.resolve_closed(alive, alive);
+        let ended = table.resolve_closed(
+            now,
+            alive,
+            |panel| {
+                if alive(panel) {
+                    TargetState::Agent
+                } else {
+                    TargetState::Gone
+                }
+            },
+            |_| true,
+        );
 
         assert_eq!(ended.len(), 2);
         let code = |receiver: &mpsc::Receiver<LinkResponse>| match receiver.try_recv() {
@@ -457,11 +544,13 @@ mod tests {
         let (_other, other_receiver) = insert(&mut table, 3, 4, now);
 
         assert!(
-            table.resolve_closed(|_| true, |_| true).is_empty(),
+            table
+                .resolve_closed(Instant::now(), |_| true, |_| TargetState::Agent, |_| true)
+                .is_empty(),
             "client still there"
         );
         gone.store(true, Ordering::Release);
-        let ended = table.resolve_closed(|_| true, |_| true);
+        let ended = table.resolve_closed(Instant::now(), |_| true, |_| TargetState::Agent, |_| true);
 
         assert_eq!(
             ended,
@@ -490,7 +579,12 @@ mod tests {
         let mut table = AskTable::default();
         let (_id, receiver) = insert(&mut table, 1, 2, Instant::now());
 
-        let ended = table.resolve_closed(|_| true, |panel| panel != PanelId(2));
+        let ended = table.resolve_closed(
+            Instant::now(),
+            |_| true,
+            |_| TargetState::Shell,
+            |panel| panel != PanelId(2),
+        );
 
         assert_eq!(ended.len(), 1);
         assert!(matches!(
@@ -539,5 +633,96 @@ mod tests {
         assert_eq!(table.waiting_on(PanelId(1)), Some(PanelId(2)));
         assert_eq!(table.waiting_on(PanelId(2)), None);
         assert_eq!(table.pairs().count(), 2);
+    }
+
+    #[test]
+    fn the_shell_agent_check_is_reused_for_a_second_and_then_repeated() {
+        use std::cell::Cell;
+        let mut table = AskTable::default();
+        let start = Instant::now();
+        let (_id, receiver) = insert(&mut table, 1, 2, start);
+        let probes = Cell::new(0_u32);
+        let runs = Cell::new(true);
+        let resolve = |table: &mut AskTable, now: Instant| {
+            table.resolve_closed(
+                now,
+                |_| true,
+                |_| TargetState::Shell,
+                |_| {
+                    probes.set(probes.get() + 1);
+                    runs.get()
+                },
+            )
+        };
+
+        assert!(resolve(&mut table, start).is_empty());
+        assert_eq!(probes.get(), 1);
+        assert_eq!(table.next_agent_check(), Some(start + AGENT_CHECK_EVERY));
+        // Frames in between trust the cached answer, even if the agent is gone by now.
+        runs.set(false);
+        for millis in [16, 500, 999] {
+            assert!(resolve(&mut table, start + Duration::from_millis(millis)).is_empty());
+        }
+        assert_eq!(probes.get(), 1);
+        // Once the second has passed, the next frame probes again and ends the ask.
+        let ended = resolve(&mut table, start + AGENT_CHECK_EVERY);
+        assert_eq!(probes.get(), 2);
+        assert_eq!(ended.len(), 1);
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(LinkResponse::Err {
+                code: crate::link::LinkErrorCode::AskTargetClosed,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn agent_targets_never_probe_and_a_gone_target_ends_without_probing() {
+        let mut table = AskTable::default();
+        let now = Instant::now();
+        let (_a, _ra) = insert(&mut table, 1, 2, now);
+        let (_b, gone) = insert(&mut table, 3, 4, now);
+        let state = |panel: PanelId| {
+            if panel == PanelId(4) {
+                TargetState::Gone
+            } else {
+                TargetState::Agent
+            }
+        };
+
+        let ended = table.resolve_closed(now, |_| true, state, |_| panic!("no shell target here"));
+
+        assert_eq!(ended.len(), 1);
+        assert!(gone.try_recv().is_ok());
+        assert_eq!(
+            table.next_agent_check(),
+            None,
+            "nothing to wake for without a shell target"
+        );
+    }
+
+    #[test]
+    fn cached_checks_are_dropped_once_no_ask_targets_the_shell() {
+        let mut table = AskTable::default();
+        let now = Instant::now();
+        let (id, _receiver) = insert(&mut table, 1, 2, now);
+        assert!(
+            table
+                .resolve_closed(now, |_| true, |_| TargetState::Shell, |_| true)
+                .is_empty()
+        );
+        assert!(table.next_agent_check().is_some());
+
+        table
+            .answer(&id, PanelId(2), String::new(), "ok".to_owned())
+            .expect("answer");
+        assert!(
+            table
+                .resolve_closed(now, |_| true, |_| TargetState::Shell, |_| true)
+                .is_empty()
+        );
+
+        assert_eq!(table.next_agent_check(), None);
     }
 }

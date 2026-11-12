@@ -378,6 +378,9 @@ fn forward(
                 if ask_secs.is_some() && peer_gone(stream) {
                     // Nobody left to tell; the UI ends the ask on its next pass.
                     abandoned.store(true, Ordering::Release);
+                    if let Some(waker) = waker {
+                        waker();
+                    }
                     return error_response(&LinkError::AskCancelled);
                 }
             }
@@ -389,6 +392,12 @@ fn forward(
     }
     // The client is about to be told "no answer": the UI side must not run it later.
     abandoned.store(true, Ordering::Release);
+    if ask_secs.is_some()
+        && let Some(waker) = waker
+    {
+        // An idle UI would otherwise keep "asking..." until its next repaint.
+        waker();
+    }
     match ask_secs {
         // Horizon is closing (or dropped the ask unanswered): not a timeout of the asked panel.
         Some(_) if dropped_by_ui || stop.load(Ordering::Relaxed) => {

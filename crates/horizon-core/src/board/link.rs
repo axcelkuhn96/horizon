@@ -94,7 +94,7 @@ impl Board {
     pub fn handle_link_request_with_effect(&mut self, request: LinkRequest) -> (LinkResponse, Option<LinkEffect>) {
         let mut effect = None;
         let result = match request {
-            LinkRequest::List => Ok(LinkOk::Panels(self.link_panels())),
+            LinkRequest::List => Ok(LinkOk::Panels(self.link_panels(true))),
             LinkRequest::Send {
                 target,
                 text,
@@ -117,7 +117,10 @@ impl Board {
 
     /// Terminal-backed panels only; names are escape-stripped because they may carry
     /// terminal-controlled titles.
-    fn link_panels(&self) -> Vec<PanelInfo> {
+    ///
+    /// `is_agent` costs a `/proc` walk per shell, so it is only computed for `detect_agents`
+    /// (the `list` answer); target resolution does not read it.
+    fn link_panels(&self, detect_agents: bool) -> Vec<PanelInfo> {
         self.panels
             .iter()
             .filter(|panel| panel.terminal().is_some())
@@ -129,13 +132,13 @@ impl Board {
                     .map(|workspace| strip_escapes(&workspace.name))
                     .unwrap_or_default(),
                 kind: kind_label(panel.kind).to_owned(),
-                is_agent: Self::panel_runs_agent(panel),
+                is_agent: detect_agents && Self::panel_runs_agent(panel),
             })
             .collect()
     }
 
     fn link_target(&self, target: &str) -> Result<PanelId, LinkError> {
-        let panels = self.link_panels();
+        let panels = self.link_panels(false);
         let info = resolve_target(&panels, target)?;
         self.panel_id_by_local_id(&info.id).ok_or(LinkError::Closed)
     }

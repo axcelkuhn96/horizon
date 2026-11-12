@@ -8,7 +8,9 @@ mod resolve;
 mod server;
 mod text;
 
-pub use ask::{AskEnd, AskTable, LinkEffect, LinkEffectKind, MAX_ASKS_PER_ASKER, MAX_ASKS_TOTAL, ask_message};
+pub use ask::{
+    AskEnd, AskTable, LinkEffect, LinkEffectKind, MAX_ASKS_PER_ASKER, MAX_ASKS_TOTAL, TargetState, ask_message,
+};
 pub use protocol::{
     ASK_DEFAULT_TIMEOUT_SECS, ASK_MAX_TIMEOUT_SECS, ASK_MIN_TIMEOUT_SECS, DEFAULT_READ_LINES, LINK_PROTOCOL_VERSION,
     LinkError, LinkErrorCode, LinkOk, LinkRequest, LinkResponse, MAX_READ_LINES, MAX_REQUEST_BYTES, PanelInfo,

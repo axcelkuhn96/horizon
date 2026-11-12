@@ -72,7 +72,7 @@ impl HorizonApp {
     }
 
     /// Fails the asks whose panel closed or whose time ran out, lets their lines fade, and
-    /// schedules the repaint for the next deadline (nothing animates while an ask waits).
+    /// schedules the repaint for the next deadline or shell check (nothing animates while an ask waits).
     pub(super) fn sweep_link_asks(&mut self, ctx: &Context, now: Instant) {
         if self.hub.link_asks.is_empty() {
             return;
@@ -89,6 +89,10 @@ impl HorizonApp {
         }
         if let Some(deadline) = self.hub.link_asks.next_deadline() {
             ctx.request_repaint_after(deadline.saturating_duration_since(now));
+        }
+        // A shell target's agent check is throttled; wake once for the next one.
+        if let Some(due) = self.hub.link_asks.next_agent_check() {
+            ctx.request_repaint_after(due.saturating_duration_since(now));
         }
     }
 }
