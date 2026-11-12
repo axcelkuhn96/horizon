@@ -76,7 +76,10 @@ pub(super) fn handle_terminal_pointer_input(
     if interaction.body.clicked() {
         interaction.body.request_focus();
     }
-    if is_active_panel && ui.input(|input| input.key_pressed(Key::Tab)) {
+    // Behind an open hub modal the terminal layer is not interactive: a Tab
+    // must not grab focus (and then reach the PTY) from under the modal.
+    let layer_interactive = ui.ctx().memory(|memory| memory.allows_interaction(ui.layer_id()));
+    if is_active_panel && layer_interactive && ui.input(|input| input.key_pressed(Key::Tab)) {
         interaction.body.request_focus();
     }
 

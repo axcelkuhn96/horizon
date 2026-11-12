@@ -6,6 +6,7 @@ use horizon_core::WorkspaceId;
 
 use super::claude_launcher::ClaudeLauncherState;
 use super::hub_ui;
+use super::link::LinkUiState;
 use super::sidebar::GitSidebarState;
 use super::usage_chips::ClaudeUsageState;
 
@@ -34,6 +35,8 @@ pub(super) struct HubState {
     pub(super) usage: ClaudeUsageState,
     /// Git line and worktrees list state of the sidebar.
     pub(super) git: GitSidebarState,
+    /// Panel-link server, receive badges and the send-to-panel dialog.
+    pub(super) link: LinkUiState,
 }
 
 impl HubState {

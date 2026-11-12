@@ -324,12 +324,37 @@ impl HorizonApp {
         startup: StartupDecision,
         observed_keyboard_inputs: input::ObservedKeyboardInputs,
     ) -> Self {
+        // Started before any session is restored so restored panels get HORIZON_SOCKET.
+        let link_server = link::start_link_server();
+        Self::with_link_server(
+            cc,
+            config,
+            config_path,
+            session_store,
+            startup,
+            observed_keyboard_inputs,
+            link_server,
+        )
+    }
+
+    /// `new` with the panel-link server injected; tests pass `None` so no real
+    /// socket is bound.
+    pub(crate) fn with_link_server(
+        cc: &eframe::CreationContext<'_>,
+        config: &Config,
+        config_path: PathBuf,
+        session_store: SessionStore,
+        startup: StartupDecision,
+        observed_keyboard_inputs: input::ObservedKeyboardInputs,
+        link_server: Option<horizon_core::link::LinkServer>,
+    ) -> Self {
         let shortcuts = resolve_shortcuts(config);
         let action_commands_cache =
             super::command_registry::action_commands(&shortcuts, self::util::primary_shortcut_label());
         cc.egui_ctx.set_fonts(configure_fonts());
         let mut board = Board::new();
         board.attention_enabled = config.features.attention_feed;
+        board.set_link_socket(link_server.as_ref().map(|server| server.path().to_path_buf()));
         let resolved_theme = theme::resolve_theme(config.appearance.theme, cc.egui_ctx.system_theme());
         theme::set_theme(resolved_theme);
 
@@ -349,6 +374,7 @@ impl HorizonApp {
             action_commands_cache,
         };
         let mut app = Self::initial_state(config, bootstrap);
+        app.hub.link.set_server(link_server);
 
         match startup {
             StartupDecision::Open { session, .. } => app.activate_persistent_session(&session),
