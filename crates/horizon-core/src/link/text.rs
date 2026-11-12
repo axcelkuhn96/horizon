@@ -46,7 +46,8 @@ fn skip_csi(chars: &mut Chars<'_>) {
 }
 
 /// After an OSC/DCS/SOS/PM/APC introducer: consume up to BEL, ST (`ESC \` or U+009C).
-/// An unterminated string runs to the end of the input; a stray ESC ends it unconsumed.
+/// An unterminated string runs to the end of the input; an ESC that is not part of an ST
+/// ends the string and is left unconsumed so the caller re-reads it as a new sequence.
 fn skip_string(chars: &mut Chars<'_>) {
     while let Some(&ch) = chars.peek() {
         match ch {
@@ -55,12 +56,11 @@ fn skip_string(chars: &mut Chars<'_>) {
                 return;
             }
             '\u{1b}' => {
-                chars.next();
-                if chars.peek() == Some(&'\\') {
+                let mut ahead = chars.clone();
+                ahead.next();
+                if ahead.peek() == Some(&'\\') {
                     chars.next();
-                } else {
-                    // Not an ST: leave the byte after ESC to be re-read as a new sequence.
-                    skip_esc_from_start(chars);
+                    chars.next();
                 }
                 return;
             }
@@ -68,22 +68,6 @@ fn skip_string(chars: &mut Chars<'_>) {
                 chars.next();
             }
         }
-    }
-}
-
-/// A stray `ESC` already consumed inside a string: treat what follows as a fresh ESC.
-fn skip_esc_from_start(chars: &mut Chars<'_>) {
-    match chars.peek().copied() {
-        Some('[') => {
-            chars.next();
-            skip_csi(chars);
-        }
-        Some(']' | 'P' | 'X' | '^' | '_') => {
-            chars.next();
-            skip_string(chars);
-        }
-        Some(_) => skip_esc(chars),
-        None => {}
     }
 }
 
@@ -143,6 +127,14 @@ mod tests {
         assert_eq!(strip_escapes("a\u{1b}]0;never ends"), "a");
         assert_eq!(strip_escapes("\u{1b}]0;t\u{1b}[31mred"), "red");
         assert_eq!(strip_escapes("\u{1b}[3\u{1}1m"), "\u{1}1m");
+    }
+
+    #[test]
+    fn strip_escapes_survives_pathological_nesting() {
+        assert_eq!(strip_escapes(&"\u{1b}]".repeat(200_000)), "");
+        assert_eq!(strip_escapes(&"\u{1b}P\u{1b}[".repeat(200_000)), "");
+        assert_eq!(strip_escapes(&format!("{}ok", "\u{1b}]x".repeat(200_000))), "");
+        assert_eq!(strip_escapes(&format!("{}\u{7}ok", "\u{1b}]".repeat(1000))), "ok");
     }
 
     #[test]
