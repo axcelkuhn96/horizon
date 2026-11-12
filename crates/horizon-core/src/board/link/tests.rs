@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 
 use crate::link::{LinkErrorCode, LinkOk, LinkRequest, LinkResponse};
 use crate::panel::{PanelId, PanelKind, PanelOptions};
+use crate::runtime_state::{PanelState, RuntimeState, WorkspaceState};
 
 use super::super::Board;
 
@@ -205,4 +206,45 @@ fn spawn_and_restart_inject_horizon_env() {
     board.restart_panel(id).expect("restart");
     let expected = format!("V:{}|envcheck|/run/test/horizon/10.sock", panel_local_id(&board, id));
     assert!(screen_contains(&mut board, id, &expected));
+}
+
+#[test]
+fn restored_panels_get_horizon_socket() {
+    let script = "echo \"R:$HORIZON_SOCKET\"; exec cat";
+    let state = RuntimeState {
+        workspaces: vec![WorkspaceState {
+            local_id: "w".to_owned(),
+            name: "W".to_owned(),
+            panels: vec![PanelState {
+                local_id: "p".to_owned(),
+                name: "restored".to_owned(),
+                kind: PanelKind::Command,
+                command: Some("sh".to_owned()),
+                args: vec!["-c".to_owned(), script.to_owned()],
+                ..PanelState::default()
+            }],
+            ..WorkspaceState::default()
+        }],
+        ..RuntimeState::default()
+    };
+    let socket = Path::new("/run/test/horizon/11.sock");
+    let mut board = Board::from_runtime_state_with_link_socket(&state, None, Some(socket)).expect("restore");
+    assert_eq!(board.link_socket(), Some(socket));
+    let id = board.panels.first().expect("panel").id;
+    assert!(screen_contains(&mut board, id, "R:/run/test/horizon/11.sock"));
+}
+
+#[test]
+fn board_list_strips_escapes_from_names() {
+    let mut board = Board::new();
+    let id = command_panel(&mut board, "plain", "exec cat");
+    board.panel_mut(id).expect("panel").title = "ti\u{1b}[31mtle\u{1b}]0;x\u{7}".to_owned();
+    let workspace = board.panel(id).expect("panel").workspace_id;
+    board.workspace_mut(workspace).expect("workspace").name = "ws\u{1b}[2Kname".to_owned();
+
+    let LinkResponse::Ok(LinkOk::Panels(panels)) = board.handle_link_request(LinkRequest::List) else {
+        panic!("expected panels");
+    };
+    assert_eq!(panels[0].name, "title");
+    assert_eq!(panels[0].workspace, "wsname");
 }

@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 use super::PanelKind;
+use crate::link::strip_escapes;
 
 /// Variable Horizon owns for agent panels; presets may not override it.
 const HORIZON_MARKER: &str = "HORIZON";
@@ -25,19 +26,31 @@ fn agent_env(kind: PanelKind) -> HashMap<String, String> {
     env
 }
 
+/// Linux appends " (deleted)" to `current_exe()` when the binary was replaced on disk
+/// (e.g. by an update); the real path is what an agent can still execute.
+fn strip_deleted_suffix(path: &str) -> &str {
+    path.strip_suffix(" (deleted)").unwrap_or(path)
+}
+
+/// Titles can carry terminal-controlled escapes; an env value must stay printable (and
+/// NUL would make the spawn fail).
+fn sanitize_name(title: &str) -> String {
+    strip_escapes(title).chars().filter(|ch| !ch.is_control()).collect()
+}
+
 /// Panel-link variables Horizon sets on every terminal panel: the panel's local id and
 /// title at spawn, the link socket (when the server runs) and this executable's path, so
 /// an agent can call `"$HORIZON_BIN" link ...` even when `horizon` is not on `PATH`.
 pub(crate) fn horizon_injected_env(local_id: &str, title: &str, socket: Option<&Path>) -> HashMap<String, String> {
     let mut env = HashMap::from([
         ("HORIZON_PANEL_ID".to_string(), local_id.to_string()),
-        ("HORIZON_PANEL_NAME".to_string(), title.to_string()),
+        ("HORIZON_PANEL_NAME".to_string(), sanitize_name(title)),
     ]);
     if let Some(socket) = socket.and_then(Path::to_str) {
         env.insert("HORIZON_SOCKET".to_string(), socket.to_string());
     }
     if let Some(exe) = std::env::current_exe().ok().as_deref().and_then(Path::to_str) {
-        env.insert("HORIZON_BIN".to_string(), exe.to_string());
+        env.insert("HORIZON_BIN".to_string(), strip_deleted_suffix(exe).to_string());
     }
     env
 }
@@ -67,7 +80,7 @@ pub(crate) fn merge_spawn_env(
 mod tests {
     use std::collections::{BTreeMap, HashMap};
 
-    use super::{horizon_injected_env, merge_spawn_env};
+    use super::{horizon_injected_env, merge_spawn_env, strip_deleted_suffix};
     use crate::config::PresetConfig;
     use crate::panel::PanelKind;
 
@@ -141,6 +154,31 @@ mod tests {
 
         let without_socket = merge_spawn_env(PanelKind::Shell, &preset, &horizon_injected_env("abc", "n", None));
         assert!(!without_socket.contains_key("HORIZON_SOCKET"));
+    }
+
+    #[test]
+    fn injected_bin_is_normalized_current_exe() {
+        let env = horizon_injected_env("a", "n", None);
+        let exe = std::env::current_exe().expect("current exe");
+        let exe = exe.to_str().expect("utf-8 exe path");
+        assert_eq!(
+            env.get("HORIZON_BIN").map(String::as_str),
+            Some(strip_deleted_suffix(exe))
+        );
+        assert!(!env["HORIZON_BIN"].ends_with(" (deleted)"));
+    }
+
+    #[test]
+    fn strip_deleted_suffix_only_trims_the_kernel_marker() {
+        assert_eq!(strip_deleted_suffix("/usr/bin/horizon (deleted)"), "/usr/bin/horizon");
+        assert_eq!(strip_deleted_suffix("/usr/bin/horizon"), "/usr/bin/horizon");
+        assert_eq!(strip_deleted_suffix("/a (deleted)/horizon"), "/a (deleted)/horizon");
+    }
+
+    #[test]
+    fn injected_panel_name_drops_control_characters() {
+        let env = horizon_injected_env("id", "a\u{1b}[31mb\0c\nd\r\u{7}e", None);
+        assert_eq!(env.get("HORIZON_PANEL_NAME").map(String::as_str), Some("abcde"));
     }
 
     #[test]

@@ -21,7 +21,11 @@ const POLL_INTERVAL: Duration = Duration::from_millis(25);
 const REPLY_POLL: Duration = Duration::from_millis(50);
 const MAX_CONNECTIONS: usize = 16;
 const DRAIN_LIMIT: usize = 4 * MAX_REQUEST_BYTES;
-const DRAIN_TIMEOUT: Duration = Duration::from_millis(200);
+/// Whole-drain deadline after the answer is written, so a client that keeps sending
+/// cannot hold a connection slot (nor block shutdown).
+const DRAIN_DEADLINE: Duration = Duration::from_millis(500);
+/// Longest single blocking read, so the `stop` flag is observed promptly.
+const STOP_POLL: Duration = Duration::from_millis(100);
 
 fn io_error(context: &str, error: &io::Error) -> LinkError {
     LinkError::Io(format!("{context}: {error}"))
@@ -155,8 +159,13 @@ fn accept_loop(listener: &UnixListener, sender: &mpsc::Sender<PendingRequest>, s
             let _ = worker.join();
         }
         match listener.accept() {
-            Ok((stream, _)) => {
-                if workers.len() >= MAX_CONNECTIONS || stream.set_nonblocking(false).is_err() {
+            Ok((mut stream, _)) => {
+                if stream.set_nonblocking(false).is_err() {
+                    continue;
+                }
+                if workers.len() >= MAX_CONNECTIONS {
+                    let busy = error_response(&LinkError::BadRequest("server busy".to_owned()));
+                    write_response(&mut stream, &busy);
                     continue;
                 }
                 let sender = sender.clone();
@@ -189,7 +198,7 @@ fn error_response(error: &LinkError) -> LinkResponse {
 }
 
 fn handle_connection(mut stream: UnixStream, sender: &mpsc::Sender<PendingRequest>, stop: &AtomicBool) {
-    let response = match read_request_line(&mut stream) {
+    let response = match read_request_line(&mut stream, stop) {
         Ok(None) => return,
         Ok(Some(line)) => match parse_request_line(&line) {
             Ok(request) => forward(request, sender, stop),
@@ -201,22 +210,27 @@ fn handle_connection(mut stream: UnixStream, sender: &mpsc::Sender<PendingReques
     // Let the client read the answer even when it is still sending (e.g. an oversized
     // line): close our write side, then discard what is left instead of resetting.
     let _ = stream.shutdown(std::net::Shutdown::Write);
-    drain(&mut stream);
+    drain(&mut stream, stop);
 }
 
-/// Reads one `\n`-terminated line of at most [`MAX_REQUEST_BYTES`] bytes, bounded in both
-/// size and time. `None` when the peer sent nothing.
-fn read_request_line(stream: &mut UnixStream) -> Result<Option<Vec<u8>>, LinkError> {
+/// Reads one `\n`-terminated line of at most [`MAX_REQUEST_BYTES`] bytes, bounded in size
+/// and in total time, and abandoned when `stop` is set. `None` when the peer closed
+/// without sending anything; a bare `\n` is an (empty) line and gets a parse error.
+fn read_request_line(stream: &mut UnixStream, stop: &AtomicBool) -> Result<Option<Vec<u8>>, LinkError> {
     let deadline = Instant::now() + READ_DEADLINE;
     let mut line = Vec::new();
     let mut chunk = [0_u8; 4096];
+    let mut terminated = false;
     loop {
+        if stop.load(Ordering::Relaxed) {
+            return Err(LinkError::Io("link server is shutting down".to_owned()));
+        }
         let remaining = deadline
             .checked_duration_since(Instant::now())
             .filter(|left| !left.is_zero())
             .ok_or_else(|| LinkError::BadRequest("timed out reading request".to_owned()))?;
         stream
-            .set_read_timeout(Some(remaining))
+            .set_read_timeout(Some(remaining.min(STOP_POLL)))
             .map_err(|error| io_error("set read timeout", &error))?;
         match stream.read(&mut chunk) {
             Ok(0) => break,
@@ -228,17 +242,20 @@ fn read_request_line(stream: &mut UnixStream) -> Result<Option<Vec<u8>>, LinkErr
                     return Err(LinkError::TooLarge);
                 }
                 if newline.is_some() {
+                    terminated = true;
                     break;
                 }
             }
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-            Err(error) if matches!(error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => {
-                return Err(LinkError::BadRequest("timed out reading request".to_owned()));
-            }
+            // Poll slice elapsed: loop to re-check `stop` and the overall deadline.
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) => {}
             Err(error) => return Err(io_error("read request", &error)),
         }
     }
-    Ok((!line.is_empty()).then_some(line))
+    Ok((terminated || !line.is_empty()).then_some(line))
 }
 
 /// Hands the request to the UI thread and waits (bounded) for its answer.
@@ -248,7 +265,13 @@ fn forward(
     stop: &AtomicBool,
 ) -> LinkResponse {
     let (reply, answer) = mpsc::channel();
-    if sender.send(PendingRequest { request, reply }).is_err() {
+    let abandoned = Arc::new(AtomicBool::new(false));
+    let pending = PendingRequest {
+        request,
+        reply,
+        abandoned: Arc::clone(&abandoned),
+    };
+    if sender.send(pending).is_err() {
         return error_response(&LinkError::Io("link server is shutting down".to_owned()));
     }
     let deadline = Instant::now() + REPLY_TIMEOUT;
@@ -259,6 +282,8 @@ fn forward(
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
+    // The client is about to be told "no answer": the UI side must not run it later.
+    abandoned.store(true, Ordering::Release);
     error_response(&LinkError::Io("no answer from Horizon".to_owned()))
 }
 
@@ -273,14 +298,29 @@ fn write_response(stream: &mut UnixStream, response: &LinkResponse) {
     }
 }
 
-fn drain(stream: &mut UnixStream) {
-    let _ = stream.set_read_timeout(Some(DRAIN_TIMEOUT));
+fn drain(stream: &mut UnixStream, stop: &AtomicBool) {
+    let deadline = Instant::now() + DRAIN_DEADLINE;
     let mut remaining = DRAIN_LIMIT;
     let mut chunk = [0_u8; 4096];
-    while remaining > 0 {
+    while remaining > 0 && !stop.load(Ordering::Relaxed) {
+        let Some(left) = deadline
+            .checked_duration_since(Instant::now())
+            .filter(|left| !left.is_zero())
+        else {
+            return;
+        };
+        if stream.set_read_timeout(Some(left.min(STOP_POLL))).is_err() {
+            return;
+        }
         match stream.read(&mut chunk) {
-            Ok(0) | Err(_) => return,
+            Ok(0) => return,
             Ok(read) => remaining = remaining.saturating_sub(read),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) => {}
+            Err(_) => return,
         }
     }
 }
@@ -417,5 +457,124 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// Connects, sends `prefix`, then keeps trickling one byte every 50 ms for up to 8 s.
+    fn trickle(path: PathBuf, prefix: Vec<u8>) -> thread::JoinHandle<()> {
+        thread::spawn(move || {
+            let Ok(mut stream) = UnixStream::connect(&path) else {
+                return;
+            };
+            if stream.write_all(&prefix).is_err() {
+                return;
+            }
+            let end = Instant::now() + Duration::from_secs(8);
+            while Instant::now() < end {
+                if stream.write_all(b"a").is_err() {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+        })
+    }
+
+    fn drop_duration(server: LinkServer) -> Duration {
+        let started = Instant::now();
+        drop(server);
+        started.elapsed()
+    }
+
+    #[test]
+    fn drop_does_not_wait_for_a_client_trickling_after_the_answer() {
+        let (_guard, path) = temp_socket("8.sock");
+        let server = LinkServer::start(path.clone()).expect("start");
+        let mut oversized = vec![b'a'; MAX_REQUEST_BYTES + 100];
+        oversized.push(b'\n');
+        let client = trickle(path, oversized);
+        thread::sleep(Duration::from_millis(300));
+        let elapsed = drop_duration(server);
+        assert!(elapsed < Duration::from_secs(2), "drop blocked for {elapsed:?}");
+        client.join().expect("client");
+    }
+
+    #[test]
+    fn drop_does_not_wait_for_a_client_trickling_a_request() {
+        let (_guard, path) = temp_socket("9.sock");
+        let server = LinkServer::start(path.clone()).expect("start");
+        let client = trickle(path, b"{".to_vec());
+        thread::sleep(Duration::from_millis(300));
+        let elapsed = drop_duration(server);
+        assert!(elapsed < Duration::from_secs(1), "drop blocked for {elapsed:?}");
+        client.join().expect("client");
+    }
+
+    #[test]
+    fn pending_request_is_abandoned_once_the_server_stops_waiting() {
+        let (_guard, path) = temp_socket("10.sock");
+        let server = LinkServer::start(path.clone()).expect("start");
+        let client_path = path.clone();
+        let client = thread::spawn(move || exchange(&client_path, b"{\"v\":1,\"op\":\"list\"}\n"));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let pending = loop {
+            if let Some(pending) = server.try_recv() {
+                break pending;
+            }
+            assert!(Instant::now() < deadline, "request never arrived");
+            thread::sleep(Duration::from_millis(5));
+        };
+        assert!(!pending.is_abandoned(), "still waiting for the answer");
+        drop(server);
+        assert!(pending.is_abandoned(), "client was told 'no answer'");
+        assert!(matches!(
+            client.join().expect("client"),
+            LinkResponse::Err {
+                code: LinkErrorCode::BadRequest,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn connections_over_the_cap_get_a_busy_reply() {
+        let (_guard, path) = temp_socket("11.sock");
+        let _server = LinkServer::start(path.clone()).expect("start");
+        let holders: Vec<UnixStream> = (0..MAX_CONNECTIONS)
+            .map(|_| UnixStream::connect(&path).expect("connect"))
+            .collect();
+        match exchange(&path, b"") {
+            LinkResponse::Err { code, message } => {
+                assert_eq!(code, LinkErrorCode::BadRequest);
+                assert!(message.contains("busy"), "{message}");
+            }
+            other => panic!("expected busy error, got {other:?}"),
+        }
+        drop(holders);
+    }
+
+    #[test]
+    fn lone_newline_gets_a_bad_request_reply() {
+        let (_guard, path) = temp_socket("12.sock");
+        let _server = LinkServer::start(path.clone()).expect("start");
+        assert!(matches!(
+            exchange(&path, b"\n"),
+            LinkResponse::Err {
+                code: LinkErrorCode::BadRequest,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn symlinked_socket_directory_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let real = dir.path().join("real");
+        fs::create_dir(&real).expect("mkdir");
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).expect("symlink");
+        assert!(LinkServer::start(link.join("13.sock")).is_err());
+        assert!(
+            !real.join("13.sock").exists(),
+            "nothing may be bound through the symlink"
+        );
     }
 }

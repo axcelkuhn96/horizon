@@ -144,7 +144,22 @@ impl Board {
     ///
     /// Returns an error if the runtime state cannot be restored.
     pub fn from_runtime_state_with_transcripts(state: &RuntimeState, transcript_root: Option<&Path>) -> Result<Self> {
+        Self::from_runtime_state_with_link_socket(state, transcript_root, None)
+    }
+
+    /// Like [`Self::from_runtime_state_with_transcripts`], but panels spawned during the
+    /// restore already get `HORIZON_SOCKET` set to `link_socket`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the runtime state cannot be restored.
+    pub fn from_runtime_state_with_link_socket(
+        state: &RuntimeState,
+        transcript_root: Option<&Path>,
+        link_socket: Option<&Path>,
+    ) -> Result<Self> {
         let mut board = Self::new();
+        board.link_socket = link_socket.map(Path::to_path_buf);
 
         for workspace_state in &state.workspaces {
             let ws_id = board.create_workspace_record(workspace_state);

@@ -5,6 +5,8 @@
 //! [`PendingRequest::reply`].
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 
 use super::{LinkRequest, LinkResponse};
@@ -15,10 +17,23 @@ mod unix;
 pub use unix::LinkServer;
 
 /// One parsed request waiting for the UI thread; answer through `reply`.
+///
+/// The UI side must skip requests whose [`is_abandoned`](Self::is_abandoned) is true: the
+/// client was already told "no answer", so executing it now would act on a request the
+/// caller believes failed (and may retry).
 #[derive(Debug)]
 pub struct PendingRequest {
     pub request: LinkRequest,
     pub reply: mpsc::Sender<LinkResponse>,
+    abandoned: Arc<AtomicBool>,
+}
+
+impl PendingRequest {
+    /// True once the connection stopped waiting for the answer (timeout or shutdown).
+    #[must_use]
+    pub fn is_abandoned(&self) -> bool {
+        self.abandoned.load(Ordering::Acquire)
+    }
 }
 
 /// `<xdg>/horizon/<pid>.sock` when `XDG_RUNTIME_DIR` is set, else `<home>/.horizon/run/<pid>.sock`.

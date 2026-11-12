@@ -230,15 +230,23 @@ impl HorizonApp {
         self.startup_receiver = Self::runtime_state_needs_session_bootstrap(runtime_state).then(|| {
             Self::spawn_startup_bootstrap(runtime_state.clone(), self.template_config.effective_claude_profiles())
         });
+        let link_socket = self.board.link_socket().map(Path::to_path_buf);
         self.board = if self.startup_receiver.is_some() {
-            Board::new()
+            let mut board = Board::new();
+            board.set_link_socket(link_socket);
+            board
         } else {
-            Board::from_runtime_state_with_transcripts(runtime_state, self.transcript_root.as_deref()).unwrap_or_else(
-                |error| {
-                    tracing::error!("failed to restore runtime state: {error}");
-                    Board::new()
-                },
+            Board::from_runtime_state_with_link_socket(
+                runtime_state,
+                self.transcript_root.as_deref(),
+                link_socket.as_deref(),
             )
+            .unwrap_or_else(|error| {
+                tracing::error!("failed to restore runtime state: {error}");
+                let mut board = Board::new();
+                board.set_link_socket(link_socket.clone());
+                board
+            })
         };
         self.board.attention_enabled = self.template_config.features.attention_feed;
     }
@@ -313,13 +321,17 @@ impl HorizonApp {
             Ok(bootstrap) => {
                 self.session_catalog = bootstrap.session_catalog;
                 self.last_session_catalog_refresh = Some(Instant::now());
-                self.board = Board::from_runtime_state_with_transcripts(
+                let link_socket = self.board.link_socket().map(Path::to_path_buf);
+                self.board = Board::from_runtime_state_with_link_socket(
                     &bootstrap.runtime_state,
                     self.transcript_root.as_deref(),
+                    link_socket.as_deref(),
                 )
                 .unwrap_or_else(|error| {
                     tracing::error!("failed to restore runtime state: {error}");
-                    Board::new()
+                    let mut board = Board::new();
+                    board.set_link_socket(link_socket.clone());
+                    board
                 });
                 self.board.attention_enabled = self.template_config.features.attention_feed;
 
