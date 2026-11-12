@@ -7,6 +7,7 @@ use horizon_core::WorkspaceId;
 use horizon_core::claude_usage::AlertTracker;
 use horizon_core::link::AskTable;
 
+use super::account_badge::AccountBadgeCache;
 use super::agent_status_ui::StatusUi;
 use super::claude_launcher::ClaudeLauncherState;
 use super::claude_quick_start::QuickStartUi;
@@ -56,6 +57,8 @@ pub(super) struct HubState {
     pub(super) prompts: PromptsUi,
     /// Agent status: the Claude found in each panel, its session name and the pending toasts.
     pub(super) status_ui: StatusUi,
+    /// Account marker (profile disc, quota ring and name) of each Claude panel's titlebar.
+    pub(super) account_badges: AccountBadgeCache,
     /// Asks waiting for a reply; their connections are held by the link server.
     pub(super) link_asks: AskTable,
     /// Recent messages drawn as a line between the two panels.

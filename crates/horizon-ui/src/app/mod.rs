@@ -1,3 +1,4 @@
+mod account_badge;
 mod actions;
 mod agent_status_ui;
 mod attention_feed;

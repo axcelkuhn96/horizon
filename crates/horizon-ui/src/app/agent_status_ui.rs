@@ -30,6 +30,8 @@ const CHIP_HEIGHT: f32 = 18.0;
 const NAME_GAP: f32 = 2.0;
 const NAME_MAX_WIDTH: f32 = 110.0;
 const NAME_FONT_SIZE: f32 = 10.5;
+/// Gap between the account badge (task 31) and the session name after it.
+const BADGE_NAME_GAP: f32 = 6.0;
 
 /// The four shapes: status is told apart by form as well as colour.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -163,6 +165,8 @@ pub(super) struct AgentChip<'a> {
     pub(super) account: Option<&'a str>,
     name: Option<Arc<Galley>>,
     width: f32,
+    /// Width of the account badge drawn between the dot and the name, once [`Self::with_badge`] made room.
+    badge_width: Option<f32>,
     /// Where the chip sits in the titlebar; set by [`Self::placed`].
     pub(super) rect: Rect,
 }
@@ -202,6 +206,7 @@ impl<'a> AgentChip<'a> {
             account: inputs.account,
             name,
             width,
+            badge_width: None,
             rect: Rect::NOTHING,
         })
     }
@@ -209,6 +214,31 @@ impl<'a> AgentChip<'a> {
     /// Width the chip takes in the titlebar (gap not included).
     pub(super) fn width(&self) -> f32 {
         self.width
+    }
+
+    /// Makes room for the account badge (`badge_width` wide) between the dot and the name, so
+    /// the dot, badge and name read as one group. Widens [`Self::width`].
+    pub(super) fn with_badge(mut self, badge_width: f32) -> Self {
+        let block = self
+            .name
+            .as_ref()
+            .map_or(badge_width, |galley| badge_width + BADGE_NAME_GAP + galley.size().x);
+        self.badge_width = Some(badge_width);
+        self.width = chip_width(self.status != AgentStatus::Unknown, Some(block));
+        self
+    }
+
+    /// Where the account badge sits in the placed chip: after the dot.
+    pub(super) fn badge_rect(&self) -> Rect {
+        let lead = if self.status == AgentStatus::Unknown {
+            0.0
+        } else {
+            DOT_SLOT + NAME_GAP
+        };
+        Rect::from_min_size(
+            Pos2::new(self.rect.min.x + lead, self.rect.min.y),
+            Vec2::new(self.badge_width.unwrap_or(0.0), CHIP_HEIGHT),
+        )
     }
 
     /// The chip placed at `rect` (as computed from [`Self::width`]).
@@ -238,6 +268,9 @@ impl<'a> AgentChip<'a> {
             let center = Pos2::new(x + DOT_SLOT / 2.0, self.rect.center().y);
             paint_status_dot(painter, center, TITLEBAR_DOT_RADIUS, self.status, self.seen);
             x += DOT_SLOT + NAME_GAP;
+        }
+        if let Some(width) = self.badge_width {
+            x += width + BADGE_NAME_GAP;
         }
         if let Some(galley) = &self.name {
             let color = if focused { theme::FG_SOFT() } else { theme::FG_DIM() };
@@ -413,6 +446,51 @@ mod tests {
             assert!(named.width() > DOT_SLOT, "a visible name widens the chip");
             let name_only = AgentChip::build(&inputs(AgentStatus::Unknown, Some("n"), true)).expect("name");
             assert!((name_only.width() - galley.size().x).abs() < f32::EPSILON);
+        });
+    }
+
+    #[test]
+    fn the_badge_sits_between_the_dot_and_the_name() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            let painter = egui::Painter::new(ctx.clone(), egui::LayerId::background(), Rect::EVERYTHING);
+            let galley = elided_name(&painter, "n");
+            let inputs = |status, show_name| ChipInputs {
+                status,
+                seen: true,
+                session_name: Some("n"),
+                session_id: None,
+                account: None,
+                show_name,
+                name_galley: Some(Arc::clone(&galley)),
+            };
+
+            let plain = AgentChip::build(&inputs(AgentStatus::Working, true)).expect("chip");
+            let plain_width = plain.width();
+            let chip = plain.with_badge(30.0);
+            assert!((chip.width() - (plain_width + 30.0 + BADGE_NAME_GAP)).abs() < 1e-3);
+            let chip_size = Vec2::new(chip.width(), CHIP_HEIGHT);
+            let chip = chip.placed(Rect::from_min_size(Pos2::new(100.0, 10.0), chip_size));
+            let badge = chip.badge_rect();
+            assert!((badge.min.x - (100.0 + DOT_SLOT + NAME_GAP)).abs() < 1e-3);
+            assert!((badge.width() - 30.0).abs() < 1e-3);
+
+            let dot_only = AgentChip::build(&inputs(AgentStatus::Working, false))
+                .expect("dot")
+                .with_badge(30.0);
+            assert!((dot_only.width() - (DOT_SLOT + NAME_GAP + 30.0)).abs() < 1e-3);
+
+            let name_only = AgentChip::build(&inputs(AgentStatus::Unknown, true))
+                .expect("name")
+                .with_badge(30.0)
+                .placed(Rect::from_min_size(
+                    Pos2::new(100.0, 10.0),
+                    Vec2::new(60.0, CHIP_HEIGHT),
+                ));
+            assert!(
+                (name_only.badge_rect().min.x - 100.0).abs() < 1e-3,
+                "no dot: the badge leads"
+            );
         });
     }
 

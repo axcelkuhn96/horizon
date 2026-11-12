@@ -14,6 +14,8 @@ use super::super::terminal_widget::{
 };
 use super::super::theme;
 use super::super::usage_widget::UsageDashboardView;
+use super::account_badge::PlacedBadge;
+use super::agent_status_ui::AgentChip;
 use super::claude_quick_start::{StripArgs, paint_strip};
 use super::link::LinkBadgeView;
 pub(super) use super::panel_chrome::{
@@ -610,10 +612,26 @@ impl HorizonApp {
                         super::agent_status_ui::name_visible(snapshot.canvas_size.x),
                     )
                 };
+                // The account badge (profile disc, quota ring, name) joins the chip's group between
+                // the dot and the session name; a panel with no chip gets it alone.
+                let show_badge_name = super::agent_status_ui::name_visible(snapshot.canvas_size.x);
+                if !snapshot.is_renaming {
+                    self.refresh_account_badge(ui.painter(), panel_id);
+                }
+                let badge_layout = if snapshot.is_renaming {
+                    None
+                } else {
+                    self.hub.account_badges.get(panel_id)
+                };
+                let badge_width = badge_layout.map(|layout| layout.width(show_badge_name));
                 let agent_chip = if snapshot.is_renaming {
                     None
                 } else {
                     self.agent_chip(panel_id, snapshot.canvas_size.x, name_galley)
+                        .map(|chip| match badge_width {
+                            Some(width) => chip.with_badge(width),
+                            None => chip,
+                        })
                         .map(|chip| {
                             let rect = agent_chip_rect(
                                 rects.titlebar,
@@ -626,6 +644,23 @@ impl HorizonApp {
                             chip.placed(rect)
                         })
                 };
+                let account_badge = badge_layout.zip(badge_width).map(|(layout, width)| PlacedBadge {
+                    layout,
+                    show_name: show_badge_name,
+                    rect: agent_chip.as_ref().map_or_else(
+                        || {
+                            agent_chip_rect(
+                                rects.titlebar,
+                                if mic_eligible { rects.mic } else { rects.close },
+                                rects.collapse,
+                                snapshot.scrollback_limit > 0 && !snapshot.collapsed,
+                                quick_start.as_ref().map(|strip| strip.rect),
+                                width,
+                            )
+                        },
+                        AgentChip::badge_rect,
+                    ),
+                });
 
                 paint_panel_chrome(
                     ui,
@@ -656,6 +691,7 @@ impl HorizonApp {
                         }),
                         quick_start: quick_start.as_ref().map(|strip| QuickStartControl { rect: strip.rect }),
                         agent: agent_chip.as_ref(),
+                        account: account_badge.as_ref(),
                     },
                 );
 

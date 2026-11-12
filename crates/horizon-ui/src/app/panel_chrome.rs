@@ -4,6 +4,7 @@ use horizon_core::{AttentionSeverity, PanelId, PanelKind, SshConnectionStatus, a
 use crate::theme;
 
 use super::RenameEditAction;
+use super::account_badge::{PlacedBadge, show_account_badge};
 use super::agent_status_ui::{AgentChip, status_label};
 use super::claude_quick_start::titlebar::{self as quick_start, STRIP_GAP};
 use super::link::{LinkBadgeView, paint_link_badge};
@@ -38,6 +39,9 @@ pub(super) struct PanelChrome<'a> {
     pub quick_start: Option<QuickStartControl>,
     /// Status dot and session name of the agent in this panel, already placed in the titlebar.
     pub agent: Option<&'a AgentChip<'a>>,
+    /// Account marker with the weekly quota ring. Inside the agent chip's group when the panel has
+    /// one, standing alone otherwise.
+    pub account: Option<&'a PlacedBadge<'a>>,
 }
 
 #[derive(Clone, Copy)]
@@ -66,9 +70,15 @@ impl PanelChrome<'_> {
         self.mic.map_or(self.close_rect, |mic| mic.rect)
     }
 
-    /// Titlebar width taken left of the history meter by the quick-start strip and the agent chip.
+    /// Titlebar width taken left of the history meter by the quick-start strip and the agent chip
+    /// (which includes the account badge; without a chip the badge takes its own slot).
     fn right_slots(&self) -> f32 {
-        self.quick_start.map_or(0.0, QuickStartControl::slot) + self.agent.map_or(0.0, AgentChip::slot)
+        let badge_alone = if self.agent.is_none() {
+            self.account.map_or(0.0, PlacedBadge::slot)
+        } else {
+            0.0
+        };
+        self.quick_start.map_or(0.0, QuickStartControl::slot) + self.agent.map_or(0.0, AgentChip::slot) + badge_alone
     }
 
     /// Where the badges stack from: the controls anchor, moved left of the quick-start strip and
@@ -258,6 +268,9 @@ pub(super) fn paint_panel_chrome(ui: &mut egui::Ui, chrome: PanelChrome<'_>) {
     // still show it.
     if let Some(chip) = chrome.agent {
         paint_agent_chip(ui, &painter, chrome.panel_id, chip, chrome.focused);
+    }
+    if let Some(badge) = chrome.account {
+        show_account_badge(ui, &painter, chrome.panel_id, badge);
     }
 
     // Collapsed panels are titlebar-only: skip the badges/history meter that
