@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use alacritty_terminal::term::TermMode;
 
 use crate::link::{
-    LinkError, LinkOk, LinkRequest, LinkResponse, MAX_READ_LINES, PanelInfo, resolve_target, sanitize_send_text,
-    strip_escapes,
+    LinkError, LinkOk, LinkRequest, LinkResponse, MAX_READ_LINES, MAX_REQUEST_BYTES, PanelInfo, resolve_target,
+    sanitize_send_text, strip_escapes,
 };
 use crate::panel::{Panel, PanelId, PanelKind};
 
@@ -104,6 +104,10 @@ impl Board {
     }
 
     fn link_send(&mut self, target: &str, text: &str, enter: bool) -> Result<LinkOk, LinkError> {
+        // The socket server already caps the whole line; this keeps the board safe for any caller.
+        if text.len() > MAX_REQUEST_BYTES {
+            return Err(LinkError::TooLarge);
+        }
         let id = self.link_target(target)?;
         let panel = self.panel_mut(id).ok_or(LinkError::Closed)?;
         let bracketed = live_terminal_mode(panel)?.contains(TermMode::BRACKETED_PASTE);

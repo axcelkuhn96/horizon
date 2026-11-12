@@ -9,6 +9,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::api::refresh_profile_detailed;
 use super::{ProfileUsage, USAGE_URL, load_cache, save_cache};
+use crate::Waker;
 use crate::config::ClaudeProfile;
 
 /// Floor for the public poll interval: the endpoint is rate limited.
@@ -40,6 +41,7 @@ struct Worker {
     cache_path: PathBuf,
     base_url: String,
     previous: Vec<ProfileUsage>,
+    waker: Option<Waker>,
 }
 
 impl Worker {
@@ -62,7 +64,15 @@ impl Worker {
             tracing::debug!(%error, "failed to write claude usage cache");
         }
         self.previous.clone_from(&snapshot);
-        results.send(snapshot).ok().map(|()| rate_limited)
+        results.send(snapshot).ok()?;
+        wake(self.waker.as_ref());
+        Some(rate_limited)
+    }
+}
+
+fn wake(waker: Option<&Waker>) {
+    if let Some(waker) = waker {
+        waker();
     }
 }
 
@@ -111,8 +121,10 @@ fn drain_commands(first: Command, commands: &Receiver<Command>, profiles: &mut V
         match command {
             Command::RefreshNow => drained.refresh = true,
             Command::SetProfiles(new) => {
-                *profiles = new;
-                drained.profiles_changed = true;
+                if *profiles != new {
+                    *profiles = new;
+                    drained.profiles_changed = true;
+                }
             }
             Command::Stop => drained.stop = true,
         }
@@ -160,12 +172,26 @@ impl UsagePoller {
     /// carrying the state and `fetched_at_ms` it was stored with.
     #[must_use]
     pub fn spawn(profiles: Vec<ClaudeProfile>, home: PathBuf, cache_path: PathBuf, interval: Duration) -> Self {
+        Self::spawn_with_waker(profiles, home, cache_path, interval, None)
+    }
+
+    /// Like [`Self::spawn`], calling `waker` after each snapshot is delivered
+    /// (the cached one included) so an idle UI repaints without polling.
+    #[must_use]
+    pub fn spawn_with_waker(
+        profiles: Vec<ClaudeProfile>,
+        home: PathBuf,
+        cache_path: PathBuf,
+        interval: Duration,
+        waker: Option<Waker>,
+    ) -> Self {
         Self::start(
             profiles,
             home,
             cache_path,
             interval.max(MIN_POLL_INTERVAL),
             USAGE_URL.to_owned(),
+            waker,
         )
     }
 
@@ -178,7 +204,20 @@ impl UsagePoller {
         interval: Duration,
         base_url: String,
     ) -> Self {
-        Self::start(profiles, home, cache_path, interval, base_url)
+        Self::start(profiles, home, cache_path, interval, base_url, None)
+    }
+
+    /// Test constructor with a waker.
+    #[cfg(test)]
+    pub(crate) fn spawn_with_base_and_waker(
+        profiles: Vec<ClaudeProfile>,
+        home: PathBuf,
+        cache_path: PathBuf,
+        interval: Duration,
+        base_url: String,
+        waker: Waker,
+    ) -> Self {
+        Self::start(profiles, home, cache_path, interval, base_url, Some(waker))
     }
 
     fn start(
@@ -187,6 +226,7 @@ impl UsagePoller {
         cache_path: PathBuf,
         interval: Duration,
         base_url: String,
+        waker: Option<Waker>,
     ) -> Self {
         let (commands, command_rx) = mpsc::channel();
         let (result_tx, results) = mpsc::channel();
@@ -196,7 +236,9 @@ impl UsagePoller {
         let worker_alive = Arc::clone(&alive);
         let previous = load_cache(&cache_path);
         if !previous.is_empty() {
-            let _ = result_tx.send(previous.clone());
+            if result_tx.send(previous.clone()).is_ok() {
+                wake(waker.as_ref());
+            }
         }
         let mut worker = Worker {
             profiles,
@@ -204,6 +246,7 @@ impl UsagePoller {
             cache_path,
             base_url,
             previous,
+            waker,
         };
         let spawned = thread::Builder::new()
             .name("claude-usage-poller".to_owned())
@@ -343,6 +386,61 @@ mod tests {
             }
         );
         assert!(rx.try_recv().is_err(), "all queued commands drained");
+    }
+
+    #[test]
+    fn set_profiles_marks_changed_only_when_the_list_differs() {
+        let (tx, rx) = mpsc::channel();
+        let named = |name: &str| ClaudeProfile {
+            name: name.to_owned(),
+            config_dir: format!("~/.claude-{name}"),
+        };
+        let mut profiles = vec![named("a")];
+        tx.send(Command::SetProfiles(vec![named("a")])).unwrap();
+        let first = rx.recv().unwrap();
+        assert!(!drain_commands(first, &rx, &mut profiles).profiles_changed);
+        assert_eq!(profiles, vec![named("a")]);
+        tx.send(Command::SetProfiles(vec![named("a"), named("b")])).unwrap();
+        let first = rx.recv().unwrap();
+        assert!(drain_commands(first, &rx, &mut profiles).profiles_changed);
+        assert_eq!(profiles, vec![named("a"), named("b")]);
+    }
+
+    #[test]
+    fn waker_is_called_once_per_delivered_snapshot() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let home = tempfile::tempdir().unwrap();
+        let stub = Stub::new(200, "", USAGE_BODY);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let waker: Waker = {
+            let calls = Arc::clone(&calls);
+            Arc::new(move || {
+                calls.fetch_add(1, Ordering::SeqCst);
+            })
+        };
+        let poller = UsagePoller::spawn_with_base_and_waker(
+            vec![profile(home.path(), "a")],
+            home.path().to_path_buf(),
+            home.path().join("cache.json"),
+            Duration::from_secs(3600),
+            stub.url.clone(),
+            waker,
+        );
+        // The wake follows the send, so wait for it instead of racing it.
+        let wait_calls = |expected: usize| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while calls.load(Ordering::SeqCst) < expected && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            std::thread::sleep(Duration::from_millis(100));
+            calls.load(Ordering::SeqCst)
+        };
+        wait_for(&poller, |_| true);
+        assert_eq!(wait_calls(1), 1, "no cache: one snapshot, one wake");
+        poller.refresh_now();
+        wait_for(&poller, |_| true);
+        assert_eq!(wait_calls(2), 2);
     }
 
     #[test]

@@ -325,7 +325,7 @@ impl HorizonApp {
         observed_keyboard_inputs: input::ObservedKeyboardInputs,
     ) -> Self {
         // Started before any session is restored so restored panels get HORIZON_SOCKET.
-        let link_server = link::start_link_server();
+        let link_server = link::start_link_server(&cc.egui_ctx);
         Self::with_link_server(
             cc,
             config,

@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use super::compute::{CycleCache, compute_cached};
 use super::model::{GitOverviewError, RepoOverview};
+use crate::Waker;
 
 pub const DEFAULT_INTERVAL: Duration = Duration::from_secs(15);
 
@@ -43,6 +44,13 @@ impl<K: Clone + Eq + Hash + Send + 'static> OverviewPoller<K> {
     /// Start polling `cwds` immediately and then every `interval`.
     #[must_use]
     pub fn start(cwds: Cwds<K>, interval: Duration) -> Self {
+        Self::start_with_waker(cwds, interval, None)
+    }
+
+    /// Like [`Self::start`], calling `waker` after each delivered result so an
+    /// idle UI repaints without polling.
+    #[must_use]
+    pub fn start_with_waker(cwds: Cwds<K>, interval: Duration, waker: Option<Waker>) -> Self {
         let (commands, command_rx) = mpsc::channel();
         let (result_tx, results) = mpsc::channel();
         let stop = Arc::new(AtomicBool::new(false));
@@ -51,7 +59,15 @@ impl<K: Clone + Eq + Hash + Send + 'static> OverviewPoller<K> {
             .spawn({
                 let stop = Arc::clone(&stop);
                 move || {
-                    poll_loop(cwds, interval, &command_rx, &result_tx, &stop, &AtomicUsize::new(0));
+                    poll_loop(
+                        cwds,
+                        interval,
+                        &command_rx,
+                        &result_tx,
+                        &stop,
+                        &AtomicUsize::new(0),
+                        waker.as_ref(),
+                    );
                 }
             })
             .map_err(|err| tracing::warn!("failed to spawn git overview poller: {err}"))
@@ -141,11 +157,12 @@ fn poll_loop<K: Clone + Eq + Hash>(
     results: &Sender<(K, OverviewResult)>,
     stop: &AtomicBool,
     cycles: &AtomicUsize,
+    waker: Option<&Waker>,
 ) {
     let mut last: HashMap<K, Sent> = HashMap::new();
     let mut requested: HashSet<PathBuf> = HashSet::new();
     loop {
-        if !poll_once(&cwds, &mut last, &requested, results, stop) {
+        if !poll_once(&cwds, &mut last, &requested, results, stop, waker) {
             return;
         }
         cycles.fetch_add(1, Ordering::Relaxed);
@@ -178,6 +195,7 @@ fn poll_once<K: Clone + Eq + Hash>(
     requested: &HashSet<PathBuf>,
     results: &Sender<(K, OverviewResult)>,
     stop: &AtomicBool,
+    waker: Option<&Waker>,
 ) -> bool {
     let mut cache = CycleCache::default();
     for (key, cwd) in cwds {
@@ -201,6 +219,9 @@ fn poll_once<K: Clone + Eq + Hash>(
         last.insert(key.clone(), sent);
         if results.send((key.clone(), result)).is_err() {
             return false;
+        }
+        if let Some(waker) = waker {
+            waker();
         }
     }
     true
@@ -257,6 +278,27 @@ mod tests {
     }
 
     #[test]
+    fn waker_is_called_once_per_delivered_result() {
+        let fx = Fixture::with_commit();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let waker: Waker = {
+            let calls = Arc::clone(&calls);
+            Arc::new(move || {
+                calls.fetch_add(1, Ordering::SeqCst);
+            })
+        };
+        let poller = OverviewPoller::start_with_waker(vec![(1u32, fx.root())], Duration::from_millis(40), Some(waker));
+        assert!(wait_for(&poller, Duration::from_secs(5)).is_some());
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(poller.try_recv().is_none(), "identical results are not re-sent");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "deduplicated polls must not wake the UI"
+        );
+    }
+
+    #[test]
     fn poller_set_cwds_polls_new_key() {
         let fx = Fixture::with_commit();
         let poller = OverviewPoller::start(Vec::new(), Duration::from_secs(3600));
@@ -295,7 +337,15 @@ mod tests {
             let (stop, cycles) = (Arc::clone(&stop), Arc::clone(&cycles));
             let cwds = many_keys(&fx, 3000);
             thread::spawn(move || {
-                poll_loop(cwds, Duration::from_secs(3600), &command_rx, &result_tx, &stop, &cycles);
+                poll_loop(
+                    cwds,
+                    Duration::from_secs(3600),
+                    &command_rx,
+                    &result_tx,
+                    &stop,
+                    &cycles,
+                    None,
+                );
             })
         };
         std::thread::sleep(Duration::from_millis(20));
@@ -330,6 +380,7 @@ mod tests {
             &result_tx,
             &AtomicBool::new(false),
             &cycles,
+            None,
         );
         // Initial poll + one poll for the whole batch; the last SetCwds wins.
         assert_eq!(cycles.load(Ordering::Relaxed), 2);
@@ -352,6 +403,7 @@ mod tests {
             &result_tx,
             &AtomicBool::new(false),
             &cycles,
+            None,
         );
         assert_eq!(cycles.load(Ordering::Relaxed), 1);
     }

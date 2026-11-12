@@ -16,7 +16,7 @@ use egui::{Color32, Context, FontId, Galley, Id, LayerId, Order, Painter};
 use horizon_core::claude_usage::{
     ProfileUsage, UsagePoller, UsageState, UsageWindow, parse_rfc3339_unix, used_percent_label,
 };
-use horizon_core::{ClaudeProfile, HorizonHome, UsageDashboard, format_tokens};
+use horizon_core::{ClaudeProfile, HorizonHome, UsageDashboard, Waker, format_tokens};
 
 use super::HorizonApp;
 use super::hub_state::HubState;
@@ -30,9 +30,8 @@ const IDENT_MAX_COMPACT: usize = 5;
 const STALE_AFTER_MS: i64 = 15 * 60 * 1000;
 const POLL_INTERVAL: Duration = Duration::from_secs(300);
 const CACHE_FILE: &str = "claude-usage-cache.json";
-/// While a refresh is in flight the UI wakes once a second to pick the result up.
+/// How long a requested refresh counts as in flight before the menu offers "Refresh now" again.
 const REFRESH_WINDOW: Duration = Duration::from_secs(30);
-const REFRESH_WAKE: Duration = Duration::from_secs(1);
 
 // Chip geometry (spec §1). Heights and gaps are fixed; widths come from the text.
 pub(super) const CHIP_HEIGHT: f32 = 28.0;
@@ -616,7 +615,7 @@ impl HubState {
 
 impl HubState {
     /// Aligns the poller with `profiles` (the effective profiles of the config).
-    fn sync_usage_profiles(&mut self, profiles: Vec<ClaudeProfile>) {
+    fn sync_usage_profiles(&mut self, profiles: Vec<ClaudeProfile>, ctx: &Context) {
         let usage = &mut self.usage;
         let changed = usage.set_profiles(profiles.clone());
         if profiles.is_empty() {
@@ -631,7 +630,17 @@ impl HubState {
             // Tests never reach the network or the user's real credentials.
             let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
             let cache_path = HorizonHome::resolve().root().join(CACHE_FILE);
-            usage.poller = Some(UsagePoller::spawn(profiles, home, cache_path, POLL_INTERVAL));
+            let waker: Waker = {
+                let ctx = ctx.clone();
+                Arc::new(move || ctx.request_repaint())
+            };
+            usage.poller = Some(UsagePoller::spawn_with_waker(
+                profiles,
+                home,
+                cache_path,
+                POLL_INTERVAL,
+                Some(waker),
+            ));
             usage.refresh_started = Some((Instant::now(), now_unix_ms()));
         }
         if changed {
@@ -661,18 +670,16 @@ impl HubState {
 impl HorizonApp {
     /// Per-frame work, cheap when idle: sync the polled profiles with the
     /// config, start the poller, and take a finished snapshot. Repaints only
-    /// when a snapshot arrived, or (once a second, for at most 30 s) while a
-    /// refresh is waiting for its result.
+    /// when a snapshot arrived; the poller's waker repaints an idle UI when it
+    /// delivers one.
     pub(super) fn poll_claude_usage(&mut self, ctx: &Context) {
         if self.hub.usage.synced_rows_version != Some(self.hub.rows_version) {
             let profiles = self.template_config.effective_claude_profiles();
-            self.hub.sync_usage_profiles(profiles);
+            self.hub.sync_usage_profiles(profiles, ctx);
         }
         let tokens = self.hub.usage.poll_tokens();
         if self.hub.receive_usage_snapshot() || tokens {
             ctx.request_repaint();
-        } else if self.hub.usage.is_refreshing(Instant::now()) {
-            ctx.request_repaint_after(REFRESH_WAKE);
         }
     }
 }

@@ -768,8 +768,8 @@ mod tests {
             screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0))),
             ..Default::default()
         };
-        let mut frame = |ctx: &egui::Context, raw: &egui::RawInput, request: bool| {
-            ctx.run(raw.clone(), |ctx| {
+        let frame = |ctx: &egui::Context, raw: &egui::RawInput, request: bool| {
+            let _output = ctx.run(raw.clone(), |ctx| {
                 egui::Area::new(egui::Id::new("bg"))
                     .order(egui::Order::Middle)
                     .show(ctx, |ui| {

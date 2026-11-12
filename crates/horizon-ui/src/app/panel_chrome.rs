@@ -470,20 +470,31 @@ fn paint_link_badge_stacked(painter: &egui::Painter, chrome: &PanelChrome<'_>, v
         .map(SshConnectionStatus::label)
         .into_iter()
         .chain(chrome.process_exit_label);
-    let mut taken = 0.0;
-    for label in status_labels {
-        let width = painter
-            .layout_no_wrap(label.to_string(), font.clone(), Color32::PLACEHOLDER)
-            .size()
-            .x;
-        taken += width + 16.0 + BADGE_STACK_GAP;
-    }
-    if let Some((severity, summary)) = chrome.attention_badge {
-        let text = attention_badge_text(*severity, summary);
-        let width = painter.layout_no_wrap(text, font, Color32::PLACEHOLDER).size().x;
-        taken += width + 12.0 + BADGE_STACK_GAP;
-    }
+    let status_widths: Vec<f32> = status_labels
+        .map(|label| {
+            painter
+                .layout_no_wrap(label.to_string(), font.clone(), Color32::PLACEHOLDER)
+                .size()
+                .x
+        })
+        .collect();
+    // The attention badge only sits in this slot next to the history meter.
+    let attention_width = chrome
+        .attention_badge
+        .filter(|_| chrome.scrollback_limit > 0)
+        .map(|(severity, summary)| {
+            let text = attention_badge_text(*severity, summary);
+            painter.layout_no_wrap(text, font, Color32::PLACEHOLDER).size().x
+        });
+    let taken = badge_stack_offset(&status_widths, attention_width);
     paint_link_badge(painter, chrome.titlebar_rect, right_edge, taken, view);
+}
+
+/// How far left of the shared badge slot the link badge starts: every
+/// status badge (label padding 16) and the attention badge (padding 12) in that slot, plus gaps.
+fn badge_stack_offset(status_widths: &[f32], attention_width: Option<f32>) -> f32 {
+    let statuses: f32 = status_widths.iter().map(|width| width + 16.0 + BADGE_STACK_GAP).sum();
+    statuses + attention_width.map_or(0.0, |width| width + 12.0 + BADGE_STACK_GAP)
 }
 
 #[profiling::function]
@@ -809,8 +820,8 @@ mod tests {
     use egui::{Color32, Pos2, Rect};
 
     use super::{
-        focus_ring_stroke, panel_border_stroke, panel_fill, panel_title_color, panel_titlebar_fill,
-        title_focus_indicator_rect,
+        BADGE_STACK_GAP, badge_stack_offset, focus_ring_stroke, panel_border_stroke, panel_fill, panel_title_color,
+        panel_titlebar_fill, title_focus_indicator_rect,
     };
 
     #[test]
@@ -823,6 +834,15 @@ mod tests {
         assert_ne!(panel_fill(accent, true), panel_fill(accent, false));
         assert_ne!(panel_titlebar_fill(accent, true), panel_titlebar_fill(accent, false));
         assert_ne!(panel_title_color(true), panel_title_color(false));
+    }
+
+    #[test]
+    fn link_badge_offset_adds_the_attention_badge_only_when_it_is_in_the_slot() {
+        assert!(badge_stack_offset(&[], None).abs() < f32::EPSILON);
+        let statuses = badge_stack_offset(&[40.0], None);
+        assert!((statuses - (40.0 + 16.0 + BADGE_STACK_GAP)).abs() < f32::EPSILON);
+        let with_attention = badge_stack_offset(&[40.0], Some(70.0));
+        assert!((with_attention - statuses - (70.0 + 12.0 + BADGE_STACK_GAP)).abs() < f32::EPSILON);
     }
 
     #[test]

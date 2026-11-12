@@ -103,7 +103,6 @@ impl ClaudeTabState {
 
 /// Switches the settings editor to the Claude tab (used by the launcher's
 /// "Manage profiles" entry).
-#[allow(dead_code, reason = "called by the Claude launcher (Task 5) after merge")]
 pub(crate) fn select_claude_tab(editor: &mut SettingsEditor) {
     editor.active_tab = SettingsTab::Claude;
 }
@@ -570,10 +569,26 @@ fn mark_invalid(ui: &Ui, response: &egui::Response, issue: Option<&RowIssue>, fi
 
 #[cfg(test)]
 mod tests {
+    use super::super::SettingsStatus;
     use super::*;
 
     const BROWSE: f32 = 64.0;
     const PILL: f32 = 55.0;
+
+    #[test]
+    fn select_claude_tab_switches_the_active_tab() {
+        let mut editor = SettingsEditor {
+            buffer: String::new(),
+            original: String::new(),
+            status: SettingsStatus::None,
+            active_tab: SettingsTab::General,
+            editing_config: None,
+            claude_tab: ClaudeTabState::default(),
+            workspaces_tab: super::super::workspaces::WorkspacesTabState::default(),
+        };
+        select_claude_tab(&mut editor);
+        assert!(editor.active_tab == SettingsTab::Claude);
+    }
 
     #[test]
     fn narrow_panels_wrap_the_card() {

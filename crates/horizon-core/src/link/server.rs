@@ -76,6 +76,13 @@ impl LinkServer {
         Err(super::LinkError::Unsupported)
     }
 
+    /// # Errors
+    ///
+    /// Always `Unsupported` on this platform.
+    pub fn start_with_waker(_path: PathBuf, _waker: Option<crate::Waker>) -> Result<Self, super::LinkError> {
+        Err(super::LinkError::Unsupported)
+    }
+
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.path

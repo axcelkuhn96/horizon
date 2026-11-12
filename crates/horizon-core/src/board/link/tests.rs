@@ -159,6 +159,26 @@ fn board_closed_panel_returns_closed_error() {
 }
 
 #[test]
+fn board_send_rejects_text_over_the_request_cap_without_writing() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let file = dir.path().join("in");
+    let mut board = Board::new();
+    let id = command_panel(&mut board, "sink", &sink_script(&file, false));
+    assert!(screen_contains(&mut board, id, "ready"));
+
+    let big = "a".repeat(crate::link::MAX_REQUEST_BYTES + 1);
+    match send(&mut board, "sink", &big, true) {
+        LinkResponse::Err { code, .. } => assert_eq!(code, LinkErrorCode::TooLarge),
+        other => panic!("expected too_large, got {other:?}"),
+    }
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(
+        std::fs::read(&file).unwrap_or_default().is_empty(),
+        "oversized text must not reach the PTY"
+    );
+}
+
+#[test]
 fn board_unknown_target_returns_not_found() {
     let mut board = Board::new();
     let _ = command_panel(&mut board, "one", "exec cat");

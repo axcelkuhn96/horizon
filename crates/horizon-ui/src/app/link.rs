@@ -7,14 +7,15 @@ mod send_dialog;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use egui::{Align2, Context, CornerRadius, FontId, Id, Painter, Pos2, Rect, Stroke, StrokeKind, Ui, Vec2};
-use horizon_core::PanelId;
 use horizon_core::link::{
     LinkOk, LinkRequest, LinkResponse, LinkServer, PanelInfo, PendingRequest, resolve_target, socket_path,
     strip_escapes,
 };
+use horizon_core::{PanelId, Waker};
 
 use self::send_dialog::SendToPanelState;
 use super::HorizonApp;
@@ -179,7 +180,7 @@ impl LinkUiState {
 }
 
 /// Starts the link socket for this process, or logs once and returns `None`.
-pub(super) fn start_link_server() -> Option<LinkServer> {
+pub(super) fn start_link_server(ctx: &Context) -> Option<LinkServer> {
     let xdg = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
     if xdg.as_deref().is_none_or(|dir| dir.as_os_str().is_empty()) && home.as_os_str().is_empty() {
@@ -187,7 +188,12 @@ pub(super) fn start_link_server() -> Option<LinkServer> {
         return None;
     }
     let path = socket_path(std::process::id(), xdg.as_deref(), &home);
-    match LinkServer::start(path) {
+    // Requests are drained on the UI thread: wake it as soon as one arrives.
+    let waker: Waker = {
+        let ctx = ctx.clone();
+        Arc::new(move || ctx.request_repaint())
+    };
+    match LinkServer::start_with_waker(path, Some(waker)) {
         Ok(server) => Some(server),
         Err(error) => {
             tracing::warn!("panel link disabled: {error}");

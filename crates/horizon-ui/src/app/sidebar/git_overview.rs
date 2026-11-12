@@ -5,8 +5,8 @@
 //! turns each overview into display strings once ([`build_cache`]) and paints
 //! them. Nothing here touches git or builds strings per frame.
 //!
-//! The poller has no repaint hook, so while it runs [`WAKE_INTERVAL`] keeps a
-//! slow wake-up scheduled; the wake only repaints, it never recomputes.
+//! The poller carries a repaint waker, so an idle UI draws a new result as soon
+//! as it is delivered; nothing here polls on a timer.
 
 mod actions;
 mod paint;
@@ -15,11 +15,12 @@ mod row_menu;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use egui::Context;
-use horizon_core::WorkspaceId;
 use horizon_core::git_overview::{DEFAULT_INTERVAL, GitOverviewError, OverviewPoller, RepoOverview, WorktreeInfo};
+use horizon_core::{Waker, WorkspaceId};
 
 use crate::app::HorizonApp;
 
@@ -31,8 +32,6 @@ const BRANCH_MAX_CHARS: usize = 22;
 const VISIBLE_ROWS: usize = 8;
 /// Results drained per frame.
 const MAX_RESULTS_PER_FRAME: usize = 16;
-/// Idle wake-up so results the poller delivered while the UI slept get drawn.
-const WAKE_INTERVAL: Duration = Duration::from_secs(4);
 /// How long the "Copied" feedback replaces the path on a row.
 const COPIED_FEEDBACK: Duration = Duration::from_millis(1500);
 const DETACHED_FALLBACK: &str = "HEAD (detached)";
@@ -459,13 +458,21 @@ impl GitSidebarState {
 
     /// Points the poller at a new `(workspace, cwd)` set and drops caches of
     /// workspaces that are gone.
-    fn apply_cwds(&mut self, cwds: Vec<(WorkspaceId, PathBuf)>) {
+    fn apply_cwds(&mut self, cwds: Vec<(WorkspaceId, PathBuf)>, ctx: &Context) {
         self.caches.retain(|id, _| cwds.iter().any(|(key, _)| key == id));
         self.expanded.retain(|id| cwds.iter().any(|(key, _)| key == id));
         match &self.poller {
             Some(poller) => sync_poller_cwds(&cwds, poller),
             None if !cwds.is_empty() => {
-                self.poller = Some(OverviewPoller::start(cwds.clone(), DEFAULT_INTERVAL));
+                let waker: Waker = {
+                    let ctx = ctx.clone();
+                    Arc::new(move || ctx.request_repaint())
+                };
+                self.poller = Some(OverviewPoller::start_with_waker(
+                    cwds.clone(),
+                    DEFAULT_INTERVAL,
+                    Some(waker),
+                ));
             }
             None => {}
         }
@@ -528,7 +535,7 @@ impl HorizonApp {
                 .iter()
                 .filter_map(|workspace| workspace.cwd.clone().map(|cwd| (workspace.id, cwd)))
                 .collect();
-            git.apply_cwds(cwds);
+            git.apply_cwds(cwds, ctx);
         }
         // Taken out while draining so `git` stays freely borrowable; put back below.
         let Some(poller) = git.poller.take() else {
@@ -564,7 +571,6 @@ impl HorizonApp {
         if drained_cap {
             ctx.request_repaint();
         }
-        ctx.request_repaint_after(WAKE_INTERVAL);
     }
 }
 

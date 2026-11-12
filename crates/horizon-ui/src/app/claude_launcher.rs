@@ -239,11 +239,13 @@ impl HorizonApp {
         self.hub.last_launched_profile = Some(profile_name.to_owned());
     }
 
-    /// Seam for the Claude settings tab (Task 6): until it can open on its own
-    /// tab this opens Settings.
+    /// Opens Settings (when closed) on the Claude tab.
     fn open_settings_claude_tab(&mut self) {
         if self.settings.is_none() {
             self.toggle_settings();
+        }
+        if let Some(editor) = self.settings.as_mut() {
+            super::settings::select_claude_tab(editor);
         }
     }
 

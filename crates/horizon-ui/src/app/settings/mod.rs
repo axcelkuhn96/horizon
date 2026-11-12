@@ -1,6 +1,5 @@
 mod bar;
 mod claude;
-#[allow(unused_imports, reason = "used by the Claude launcher empty state after merge")]
 pub(crate) use claude::select_claude_tab;
 mod general;
 mod presets;

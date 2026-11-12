@@ -41,6 +41,10 @@ mod usage_stats;
 mod view;
 mod workspace;
 
+/// Wakes the UI from a background thread (e.g. `egui::Context::request_repaint`)
+/// after a producer delivered a message that would otherwise wait for the next frame.
+pub type Waker = std::sync::Arc<dyn Fn() + Send + Sync>;
+
 pub use agents::{AgentDefinition, AgentIntegrationKind, AgentResumeMode, agent_definition, all_agent_kinds};
 pub use alacritty_terminal::index::Side as TerminalSide;
 pub use alacritty_terminal::selection::SelectionType;

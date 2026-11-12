@@ -304,17 +304,17 @@ fn profile_change_syncs_the_poller_list_and_invalidates_launcher_rows() {
     let mut hub = HubState::default();
     let rows = hub.rows_version;
 
-    hub.sync_usage_profiles(vec![profile("a")]);
+    hub.sync_usage_profiles(vec![profile("a")], &Context::default());
 
     assert_eq!(hub.usage.entries().len(), 1);
     assert_ne!(hub.rows_version, rows);
     assert_eq!(hub.usage.synced_rows_version, Some(hub.rows_version));
 
     let rows = hub.rows_version;
-    hub.sync_usage_profiles(vec![profile("a")]);
+    hub.sync_usage_profiles(vec![profile("a")], &Context::default());
     assert_eq!(hub.rows_version, rows);
 
-    hub.sync_usage_profiles(vec![profile("a"), profile("b")]);
+    hub.sync_usage_profiles(vec![profile("a"), profile("b")], &Context::default());
     assert_eq!(hub.usage.entries().len(), 2);
     assert_ne!(hub.rows_version, rows);
     assert_eq!(hub.usage.synced_rows_version, Some(hub.rows_version));
@@ -323,10 +323,10 @@ fn profile_change_syncs_the_poller_list_and_invalidates_launcher_rows() {
 #[test]
 fn emptying_the_profiles_stops_the_refresh_and_the_poller() {
     let mut hub = HubState::default();
-    hub.sync_usage_profiles(vec![profile("a")]);
+    hub.sync_usage_profiles(vec![profile("a")], &Context::default());
     hub.usage.refresh_started = Some((Instant::now(), 1));
 
-    hub.sync_usage_profiles(Vec::new());
+    hub.sync_usage_profiles(Vec::new(), &Context::default());
 
     assert!(hub.usage.entries().is_empty());
     assert!(hub.usage.poller.is_none());
@@ -336,7 +336,7 @@ fn emptying_the_profiles_stops_the_refresh_and_the_poller() {
 #[test]
 fn a_snapshot_invalidates_launcher_rows_without_asking_for_another_profile_sync() {
     let mut hub = HubState::default();
-    hub.sync_usage_profiles(vec![profile("a")]);
+    hub.sync_usage_profiles(vec![profile("a")], &Context::default());
     let rows = hub.rows_version;
 
     hub.apply_usage_snapshot(vec![usage("a", Some("fulano@example.com"), Some(10.0), Some(20.0))]);

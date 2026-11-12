@@ -25,6 +25,8 @@ const UNUSABLE_FADE: f32 = 0.55;
 const UNUSABLE_BAR_FADE: f32 = 0.4;
 const TOOLTIP_WIDTH: f32 = 280.0;
 const TOOLTIP_MARGIN: i8 = 12;
+/// Margin the tooltip's own popup frame already adds (`Style::spacing.menu_margin`).
+const POPUP_FRAME_MARGIN: i8 = 6;
 const TOOLTIP_BAR: Vec2 = Vec2::new(120.0, 5.0);
 const OVERFLOW_ROW_HEIGHT: f32 = 26.0;
 const OVERFLOW_ROW_MIN_WIDTH: f32 = 260.0;
@@ -341,9 +343,11 @@ fn show_tooltip(
     now_ms: i64,
     tokens_today: Option<&str>,
 ) {
-    Frame::NONE.inner_margin(Margin::same(TOOLTIP_MARGIN)).show(ui, |ui| {
-        tooltip_body(ui, entry, accent, status, now_ms, tokens_today);
-    });
+    Frame::NONE
+        .inner_margin(Margin::same(TOOLTIP_MARGIN - POPUP_FRAME_MARGIN))
+        .show(ui, |ui| {
+            tooltip_body(ui, entry, accent, status, now_ms, tokens_today);
+        });
     if tokens_today.is_none() {
         // The stats poll is still scanning: look again shortly, only while the card is open.
         ui.ctx().request_repaint_after(std::time::Duration::from_secs(1));

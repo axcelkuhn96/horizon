@@ -9,6 +9,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use super::PendingRequest;
+use crate::Waker;
 use crate::link::{LinkError, LinkResponse, MAX_REQUEST_BYTES, parse_request_line};
 
 const DIR_MODE: u32 = 0o700;
@@ -51,6 +52,16 @@ impl LinkServer {
     /// `Io` when the directory or socket cannot be prepared, or a live server already
     /// owns `path`.
     pub fn start(path: PathBuf) -> Result<Self, LinkError> {
+        Self::start_with_waker(path, None)
+    }
+
+    /// Like [`Self::start`], calling `waker` after each request is forwarded to the UI
+    /// channel so an idle UI drains it at once instead of on its next frame.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::start`].
+    pub fn start_with_waker(path: PathBuf, waker: Option<Waker>) -> Result<Self, LinkError> {
         let dir = path
             .parent()
             .ok_or_else(|| LinkError::Io("socket path has no parent directory".to_owned()))?;
@@ -73,7 +84,7 @@ impl LinkServer {
         let stop = Arc::new(AtomicBool::new(false));
         let accept = thread::Builder::new().name("horizon-link-accept".to_owned()).spawn({
             let stop = Arc::clone(&stop);
-            move || accept_loop(&listener, &sender, &stop)
+            move || accept_loop(&listener, &sender, &stop, waker.as_ref())
         });
         let accept = match accept {
             Ok(handle) => handle,
@@ -150,7 +161,12 @@ fn sweep_stale_sockets(dir: &Path) {
     }
 }
 
-fn accept_loop(listener: &UnixListener, sender: &mpsc::Sender<PendingRequest>, stop: &Arc<AtomicBool>) {
+fn accept_loop(
+    listener: &UnixListener,
+    sender: &mpsc::Sender<PendingRequest>,
+    stop: &Arc<AtomicBool>,
+    waker: Option<&Waker>,
+) {
     let mut workers: Vec<JoinHandle<()>> = Vec::new();
     while !stop.load(Ordering::Relaxed) {
         let (finished, running): (Vec<_>, Vec<_>) = workers.into_iter().partition(JoinHandle::is_finished);
@@ -170,9 +186,10 @@ fn accept_loop(listener: &UnixListener, sender: &mpsc::Sender<PendingRequest>, s
                 }
                 let sender = sender.clone();
                 let stop = Arc::clone(stop);
+                let waker = waker.cloned();
                 match thread::Builder::new()
                     .name("horizon-link-conn".to_owned())
-                    .spawn(move || handle_connection(stream, &sender, &stop))
+                    .spawn(move || handle_connection(stream, &sender, &stop, waker.as_ref()))
                 {
                     Ok(worker) => workers.push(worker),
                     Err(error) => tracing::warn!("link: cannot spawn connection thread: {error}"),
@@ -197,11 +214,16 @@ fn error_response(error: &LinkError) -> LinkResponse {
     }
 }
 
-fn handle_connection(mut stream: UnixStream, sender: &mpsc::Sender<PendingRequest>, stop: &AtomicBool) {
+fn handle_connection(
+    mut stream: UnixStream,
+    sender: &mpsc::Sender<PendingRequest>,
+    stop: &AtomicBool,
+    waker: Option<&Waker>,
+) {
     let response = match read_request_line(&mut stream, stop) {
         Ok(None) => return,
         Ok(Some(line)) => match parse_request_line(&line) {
-            Ok(request) => forward(request, sender, stop),
+            Ok(request) => forward(request, sender, stop, waker),
             Err(error) => error_response(&error),
         },
         Err(error) => error_response(&error),
@@ -263,6 +285,7 @@ fn forward(
     request: crate::link::LinkRequest,
     sender: &mpsc::Sender<PendingRequest>,
     stop: &AtomicBool,
+    waker: Option<&Waker>,
 ) -> LinkResponse {
     let (reply, answer) = mpsc::channel();
     let abandoned = Arc::new(AtomicBool::new(false));
@@ -273,6 +296,9 @@ fn forward(
     };
     if sender.send(pending).is_err() {
         return error_response(&LinkError::Io("link server is shutting down".to_owned()));
+    }
+    if let Some(waker) = waker {
+        waker();
     }
     let deadline = Instant::now() + REPLY_TIMEOUT;
     while Instant::now() < deadline && !stop.load(Ordering::Relaxed) {
@@ -411,6 +437,41 @@ mod tests {
             LinkResponse::Err { code, .. } => assert_eq!(code, LinkErrorCode::TooLarge),
             other => panic!("expected too_large, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn waker_is_called_once_per_forwarded_request_and_not_for_rejected_ones() {
+        use std::sync::atomic::AtomicUsize;
+
+        let (_guard, path) = temp_socket("20.sock");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let waker: Waker = {
+            let calls = Arc::clone(&calls);
+            Arc::new(move || {
+                calls.fetch_add(1, Ordering::SeqCst);
+            })
+        };
+        let server = LinkServer::start_with_waker(path.clone(), Some(waker)).expect("start");
+        assert!(matches!(
+            exchange(&path, b"{\"v\":9,\"op\":\"list\"}\n"),
+            LinkResponse::Err { .. }
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "rejected requests never reach the UI");
+
+        let client_path = path.clone();
+        let client = thread::spawn(move || exchange(&client_path, b"{\"v\":1,\"op\":\"list\"}\n"));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while calls.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let pending = server.try_recv().expect("request was forwarded before the wake");
+        pending
+            .reply
+            .send(LinkResponse::Ok(LinkOk::Panels(Vec::new())))
+            .expect("reply");
+        client.join().expect("client");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]
