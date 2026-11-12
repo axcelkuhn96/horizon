@@ -12,7 +12,7 @@ mod actions;
 mod paint;
 mod row_menu;
 
-use std::cell::Cell;
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::hash::{Hash, Hasher};
@@ -91,8 +91,9 @@ pub(in crate::app) struct GitLineCache {
     dirty_label: String,
     tooltip: TooltipData,
     changed_at: Instant,
-    /// Width of the branch chip on the workspace header, measured on first paint.
-    chip_width: Cell<Option<f32>>,
+    /// Galleys and width of the branch chip, laid out on first paint and again
+    /// only when the pixels-per-point changes.
+    chip: RefCell<Option<paint::ChipLayout>>,
     /// Primary rows first (`..primary_count`), then the agent subgroup.
     worktree_rows: Vec<WorktreeRow>,
     primary_count: usize,
@@ -304,7 +305,7 @@ fn build_cache(overview: &RepoOverview) -> GitLineCache {
         dirty_label: counter_label(overview.dirty_count),
         tooltip,
         changed_at: Instant::now(),
-        chip_width: Cell::new(None),
+        chip: RefCell::new(None),
         worktrees_count_label: worktree_rows.len().to_string(),
         agents_label: format!("agent worktrees ({agent_count})"),
         primary_show_all_label: format!("Show all ({primary_count})"),
@@ -332,7 +333,7 @@ fn error_cache(message: String) -> GitLineCache {
         behind_label: String::new(),
         dirty_label: String::new(),
         changed_at: Instant::now(),
-        chip_width: Cell::new(None),
+        chip: RefCell::new(None),
         worktree_rows: Vec::new(),
         primary_count: 0,
         worktrees_count_label: String::new(),

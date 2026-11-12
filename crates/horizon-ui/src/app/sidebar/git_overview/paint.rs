@@ -2,12 +2,13 @@
 //! rows (spec section 7). Everything reads strings prepared by `build_cache`.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use egui::text::{LayoutJob, TextFormat};
 use egui::{
-    Align2, Color32, CornerRadius, CursorIcon, FontId, Frame, Id, Margin, Painter, Pos2, Rect, RichText, Sense, Shape,
-    Stroke, Ui, Vec2, WidgetInfo, WidgetType,
+    Align2, Color32, CornerRadius, CursorIcon, FontId, Frame, Galley, Id, Margin, Painter, Pos2, Rect, RichText, Sense,
+    Shape, Stroke, Ui, Vec2, WidgetInfo, WidgetType,
 };
 use horizon_core::git_overview::OverviewPoller;
 use horizon_core::{PresetConfig, WorkspaceId};
@@ -256,73 +257,100 @@ fn paint_arrow(painter: &Painter, center: Pos2, up: bool, color: Color32) {
     painter.add(Shape::convex_polygon(points, color, Stroke::NONE));
 }
 
-/// One chip text: measured, painted when `draw`. Returns the x after it.
-fn chip_text(painter: &Painter, x: f32, cy: f32, text: &str, format: TextFormat, draw: bool) -> f32 {
-    let color = format.color;
-    let galley = painter.layout_job(LayoutJob::single_section(text.to_owned(), format));
-    let width = galley.size().x;
-    if draw {
-        painter.galley(Pos2::new(x, cy - galley.size().y / 2.0), galley, color);
+/// Galleys of the branch chip, laid out once per pixels-per-point. Colours are
+/// applied when painting (the galleys carry `Color32::PLACEHOLDER`).
+#[derive(Clone, Debug)]
+pub(super) struct ChipLayout {
+    ppp_bits: u32,
+    width: f32,
+    branch: Arc<Galley>,
+    ahead: Option<Arc<Galley>>,
+    behind: Option<Arc<Galley>>,
+    dirty: Option<Arc<Galley>>,
+}
+
+fn build_chip_layout(painter: &Painter, cache: &GitLineCache, ppp: f32) -> ChipLayout {
+    let lay = |text: &str, font: FontId, italics: bool| {
+        let mut format = TextFormat::simple(font, Color32::PLACEHOLDER);
+        format.italics = italics;
+        painter.layout_job(LayoutJob::single_section(text.to_owned(), format))
+    };
+    let counter = |text: &str| (!text.is_empty()).then(|| lay(text, FontId::monospace(10.0), false));
+    let mut layout = ChipLayout {
+        ppp_bits: ppp.to_bits(),
+        width: 0.0,
+        branch: lay(&cache.branch_label, FontId::proportional(10.5), cache.detached),
+        ahead: counter(&cache.ahead_label),
+        behind: counter(&cache.behind_label),
+        dirty: counter(&cache.dirty_label),
+    };
+    layout.width = walk_chip(painter, &layout, cache.detached, 0.0, 0.0, false);
+    layout
+}
+
+/// Chip galleys of `cache`, laid out again only when `ppp` moved.
+fn chip_layout(painter: &Painter, cache: &GitLineCache, ppp: f32) -> ChipLayout {
+    let bits = ppp.to_bits();
+    if let Some(layout) = cache.chip.borrow().as_ref().filter(|layout| layout.ppp_bits == bits) {
+        return layout.clone();
     }
-    x + width
+    let layout = build_chip_layout(painter, cache, ppp);
+    *cache.chip.borrow_mut() = Some(layout.clone());
+    layout
 }
 
 /// Walks the branch chip (glyph, branch, ahead/behind, dirty) from `left`,
 /// painting it when `draw`. Returns the x after the last part, so a dry run
-/// from 0 measures its width.
-fn walk_chip(painter: &Painter, cache: &GitLineCache, left: f32, cy: f32, draw: bool) -> f32 {
+/// from 0 measures its width. Lays out nothing.
+fn walk_chip(painter: &Painter, layout: &ChipLayout, detached: bool, left: f32, cy: f32, draw: bool) -> f32 {
+    let text = |x: f32, galley: &Arc<Galley>, color: Color32| {
+        if draw {
+            painter.galley(Pos2::new(x, cy - galley.size().y / 2.0), Arc::clone(galley), color);
+        }
+        x + galley.size().x
+    };
     let mut x = left;
     if draw {
         let area = Rect::from_min_size(Pos2::new(x, cy - 6.0), Vec2::splat(12.0));
         paint_branch_glyph(painter, area, theme::FG_DIM());
     }
     x += 12.0 + 4.0;
-    let mut branch = TextFormat::simple(FontId::proportional(10.5), theme::FG_SOFT());
-    if cache.detached {
-        branch.italics = true;
-        branch.color = theme::FG_DIM();
-    }
-    x = chip_text(painter, x, cy, &cache.branch_label, branch, draw);
-    let mono = |color: Color32| TextFormat::simple(FontId::monospace(10.0), color);
-    for (label, up, color) in [
-        (&cache.ahead_label, true, theme::PALETTE_GREEN()),
-        (&cache.behind_label, false, theme::PALETTE_YELLOW()),
+    let branch_color = if detached { theme::FG_DIM() } else { theme::FG_SOFT() };
+    x = text(x, &layout.branch, branch_color);
+    for (galley, up, color) in [
+        (&layout.ahead, true, theme::PALETTE_GREEN()),
+        (&layout.behind, false, theme::PALETTE_YELLOW()),
     ] {
-        if label.is_empty() {
+        let Some(galley) = galley else {
             continue;
-        }
+        };
         x += CHIP_PART_GAP;
         if draw {
             paint_arrow(painter, Pos2::new(x + 2.5, cy), up, color);
         }
         x += 5.0 + CHIP_INNER_GAP;
-        x = chip_text(painter, x, cy, label, mono(color), draw);
+        x = text(x, galley, color);
     }
-    if !cache.dirty_label.is_empty() {
+    if let Some(galley) = &layout.dirty {
         x += CHIP_PART_GAP;
         if draw {
             painter.circle_filled(Pos2::new(x + 3.0, cy), 3.0, theme::PALETTE_YELLOW());
         }
         x += 6.0 + CHIP_INNER_GAP;
-        x = chip_text(painter, x, cy, &cache.dirty_label, mono(theme::FG_SOFT()), draw);
+        x = text(x, galley, theme::FG_SOFT());
     }
     x
 }
 
 /// Width of the branch chip of `workspace`; `None` without a healthy repository.
-/// Measured once per overview and kept on the cache.
+/// Laid out once per overview and scale, and kept on the cache.
 pub(in crate::app::sidebar) fn header_chip_width(
     ui: &Ui,
     state: &GitSidebarState,
     workspace: WorkspaceId,
 ) -> Option<f32> {
     let cache = state.caches.get(&workspace).filter(|cache| cache.error.is_none())?;
-    if let Some(width) = cache.chip_width.get() {
-        return Some(width);
-    }
-    let width = walk_chip(ui.painter(), cache, 0.0, 0.0, false);
-    cache.chip_width.set(Some(width));
-    Some(width)
+    Some(chip_layout(ui.painter(), cache, ui.ctx().pixels_per_point()).width)
 }
 
 /// Branch chip right-aligned on a workspace header row, with its hover card.
@@ -332,15 +360,13 @@ pub(in crate::app::sidebar) fn paint_header_chip(
     workspace: WorkspaceId,
     row_rect: Rect,
 ) {
-    let Some(width) = header_chip_width(ui, state, workspace) else {
+    let Some(cache) = state.caches.get(&workspace).filter(|cache| cache.error.is_none()) else {
         return;
     };
-    let Some(cache) = state.caches.get(&workspace) else {
-        return;
-    };
-    let left = row_rect.max.x - HEADER_RIGHT_PAD - width;
+    let layout = chip_layout(ui.painter(), cache, ui.ctx().pixels_per_point());
+    let left = row_rect.max.x - HEADER_RIGHT_PAD - layout.width;
     let cy = row_rect.center().y;
-    walk_chip(ui.painter(), cache, left, cy, true);
+    walk_chip(ui.painter(), &layout, cache.detached, left, cy, true);
     let hit = Rect::from_min_max(
         Pos2::new(left - 4.0, cy - 10.0),
         Pos2::new(row_rect.max.x - BG_INSET, cy + 10.0),
@@ -352,7 +378,15 @@ pub(in crate::app::sidebar) fn paint_header_chip(
 /// Branch chip as the first child row (when it does not fit on the header).
 fn paint_git_line(ui: &mut Ui, cache: &GitLineCache, workspace: WorkspaceId) {
     let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), GIT_LINE_HEIGHT), Sense::hover());
-    walk_chip(ui.painter(), cache, rect.min.x + LINE_INDENT, rect.center().y, true);
+    let layout = chip_layout(ui.painter(), cache, ui.ctx().pixels_per_point());
+    walk_chip(
+        ui.painter(),
+        &layout,
+        cache.detached,
+        rect.min.x + LINE_INDENT,
+        rect.center().y,
+        true,
+    );
     let response = ui.interact(rect, ui.make_persistent_id(("git_line", workspace.0)), Sense::hover());
     response.on_hover_ui_at_pointer(|ui| show_tooltip(ui, &cache.tooltip, cache.changed_at));
 }

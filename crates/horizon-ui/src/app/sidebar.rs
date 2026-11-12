@@ -293,6 +293,7 @@ impl HorizonApp {
                     None
                 };
                 let profile = claude_profile_for(panel.kind, &panel.env, presets);
+                let ssh_title = (panel.kind == PanelKind::Ssh).then(|| panel.display_title());
                 let inputs = LabelInputs {
                     title: &panel.title,
                     terminal_title: &panel.terminal_title,
@@ -300,6 +301,7 @@ impl HorizonApp {
                     kind: panel.kind,
                     profile,
                     launch_command: panel.launch_command.as_deref(),
+                    display_title: ssh_title.as_deref().unwrap_or(""),
                 };
                 let (icon, seven_day) = match profile {
                     ProfileRef::Named(name) => (

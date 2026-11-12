@@ -4,7 +4,8 @@
 //! Label rules (first match wins): the user's own panel name; `Claude · <profile>`
 //! (plain `Claude Code` for the default profile) for Claude panels; the terminal
 //! title with the `user@host` prefix stripped and `$HOME` shown as `~`; the kind
-//! name. Strings and galleys are built once per change (see [`PanelLabelCache`]),
+//! name. SSH panels keep `Panel::display_title()` as is (host identity included).
+//! Strings and galleys are built once per change (see [`PanelLabelCache`]),
 //! never per frame.
 
 use std::collections::HashMap;
@@ -44,6 +45,8 @@ pub(super) struct LabelInputs<'a> {
     pub(super) kind: PanelKind,
     pub(super) profile: ProfileRef<'a>,
     pub(super) launch_command: Option<&'a str>,
+    /// `Panel::display_title()` of an SSH panel (host identity kept); empty for other kinds.
+    pub(super) display_title: &'a str,
 }
 
 // ---------------------------------------------------------------------------
@@ -168,13 +171,27 @@ fn clean_terminal_title(title: &str, home: Option<&str>) -> Option<String> {
     })
 }
 
+/// SSH panels are labelled by `Panel::display_title()`, host identity included.
+fn ssh_title<'a>(inputs: &LabelInputs<'a>) -> Option<&'a str> {
+    let title = inputs.display_title.trim();
+    (inputs.kind == PanelKind::Ssh && !title.is_empty()).then_some(title)
+}
+
+/// Whether the user chose the panel name. A preset launched as "shell" carries
+/// that name without the user having chosen it.
+fn has_user_name(inputs: &LabelInputs<'_>) -> bool {
+    let name = inputs.title.trim();
+    inputs.custom_name && !name.is_empty() && !name.eq_ignore_ascii_case(inputs.kind.display_name())
+}
+
 /// The label of a panel row.
 #[must_use]
 pub(super) fn smart_label(inputs: &LabelInputs<'_>, home: Option<&str>) -> String {
-    let name = inputs.title.trim();
-    // A preset launched as "shell" carries that name without the user having chosen it.
-    if inputs.custom_name && !name.is_empty() && !name.eq_ignore_ascii_case(inputs.kind.display_name()) {
-        return name.to_owned();
+    if let Some(title) = ssh_title(inputs) {
+        return title.to_owned();
+    }
+    if has_user_name(inputs) {
+        return inputs.title.trim().to_owned();
     }
     match inputs.profile {
         ProfileRef::Named(name) => return format!("Claude \u{b7} {name}"),
@@ -219,7 +236,45 @@ fn percent_key(percent: f32) -> u32 {
 // Cache
 // ---------------------------------------------------------------------------
 
-/// Owned copy of [`LabelInputs`] the cached label was built from.
+/// The inputs the label actually depends on; every other field is blanked, so
+/// a change in an unused one (an animated terminal title on a Claude or named
+/// panel) neither misses nor rebuilds the cache.
+fn effective<'a>(inputs: &LabelInputs<'a>) -> LabelInputs<'a> {
+    let base = LabelInputs {
+        title: "",
+        terminal_title: "",
+        custom_name: false,
+        profile: ProfileRef::None,
+        display_title: "",
+        ..*inputs
+    };
+    if ssh_title(inputs).is_some() {
+        return LabelInputs {
+            display_title: inputs.display_title,
+            ..base
+        };
+    }
+    if has_user_name(inputs) {
+        return LabelInputs {
+            title: inputs.title,
+            custom_name: true,
+            ..base
+        };
+    }
+    if inputs.profile != ProfileRef::None {
+        return LabelInputs {
+            profile: inputs.profile,
+            ..base
+        };
+    }
+    LabelInputs {
+        title: inputs.title,
+        terminal_title: inputs.terminal_title,
+        ..base
+    }
+}
+
+/// Owned copy of the [`effective`] [`LabelInputs`] the cached label was built from.
 struct StoredInputs {
     title: String,
     terminal_title: String,
@@ -228,6 +283,7 @@ struct StoredInputs {
     /// `None` = not a profile panel, `Some(None)` = default, `Some(Some(name))` = named.
     profile: Option<Option<String>>,
     launch_command: Option<String>,
+    display_title: String,
 }
 
 impl StoredInputs {
@@ -243,9 +299,11 @@ impl StoredInputs {
                 ProfileRef::Named(name) => Some(Some(name.to_owned())),
             },
             launch_command: inputs.launch_command.map(str::to_owned),
+            display_title: inputs.display_title.to_owned(),
         }
     }
 
+    /// `inputs` must be [`effective`] inputs.
     fn same_as(&self, inputs: &LabelInputs<'_>) -> bool {
         let profile_same = match (&self.profile, inputs.profile) {
             (None, ProfileRef::None) | (Some(None), ProfileRef::Default) => true,
@@ -258,6 +316,7 @@ impl StoredInputs {
             && self.title == inputs.title
             && self.terminal_title == inputs.terminal_title
             && self.launch_command.as_deref() == inputs.launch_command
+            && self.display_title == inputs.display_title
     }
 }
 
@@ -281,12 +340,12 @@ struct LabelEntry {
     generation: u64,
 }
 
-/// Row text of one panel as the row painter needs it.
+/// Row text of one panel as the row painter needs it. The dim right-aligned
+/// hint (`7d 34%` for Claude profile panels, else the program name) is read
+/// through [`PanelLabelCache::hint_galley`].
 #[derive(Clone)]
 pub(super) struct ResolvedLabel {
     pub(super) label: Arc<str>,
-    /// Dim right-aligned text: `7d 34%` for Claude profile panels, else the program name.
-    pub(super) hint: Option<Arc<str>>,
 }
 
 /// Labels and galleys of the sidebar panel rows, rebuilt only when a panel's
@@ -317,10 +376,12 @@ impl PanelLabelCache {
         self.entries.retain(|_, entry| entry.generation == generation);
     }
 
-    /// Label and hint of `id`; rebuilt only when `inputs` or the usage reading changed.
+    /// Label of `id` (and its hint, read via [`Self::hint_galley`]); rebuilt only
+    /// when the inputs the label depends on or the usage reading changed.
     pub(super) fn resolve(&mut self, id: PanelId, inputs: &LabelInputs<'_>, seven_day: Option<f32>) -> ResolvedLabel {
         let generation = self.generation;
-        let stale = self.entries.get(&id).is_none_or(|entry| !entry.inputs.same_as(inputs));
+        let key = effective(inputs);
+        let stale = self.entries.get(&id).is_none_or(|entry| !entry.inputs.same_as(&key));
         if stale {
             let label: Arc<str> = smart_label(inputs, self.home.as_deref()).into();
             let program =
@@ -328,7 +389,7 @@ impl PanelLabelCache {
             self.entries.insert(
                 id,
                 LabelEntry {
-                    inputs: StoredInputs::from_inputs(inputs),
+                    inputs: StoredInputs::from_inputs(&key),
                     label,
                     program,
                     usage_key: None,
@@ -340,10 +401,7 @@ impl PanelLabelCache {
             );
         }
         let Some(entry) = self.entries.get_mut(&id) else {
-            return ResolvedLabel {
-                label: Arc::from(""),
-                hint: None,
-            };
+            return ResolvedLabel { label: Arc::from("") };
         };
         entry.generation = generation;
         let wants_usage = matches!(inputs.profile, ProfileRef::Named(_));
@@ -357,8 +415,14 @@ impl PanelLabelCache {
         }
         ResolvedLabel {
             label: Arc::clone(&entry.label),
-            hint: entry.usage.clone().or_else(|| entry.program.clone()),
         }
+    }
+
+    /// Hint text of `id` as the row shows it.
+    #[cfg(test)]
+    fn hint_text(&self, id: PanelId) -> Option<Arc<str>> {
+        let entry = self.entries.get(&id)?;
+        entry.usage.clone().or_else(|| entry.program.clone())
     }
 
     /// Galley of the hint of `id`, laid out again only when the scale moved.
@@ -421,6 +485,7 @@ mod tests {
             kind,
             profile: ProfileRef::None,
             launch_command: None,
+            display_title: "",
         }
     }
 
@@ -621,13 +686,17 @@ mod tests {
         let id = PanelId(1);
         let mut panel = inputs("Claude", "", PanelKind::Claude);
         panel.profile = ProfileRef::Named("claude2");
-        assert_eq!(cache.resolve(id, &panel, None).hint, None);
-        let hint = cache.resolve(id, &panel, Some(33.6)).hint;
+        let _ = cache.resolve(id, &panel, None);
+        assert_eq!(cache.hint_text(id), None);
+        let _ = cache.resolve(id, &panel, Some(33.6));
+        let hint = cache.hint_text(id);
         assert_eq!(hint.as_deref(), Some("7d 34%"));
-        let same = cache.resolve(id, &panel, Some(34.2)).hint;
+        let _ = cache.resolve(id, &panel, Some(34.2));
+        let same = cache.hint_text(id);
         assert!(Arc::ptr_eq(hint.as_ref().expect("hint"), same.as_ref().expect("hint")));
         let shell = inputs("shell", "", PanelKind::Shell);
-        assert_eq!(cache.resolve(PanelId(2), &shell, Some(50.0)).hint, None);
+        let _ = cache.resolve(PanelId(2), &shell, Some(50.0));
+        assert_eq!(cache.hint_text(PanelId(2)), None);
     }
 
     #[test]
@@ -642,5 +711,77 @@ mod tests {
         cache.end_frame();
         assert!(cache.entries.contains_key(&PanelId(1)));
         assert!(!cache.entries.contains_key(&PanelId(2)));
+    }
+
+    #[test]
+    fn ssh_panels_keep_the_host_identity() {
+        let mut panel = inputs("Prod API", "deploy@prod-api: ~/srv", PanelKind::Ssh);
+        panel.custom_name = true;
+        panel.display_title = "Prod API (deploy@prod-api) \u{2014} deploy@prod-api: ~/srv";
+        assert_eq!(
+            smart_label(&panel, HOME),
+            "Prod API (deploy@prod-api) \u{2014} deploy@prod-api: ~/srv"
+        );
+        let mut unnamed = inputs("deploy@prod-api", "deploy@prod-api: ~/srv", PanelKind::Ssh);
+        unnamed.display_title = "deploy@prod-api: ~/srv";
+        assert_eq!(smart_label(&unnamed, HOME), "deploy@prod-api: ~/srv");
+        // Without a display title the generic rules apply.
+        unnamed.display_title = "";
+        assert_eq!(smart_label(&unnamed, HOME), "~/srv");
+    }
+
+    #[test]
+    fn animated_terminal_titles_do_not_rebuild_claude_or_named_panels() {
+        let mut cache = PanelLabelCache {
+            env_read: true,
+            ..PanelLabelCache::default()
+        };
+        let mut claude = inputs("Claude", "\u{2733} Task one", PanelKind::Claude);
+        claude.profile = ProfileRef::Named("claude2");
+        let first = cache.resolve(PanelId(1), &claude, None);
+        claude.terminal_title = "\u{2736} Task two";
+        let second = cache.resolve(PanelId(1), &claude, None);
+        assert!(Arc::ptr_eq(&first.label, &second.label));
+
+        let mut named = inputs("Backend", "build 1", PanelKind::Shell);
+        named.custom_name = true;
+        let first = cache.resolve(PanelId(2), &named, None);
+        named.terminal_title = "build 2";
+        let second = cache.resolve(PanelId(2), &named, None);
+        assert!(Arc::ptr_eq(&first.label, &second.label));
+        named.title = "Frontend";
+        assert_eq!(&*cache.resolve(PanelId(2), &named, None).label, "Frontend");
+
+        // A plain shell does follow its terminal title.
+        let shell = inputs("shell", "axcel@box: ~/a", PanelKind::Shell);
+        let _ = cache.resolve(PanelId(3), &shell, None);
+        let moved = inputs("shell", "axcel@box: ~/b", PanelKind::Shell);
+        assert_eq!(&*cache.resolve(PanelId(3), &moved, None).label, "~/b");
+    }
+
+    #[test]
+    fn label_galley_reports_elision() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            let painter = ctx.layer_painter(egui::LayerId::background());
+            let mut cache = PanelLabelCache {
+                env_read: true,
+                ..PanelLabelCache::default()
+            };
+            let id = PanelId(1);
+            let _ = cache.resolve(
+                id,
+                &inputs(
+                    "x",
+                    "a long terminal title that cannot fit in forty points",
+                    PanelKind::Shell,
+                ),
+                None,
+            );
+            let narrow = cache.label_galley(id, &painter, 1.0, 40.0).expect("galley");
+            assert!(narrow.elided);
+            let wide = cache.label_galley(id, &painter, 1.0, 4000.0).expect("galley");
+            assert!(!wide.elided);
+        });
     }
 }

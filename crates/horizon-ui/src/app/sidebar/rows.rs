@@ -285,7 +285,7 @@ fn paint_row_texts(
     let center_y = row.min.y + ROW_HEIGHT / 2.0;
     let mut truncated = false;
     if let Some(galley) = label {
-        truncated = galley.text() != &*panel.label.label;
+        truncated = galley.elided;
         let color = if panel.is_focused {
             theme::FG()
         } else {
@@ -370,8 +370,9 @@ impl HorizonApp {
         }
 
         row_response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, &*panel.label.label));
+        // The ring is painted outside the row; the row painter would clip it.
         hub_ui::paint_focus_ring(
-            &painter,
+            ui.painter(),
             &row_response,
             Rect::from_min_max(
                 Pos2::new(row_rect.min.x + BG_INSET, row_rect.min.y + 1.0),
@@ -381,7 +382,7 @@ impl HorizonApp {
         );
         if let Some(close) = &close_response {
             close.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, "Close panel"));
-            hub_ui::paint_focus_ring(&painter, close, layout.close, 6);
+            hub_ui::paint_focus_ring(ui.painter(), close, layout.close, 6);
         }
         if hovered {
             ui.ctx().set_cursor_icon(CursorIcon::PointingHand);

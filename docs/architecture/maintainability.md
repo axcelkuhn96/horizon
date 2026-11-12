@@ -39,7 +39,12 @@ back into large multi-purpose modules.
   - `panels`: panel-area orchestration and body rendering
   - `remote_hosts_overlay`: overlay state/input shell with query/filter,
     layout, and row/header paint helpers split into `remote_hosts_overlay/`
-  - `sidebar`: sidebar rendering and deferred sidebar actions
+  - `sidebar`: sidebar rendering and deferred sidebar actions, with
+    sidebar helpers split into `sidebar/`: `rows` (row metrics, pure layout,
+    painted icons, panel row painter), `labels` (smart panel labels, hints and
+    the `PanelLabelCache` that rebuilds strings and galleys only on change) and
+    `header` (workspace header row), next to `git_overview`, `toolbar`,
+    `workspace_menu` and `auto_hide`
   - `settings`: settings editor state and save/apply flows
   - `session`: startup bootstrap and session catalog/rebind flows
   - `persistence`: runtime/config save glue

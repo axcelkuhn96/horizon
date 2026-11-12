@@ -6,6 +6,22 @@ use egui::{Align2, Color32, CornerRadius, FontId, Pos2, Rect, Sense, Vec2};
 use super::rows::{BG_INSET, HEADER_RIGHT_PAD, collapsed_count_label};
 use super::{WorkspaceSidebarEntry, theme};
 
+/// Space kept between the workspace name and the collapsed panel count.
+const NAME_COUNT_GAP: f32 = 8.0;
+/// The name is never elided below this width.
+const MIN_NAME_WIDTH: f32 = 24.0;
+const BADGE_GAP: f32 = 4.0;
+const BADGE_TEXT: &str = "NEW WINDOW";
+const BADGE_FONT_SIZE: f32 = 8.5;
+const COUNT_FONT_SIZE: f32 = 10.5;
+
+/// Width left for the workspace name between `name_left` and the right-aligned
+/// content (`reserved_right` wide, plus the header padding), never below the minimum.
+#[must_use]
+fn name_max_width(row_right: f32, name_left: f32, reserved_right: f32) -> f32 {
+    (row_right - HEADER_RIGHT_PAD - reserved_right - name_left).max(MIN_NAME_WIDTH)
+}
+
 pub(super) struct SidebarHeaderRowOutcome {
     pub(super) hovered: bool,
     pub(super) row_clicked: bool,
@@ -77,30 +93,67 @@ pub(super) fn render_sidebar_workspace_header_row(
     ui.painter().rect_filled(bar_rect, CornerRadius::same(2), bar_color);
 
     ui.add_space(8.0);
-    let name_response = ui.add(
-        egui::Label::new(
-            egui::RichText::new(&workspace.name)
-                .color(if workspace.is_active {
-                    theme::FG()
-                } else {
-                    theme::FG_SOFT()
-                })
-                .size(13.0)
-                .strong(),
-        )
-        .sense(Sense::click()),
-    );
+    // Right-aligned content the name must not run into: the collapsed count
+    // and, behind the name, the "NEW WINDOW" badge.
+    let mut reserved_right = 0.0;
+    let count_label = workspace
+        .sidebar_collapsed
+        .then(|| collapsed_count_label(workspace.panels.len()));
+    if let Some(count_label) = &count_label {
+        let count_width = ui
+            .painter()
+            .layout_no_wrap(
+                count_label.clone(),
+                FontId::monospace(COUNT_FONT_SIZE),
+                Color32::PLACEHOLDER,
+            )
+            .size()
+            .x;
+        reserved_right += count_width + NAME_COUNT_GAP;
+    }
+    if workspace.detached {
+        let badge_width = ui
+            .painter()
+            .layout_no_wrap(
+                BADGE_TEXT.to_owned(),
+                FontId::proportional(BADGE_FONT_SIZE),
+                Color32::PLACEHOLDER,
+            )
+            .size()
+            .x;
+        reserved_right += badge_width + BADGE_GAP + ui.spacing().item_spacing.x;
+    }
+    let name_width = name_max_width(row_rect.max.x, ui.next_widget_position().x, reserved_right);
+    let name_response = ui
+        .scope(|ui| {
+            ui.set_max_width(name_width);
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(&workspace.name)
+                        .color(if workspace.is_active {
+                            theme::FG()
+                        } else {
+                            theme::FG_SOFT()
+                        })
+                        .size(13.0)
+                        .strong(),
+                )
+                .truncate()
+                .sense(Sense::click()),
+            )
+        })
+        .inner;
     outcome.hovered |= name_response.hovered();
     outcome.row_clicked |= name_response.clicked();
     outcome.name_right = name_response.rect.max.x;
 
     if workspace.detached {
-        ui.add_space(4.0);
+        ui.add_space(BADGE_GAP);
         let detached_response = ui.add(
             egui::Label::new(
-                egui::RichText::new("NEW WINDOW")
+                egui::RichText::new(BADGE_TEXT)
                     .color(theme::FG_DIM())
-                    .size(8.5)
+                    .size(BADGE_FONT_SIZE)
                     .strong(),
             )
             .sense(Sense::click()),
@@ -110,12 +163,12 @@ pub(super) fn render_sidebar_workspace_header_row(
         outcome.name_right = detached_response.rect.max.x;
     }
 
-    if workspace.sidebar_collapsed {
+    if let Some(count_label) = count_label {
         let count = ui.painter().text(
             Pos2::new(row_rect.max.x - HEADER_RIGHT_PAD, row_rect.center().y),
             Align2::RIGHT_CENTER,
-            collapsed_count_label(workspace.panels.len()),
-            FontId::monospace(10.5),
+            count_label,
+            FontId::monospace(COUNT_FONT_SIZE),
             theme::FG_DIM(),
         );
         outcome.count_left = Some(count.min.x);
@@ -154,5 +207,19 @@ pub(super) fn paint_workspace_row_bg(
             CornerRadius::same(10),
             theme::alpha(theme::PANEL_BG_ALT(), 160),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn name_width_leaves_room_for_the_count_and_never_collapses() {
+        // 260 wide row, name starts at 30, count 24 wide + gap reserved.
+        let width = name_max_width(260.0, 30.0, 24.0 + NAME_COUNT_GAP);
+        assert!((width - (260.0 - HEADER_RIGHT_PAD - 32.0 - 30.0)).abs() < f32::EPSILON);
+        assert!(30.0 + width + 32.0 + HEADER_RIGHT_PAD <= 260.0 + f32::EPSILON);
+        assert!((name_max_width(100.0, 90.0, 80.0) - MIN_NAME_WIDTH).abs() < f32::EPSILON);
     }
 }
