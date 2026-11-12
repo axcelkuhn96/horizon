@@ -12,7 +12,7 @@ use horizon_core::claude_usage::{ProfileUsage, UsageState, UsageWindow, remainin
 use super::{
     BAR_WIDTH_COMPACT, BAR_WIDTH_FULL, CHIP_GAP, CHIP_HEIGHT, CHIP_PAD, ChipEntry, ChipLayout, ChipStatus, ChipsPlan,
     ClaudeUsageState, DOT_DIAMETER, DOT_GAP, GROUP_WIDTH_FULL, LABEL_GAP, LABEL_WIDTH, PCT_WIDTH, SECTION_GAP,
-    api_severity, chip_label, chip_label_parts, chip_status, severity_for, time,
+    api_severity, chip_label, chip_label_parts, chip_status, has_five_hour, severity_for, time,
 };
 use crate::app::hub_ui::{self, Severity};
 use crate::theme;
@@ -237,7 +237,7 @@ fn paint_chip(painter: &egui::Painter, rect: Rect, entry: &ChipEntry, layout: &C
     x += SECTION_GAP;
 
     let usage = entry.usage.as_ref();
-    if !look.compact {
+    if !look.compact && has_five_hour(usage) {
         paint_group(painter, Pos2::new(x, cy), layout, usage, true, look);
         x += GROUP_WIDTH_FULL + SECTION_GAP;
     }
@@ -384,6 +384,9 @@ fn tooltip_body(
 
     let usage = entry.usage.as_ref();
     for (label, five_hour) in [("5h", true), ("7d", false)] {
+        if five_hour && !has_five_hour(usage) {
+            continue;
+        }
         let window = usage.map(|u| if five_hour { &u.five_hour } else { &u.seven_day });
         let reset = if five_hour {
             &entry.reset_five

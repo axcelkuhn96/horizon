@@ -5,6 +5,7 @@ use std::time::Instant;
 use horizon_core::WorkspaceId;
 
 use super::claude_launcher::ClaudeLauncherState;
+use super::claude_quick_start::QuickStartUi;
 use super::hub_ui;
 use super::link::LinkUiState;
 use super::sidebar::GitSidebarState;
@@ -37,6 +38,8 @@ pub(super) struct HubState {
     pub(super) git: GitSidebarState,
     /// Panel-link server, receive badges and the send-to-panel dialog.
     pub(super) link: LinkUiState,
+    /// Titlebar "Claude" quick-start popup and the busy probes behind its button.
+    pub(super) quick_start: QuickStartUi,
 }
 
 impl HubState {

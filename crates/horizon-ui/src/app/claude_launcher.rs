@@ -14,7 +14,7 @@ use horizon_core::{PanelKind, PresetConfig};
 
 use super::HorizonApp;
 use super::hub_ui::{self, ModalPlacement, Severity};
-use super::usage_chips::{api_severity, severity_for, window_text};
+use super::usage_chips::{api_severity, has_five_hour, severity_for, window_text};
 use crate::theme;
 
 const MODAL_WIDTH: f32 = 480.0;
@@ -112,7 +112,7 @@ fn is_profile_preset(preset: &PresetConfig) -> bool {
 /// Derived preset of `profile_name` (`PanelKind::Claude`, alias == profile name,
 /// carrying `CLAUDE_CONFIG_DIR`).
 #[must_use]
-fn find_profile_preset<'a>(presets: &'a [PresetConfig], profile_name: &str) -> Option<&'a PresetConfig> {
+pub(super) fn find_profile_preset<'a>(presets: &'a [PresetConfig], profile_name: &str) -> Option<&'a PresetConfig> {
     presets
         .iter()
         .find(|preset| is_profile_preset(preset) && preset.alias.as_deref() == Some(profile_name))
@@ -122,7 +122,7 @@ fn find_profile_preset<'a>(presets: &'a [PresetConfig], profile_name: &str) -> O
 /// `CLAUDE_CONFIG_DIR`), never the built-in base preset (`Claude Code` / `cc`).
 /// Each is resolvable by [`find_profile_preset`], so a listed profile launches.
 #[must_use]
-fn claude_profile_names(presets: &[PresetConfig]) -> Vec<String> {
+pub(super) fn claude_profile_names(presets: &[PresetConfig]) -> Vec<String> {
     let mut names: Vec<String> = Vec::new();
     for alias in presets
         .iter()
@@ -144,24 +144,24 @@ enum LauncherAction {
 }
 
 /// One `5h` / `7d` line of a row's usage column, formatted when the rows are built.
-struct UsageLine {
+pub(super) struct UsageLine {
     label: &'static str,
     /// Used fraction `0..=1`; `None` draws no bar.
     frac: Option<f32>,
     /// `42%`, or an em dash.
-    text: String,
+    pub(super) text: String,
     severity: Severity,
 }
 
 /// Why a login cannot be used right now; drawn as a pill on the text column's second line.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum LoginProblem {
+pub(super) enum LoginProblem {
     Expired,
     Missing,
 }
 
 impl LoginProblem {
-    fn text(self) -> &'static str {
+    pub(super) fn text(self) -> &'static str {
         match self {
             Self::Expired => "expired",
             Self::Missing => "no login",
@@ -177,13 +177,15 @@ impl LoginProblem {
 }
 
 /// Usage column data of one row, derived from the cached snapshot entry.
-struct RowUsage {
-    lines: [UsageLine; 2],
-    problem: Option<LoginProblem>,
+pub(super) struct RowUsage {
+    pub(super) lines: [UsageLine; 2],
+    pub(super) problem: Option<LoginProblem>,
+    /// `false` when the API sent no 5h window: only the 7d line is drawn.
+    show_five_hour: bool,
 }
 
 impl RowUsage {
-    fn new(usage: Option<&ProfileUsage>) -> Self {
+    pub(super) fn new(usage: Option<&ProfileUsage>) -> Self {
         let line = |label, five_hour: bool| {
             let window = usage.map(|usage| if five_hour { &usage.five_hour } else { &usage.seven_day });
             let percent = window.and_then(|window| window.percent);
@@ -196,6 +198,7 @@ impl RowUsage {
         };
         Self {
             lines: [line("5h", true), line("7d", false)],
+            show_five_hour: has_five_hour(usage),
             problem: usage.and_then(|usage| match usage.state {
                 UsageState::Expired => Some(LoginProblem::Expired),
                 UsageState::Missing => Some(LoginProblem::Missing),
@@ -642,7 +645,7 @@ fn paint_row(painter: &Painter, rect: Rect, index: usize, row: &mut LauncherRow,
     paint_usage_column(painter, rect, &row.usage);
 }
 
-/// Right column: `5h` / `7d` lines, each a caption, a 56x4 bar and the percentage in the
+/// Right column: `5h` / `7d` lines (only `7d` when the API has no 5h window), each a caption, a 56x4 bar and the percentage in the
 /// severity color. Without data both read as an em dash and no bar is drawn; an expired or
 /// missing login keeps its last known value on faded bars.
 fn paint_usage_column(painter: &Painter, rect: Rect, usage: &RowUsage) {
@@ -652,7 +655,14 @@ fn paint_usage_column(painter: &Painter, rect: Rect, usage: &RowUsage) {
     if usage.problem.is_some() {
         bar_painter.multiply_opacity(UNUSABLE_BAR_OPACITY);
     }
-    for (line, offset) in usage.lines.iter().zip([-10.0_f32, 10.0]) {
+    // Line index and vertical offset; the lone 7d line is centered.
+    const BOTH: [(usize, f32); 2] = [(0, -10.0), (1, 10.0)];
+    const SEVEN_ONLY: [(usize, f32); 1] = [(1, 0.0)];
+    let slots: &[(usize, f32)] = if usage.show_five_hour { &BOTH } else { &SEVEN_ONLY };
+    for (index, offset) in slots {
+        let Some(line) = usage.lines.get(*index) else {
+            continue;
+        };
         let y = rect.center().y + offset;
         painter.text(
             Pos2::new(left, y),
@@ -892,6 +902,19 @@ mod tests {
         assert_eq!(usage.lines[1].text, "91%");
         assert_eq!(usage.lines[1].severity, Severity::Critical);
         assert_eq!(usage.problem, None);
+    }
+
+    #[test]
+    fn row_usage_hides_the_five_hour_line_when_the_api_has_no_such_window() {
+        let null_five = usage_with(UsageState::Ok, None, Some(12.0), None);
+        let with_five = usage_with(UsageState::Ok, Some(5.0), Some(12.0), None);
+
+        assert!(!RowUsage::new(Some(&null_five)).show_five_hour);
+        assert!(RowUsage::new(Some(&with_five)).show_five_hour);
+        assert!(
+            RowUsage::new(None).show_five_hour,
+            "unknown usage keeps both placeholders"
+        );
     }
 
     #[test]

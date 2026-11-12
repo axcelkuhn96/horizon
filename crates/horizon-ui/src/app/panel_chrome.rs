@@ -4,6 +4,7 @@ use horizon_core::{AttentionSeverity, PanelId, PanelKind, SshConnectionStatus, a
 use crate::theme;
 
 use super::RenameEditAction;
+use super::claude_quick_start::titlebar::{self as quick_start, STRIP_GAP};
 use super::link::{LinkBadgeView, paint_link_badge};
 use super::speech::MicState;
 use super::util::{format_compact_count, usize_to_f32};
@@ -32,6 +33,21 @@ pub(super) struct PanelChrome<'a> {
     pub link_badge: Option<&'a LinkBadgeView>,
     /// Speech mic control; `None` when speech input is not enabled.
     pub mic: Option<MicControl>,
+    /// Claude quick-start strip on local shell panels.
+    pub quick_start: Option<QuickStartControl>,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct QuickStartControl {
+    /// The strip's rect in the titlebar; it is painted by the panel code after the chrome.
+    pub rect: Rect,
+}
+
+impl QuickStartControl {
+    /// Titlebar width the strip takes, gap included.
+    pub(super) fn slot(self) -> f32 {
+        self.rect.width() + STRIP_GAP
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -45,6 +61,13 @@ impl PanelChrome<'_> {
     /// Leftmost titlebar control: badges and the title stop left of this.
     fn controls_anchor(&self) -> Rect {
         self.mic.map_or(self.close_rect, |mic| mic.rect)
+    }
+
+    /// Where the badges stack from: the controls anchor, moved left of the quick-start strip.
+    fn badge_anchor(&self) -> Rect {
+        let anchor = self.controls_anchor();
+        self.quick_start
+            .map_or(anchor, |strip| anchor.translate(Vec2::new(-strip.slot(), 0.0)))
     }
 }
 
@@ -231,7 +254,7 @@ pub(super) fn paint_panel_chrome(ui: &mut egui::Ui, chrome: PanelChrome<'_>) {
             paint_attention_badge(
                 &painter,
                 chrome.titlebar_rect,
-                chrome.controls_anchor(),
+                chrome.badge_anchor(),
                 *severity,
                 summary,
             );
@@ -240,7 +263,7 @@ pub(super) fn paint_panel_chrome(ui: &mut egui::Ui, chrome: PanelChrome<'_>) {
             paint_ssh_status_badge(
                 &painter,
                 chrome.titlebar_rect,
-                chrome.controls_anchor(),
+                chrome.badge_anchor(),
                 chrome.scrollback_limit > 0,
                 status,
             );
@@ -249,7 +272,7 @@ pub(super) fn paint_panel_chrome(ui: &mut egui::Ui, chrome: PanelChrome<'_>) {
             paint_process_exited_badge(
                 &painter,
                 chrome.titlebar_rect,
-                chrome.controls_anchor(),
+                chrome.badge_anchor(),
                 chrome.scrollback_limit > 0,
                 label,
             );
@@ -450,6 +473,10 @@ fn title_right_boundary(chrome: &PanelChrome<'_>) -> f32 {
         // Link badge sits left of the status badges; reserve ~120px.
         right -= 120.0;
     }
+    if let Some(strip) = chrome.quick_start {
+        // The quick-start strip sits left of the history meter and the badges stack left of it.
+        right -= strip.slot();
+    }
     right
 }
 
@@ -458,7 +485,7 @@ const BADGE_STACK_GAP: f32 = 6.0;
 
 /// Link badge in the SSH/exit/attention badge slot, stacked to their left when present.
 fn paint_link_badge_stacked(painter: &egui::Painter, chrome: &PanelChrome<'_>, view: &LinkBadgeView) {
-    let anchor = chrome.controls_anchor();
+    let anchor = chrome.badge_anchor();
     let right_edge = if chrome.scrollback_limit > 0 {
         panel_history_badge_rect(chrome.titlebar_rect, anchor).min.x - 6.0
     } else {
@@ -762,6 +789,15 @@ fn panel_history_badge_rect(titlebar_rect: Rect, close_rect: Rect) -> Rect {
     Rect::from_center_size(
         Pos2::new(close_rect.min.x - (badge_size.x * 0.5) - 10.0, titlebar_rect.center().y),
         badge_size,
+    )
+}
+
+/// X where the quick-start strip ends for a panel whose controls start at `controls` (mic or close).
+pub(super) fn quick_start_strip_right(titlebar_rect: Rect, controls: Rect, has_history_meter: bool) -> f32 {
+    quick_start::strip_right(
+        panel_history_badge_rect(titlebar_rect, controls),
+        has_history_meter,
+        controls,
     )
 }
 

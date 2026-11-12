@@ -99,6 +99,13 @@ pub(super) fn account_id(email: Option<&str>, max_chars: usize) -> Option<String
     Some(cut)
 }
 
+/// `false` when the API reported no 5h window for a known profile (`null`): the 5h reading is
+/// then hidden everywhere and only the 7d one is shown. Unknown usage still reads `5h —`.
+#[must_use]
+pub(super) fn has_five_hour(usage: Option<&ProfileUsage>) -> bool {
+    usage.is_none_or(|usage| usage.five_hour.percent.is_some())
+}
+
 /// `42%`, or `—` when the window (or the whole profile) has no value yet.
 pub(super) fn window_text(window: Option<&UsageWindow>) -> String {
     match window {
@@ -129,7 +136,7 @@ fn chip_label_parts(name: &str, usage: Option<&ProfileUsage>, compact: bool) -> 
                 UsageState::Missing => "no login".to_owned(),
                 UsageState::Ok | UsageState::Stale => format!("7d {}", window_text(Some(&u.seven_day))),
             };
-            if compact {
+            if compact || !has_five_hour(usage) {
                 seven
             } else {
                 format!("5h {}  {seven}", window_text(Some(&u.five_hour)))
@@ -198,17 +205,18 @@ fn count_as_f32(count: usize) -> f32 {
     f32::from(u16::try_from(count).unwrap_or(u16::MAX))
 }
 
-/// Full chip: dot, name, id, 5h group and 7d group (or a status pill in place of 7d).
+/// Full chip: dot, name, id, 5h group (only when the API has a 5h window) and 7d group (or a
+/// status pill in place of 7d).
 #[must_use]
-fn full_chip_width(name_w: f32, id_w: f32, pill_w: Option<f32>) -> f32 {
+fn full_chip_width(name_w: f32, id_w: f32, pill_w: Option<f32>, five_hour: bool) -> f32 {
+    let five_hour_w = if five_hour { GROUP_WIDTH_FULL + SECTION_GAP } else { 0.0 };
     CHIP_PAD
         + DOT_DIAMETER
         + DOT_GAP
         + name_w
         + id_w
         + SECTION_GAP
-        + GROUP_WIDTH_FULL
-        + SECTION_GAP
+        + five_hour_w
         + pill_w.unwrap_or(GROUP_WIDTH_FULL)
         + CHIP_PAD
 }
@@ -430,16 +438,18 @@ fn build_cache(painter: &Painter, entries: &[ChipEntry], slots: &[usize], key: (
         let id_compact = id_galley(painter, entry.id(true));
         let pill_width = entry.pill_text().map(|text| hub_ui::pill_width(painter, text));
         let width_of = |galley: &Option<Arc<Galley>>| galley.as_ref().map_or(0.0, |g| g.size().x);
-        cache
-            .widths
-            .full
-            .push(full_chip_width(name_full.size().x, width_of(&id_full), pill_width));
+        let usage = entry.usage.as_ref();
+        cache.widths.full.push(full_chip_width(
+            name_full.size().x,
+            width_of(&id_full),
+            pill_width,
+            has_five_hour(usage),
+        ));
         cache.widths.compact.push(compact_chip_width(
             name_compact.size().x,
             width_of(&id_compact),
             pill_width,
         ));
-        let usage = entry.usage.as_ref();
         let (label_five, pct_five) = window_galleys(painter, "5h", usage.map(|u| &u.five_hour));
         let (label_seven, pct_seven) = window_galleys(painter, "7d", usage.map(|u| &u.seven_day));
         cache.chips.push(ChipLayout {
