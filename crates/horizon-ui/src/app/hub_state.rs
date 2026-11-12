@@ -1,5 +1,7 @@
 //! State owned by the claude-hub features; later tasks add their fields here.
 
+use std::time::Instant;
+
 use horizon_core::WorkspaceId;
 
 use super::claude_launcher::ClaudeLauncherState;
@@ -14,8 +16,10 @@ struct AccentCache {
 
 #[derive(Default)]
 pub(super) struct HubState {
-    #[expect(dead_code, reason = "wired in Task 12")]
     pub(super) pending_delete_workspace: Option<WorkspaceId>,
+    /// Since when the canvas label of the workspace being renamed could not be
+    /// drawn; drives the sidebar rename fallback.
+    pub(super) rename_label_missing_since: Option<Instant>,
     /// Open Claude launcher overlay, if any.
     pub(super) claude_launcher: Option<ClaudeLauncherState>,
     /// Profile launched last; the launcher preselects it on the next open.

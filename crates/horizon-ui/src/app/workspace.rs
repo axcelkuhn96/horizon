@@ -112,6 +112,13 @@ impl HorizonApp {
         let canvas_clip_rect = canvas_transform.inverse() * canvas_rect;
         let visuals = self.workspace_visuals(canvas_rect, workspace_bounds, overlay_zones, visible_detached_workspace);
         let workspace_collision_ids = self.workspace_collision_scope(visible_detached_workspace);
+        if visible_detached_workspace.is_none() {
+            // A detached workspace edits its label in its own window.
+            let label_visible = self.renaming_workspace.map(|id| {
+                self.workspace_is_detached(id) || visuals.iter().any(|visual| visual.id == id && !visual.label_hidden)
+            });
+            self.track_workspace_rename_label(ctx, label_visible);
+        }
 
         self.workspace_screen_rects.clear();
         let mut pending_workspace_moves = Vec::new();
