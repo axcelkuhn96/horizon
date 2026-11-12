@@ -1,6 +1,6 @@
 //! Listing transcripts and reading just their heads, on a worker thread.
 
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -81,6 +81,9 @@ pub struct ScanResult {
     /// Transcripts whose head was read from disk (the others came from the cache).
     pub heads_read: usize,
     pub discovered: Vec<DiscoveredAccount>,
+    /// Transcripts found on disk before the per-directory and total caps; `sessions` may hold
+    /// fewer.
+    pub total_found: usize,
     /// The scan could not run (the worker panicked).
     pub failed: bool,
 }
@@ -97,6 +100,7 @@ struct Candidate<'a> {
 pub struct DirectoryScanner {
     limits: ScanLimits,
     cache: HeadCache,
+    total_found: usize,
 }
 
 impl DirectoryScanner {
@@ -105,15 +109,24 @@ impl DirectoryScanner {
         Self {
             limits,
             cache: HeadCache::default(),
+            total_found: 0,
         }
+    }
+
+    /// Transcripts the latest [`Self::scan`] found before applying its caps.
+    #[must_use]
+    pub fn total_found(&self) -> usize {
+        self.total_found
     }
 
     /// Sessions of `dirs`, newest first, and how many heads were read from disk. A directory
     /// that cannot be listed contributes nothing.
     pub fn scan(&mut self, dirs: &[ScanDir]) -> (Vec<SessionSummary>, usize) {
         let mut candidates: Vec<Candidate<'_>> = Vec::new();
+        self.total_found = 0;
         for scan_dir in dirs {
             let mut listed = list_transcripts(scan_dir);
+            self.total_found += listed.len();
             listed.sort_by(|a, b| b.modified.cmp(&a.modified).then_with(|| a.id.cmp(&b.id)));
             listed.truncate(self.limits.max_per_dir);
             candidates.extend(listed);
@@ -192,18 +205,54 @@ fn list_transcripts(scan_dir: &ScanDir) -> Vec<Candidate<'_>> {
 }
 
 /// Title and first prompt from the first `head_bytes` of a transcript. A line cut by the limit
-/// is ignored; lines that are not JSON (binary, truncated) are skipped.
+/// is ignored; lines that are not JSON (binary, truncated) are skipped. When the head yields no
+/// title (the first prompt's own line can be longer than the limit, with an inline image), the
+/// last `head_bytes` are searched for a title line Claude appended.
 fn read_head(path: &Path, head_bytes: usize) -> Head {
-    let Ok(file) = std::fs::File::open(path) else {
+    let Ok(mut file) = std::fs::File::open(path) else {
         return Head::default();
     };
+    let len = file.metadata().map_or(0, |meta| meta.len());
     let limit = u64::try_from(head_bytes).unwrap_or(u64::MAX);
     let mut buf = Vec::new();
-    if file.take(limit).read_to_end(&mut buf).is_err() {
+    if file.by_ref().take(limit).read_to_end(&mut buf).is_err() {
         return Head::default();
     }
     let cut = buf.len() >= head_bytes;
-    parse_head(&buf, cut)
+    let mut head = parse_head(&buf, cut);
+    if head.title.is_empty() && cut && len > limit {
+        head.title = read_tail_title(&mut file, len, limit).unwrap_or_default();
+    }
+    head
+}
+
+/// The title from the last `window` bytes of the file.
+fn read_tail_title(file: &mut std::fs::File, len: u64, window: u64) -> Option<String> {
+    file.seek(SeekFrom::Start(len.saturating_sub(window))).ok()?;
+    let mut buf = Vec::new();
+    file.take(window).read_to_end(&mut buf).ok()?;
+    Some(parse_tail_title(&buf))
+}
+
+/// Claude's own title lines of a window that starts mid-line: the latest `summary`, else
+/// `ai-title`, else `last-prompt`. The first (partial) line is not parsed.
+fn parse_tail_title(bytes: &[u8]) -> String {
+    let mut summary = None;
+    let mut ai_title = None;
+    let mut last_prompt = None;
+    let lines: Vec<&[u8]> = bytes.split(|byte| *byte == b'\n').collect();
+    for line in lines.iter().skip(1).rev() {
+        let Ok(value) = serde_json::from_slice::<Value>(line) else {
+            continue;
+        };
+        match value.get("type").and_then(Value::as_str) {
+            Some("summary") if summary.is_none() => summary = text_field(&value, "summary"),
+            Some("ai-title") if ai_title.is_none() => ai_title = text_field(&value, "aiTitle"),
+            Some("last-prompt") if last_prompt.is_none() => last_prompt = text_field(&value, "lastPrompt"),
+            _ => {}
+        }
+    }
+    summary.or(ai_title).or(last_prompt).unwrap_or_default()
 }
 
 fn parse_head(bytes: &[u8], cut: bool) -> Head {
@@ -214,6 +263,7 @@ fn parse_head(bytes: &[u8], cut: bool) -> Head {
     let mut summary = None;
     let mut ai_title = None;
     let mut prompt = None;
+    let mut last_prompt = None;
     for line in lines {
         let Ok(value) = serde_json::from_slice::<Value>(line) else {
             continue;
@@ -228,6 +278,9 @@ fn parse_head(bytes: &[u8], cut: bool) -> Head {
             Some("user") if prompt.is_none() => {
                 prompt = user_prompt(&value);
             }
+            Some("last-prompt") if last_prompt.is_none() => {
+                last_prompt = text_field(&value, "lastPrompt");
+            }
             _ => {}
         }
         if summary.is_some() && prompt.is_some() {
@@ -235,9 +288,12 @@ fn parse_head(bytes: &[u8], cut: bool) -> Head {
         }
     }
     let first_prompt = prompt.unwrap_or_default();
+    let from_prompt = sanitize_text(&first_prompt, MAX_TITLE_CHARS);
     let title = summary
         .or(ai_title)
-        .unwrap_or_else(|| sanitize_text(&first_prompt, MAX_TITLE_CHARS));
+        .or((!from_prompt.is_empty()).then_some(from_prompt))
+        .or(last_prompt)
+        .unwrap_or_default();
     Head { title, first_prompt }
 }
 
@@ -302,6 +358,7 @@ fn run_request(scanner: &mut DirectoryScanner, request: &ScanRequest) -> ScanRes
         sessions,
         heads_read,
         discovered: discover_live_accounts(&request.profiles),
+        total_found: scanner.total_found(),
         failed: false,
     }
 }
@@ -337,6 +394,7 @@ impl SessionScanner {
                                 sessions: Vec::new(),
                                 heads_read: 0,
                                 discovered: Vec::new(),
+                                total_found: 0,
                                 failed: true,
                             });
                     if result_tx.send(result).is_err() {
@@ -441,5 +499,49 @@ mod tests {
         let head = head_of(&[user("run \u{1b}[2J this\u{7}")]);
 
         assert_eq!(head.first_prompt, "run [2J this");
+    }
+
+    #[test]
+    fn oversized_first_prompt_falls_back_to_a_title_line_in_the_tail() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("t.jsonl");
+        let big = user(&"x".repeat(5_000));
+        let filler = serde_json::json!({"type":"assistant","message":{"content":"y".repeat(600)}}).to_string();
+        let ai = serde_json::json!({"type":"ai-title","aiTitle":"AI named"}).to_string();
+        let last = serde_json::json!({"type":"last-prompt","lastPrompt":"ship the\nfix"}).to_string();
+
+        std::fs::write(&path, format!("{big}\n{filler}\n{last}\n")).expect("write");
+        let only_last = read_head(&path, 1_024);
+        std::fs::write(&path, format!("{big}\n{filler}\n{last}\n{ai}\n")).expect("write");
+        let with_ai = read_head(&path, 1_024);
+
+        assert_eq!(only_last.title, "ship the fix");
+        assert_eq!(only_last.first_prompt, "", "the prompt itself was never read");
+        assert_eq!(with_ai.title, "AI named", "ai-title beats last-prompt");
+    }
+
+    #[test]
+    fn tail_is_not_read_when_the_head_has_a_title_or_the_file_fits() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("t.jsonl");
+        let last = serde_json::json!({"type":"last-prompt","lastPrompt":"from the tail"}).to_string();
+        std::fs::write(&path, format!("{}\n{last}\n", user("short prompt"))).expect("write");
+
+        assert_eq!(read_head(&path, 1_024).title, "short prompt");
+
+        let filler = serde_json::json!({"type":"assistant","message":{"content":"y".repeat(2_000)}}).to_string();
+        std::fs::write(&path, format!("{}\n{filler}\n{last}\n", user("short prompt"))).expect("write");
+        assert_eq!(read_head(&path, 1_024).title, "short prompt", "the head title wins");
+    }
+
+    #[test]
+    fn tail_parse_ignores_a_partial_first_line_and_garbage() {
+        let summary = serde_json::json!({"type":"summary","summary":"The summary"}).to_string();
+        let partial_title = "{\"type\":\"summary\",\"summary\":\"cut at the front\"}";
+
+        let bytes = format!("{partial_title}\n\u{0}\u{1}garbage\n{summary}\n");
+
+        assert_eq!(parse_tail_title(bytes.as_bytes()), "The summary");
+        assert_eq!(parse_tail_title(format!("{partial_title}\n").as_bytes()), "");
     }
 }

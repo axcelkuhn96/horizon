@@ -240,3 +240,21 @@ fn background_scanner_answers_the_latest_request() {
     assert_eq!(result.sessions.len(), 1);
     assert_eq!(result.sessions[0].account, SessionAccount::Profile("conta2".to_owned()));
 }
+
+#[test]
+fn scan_reports_how_many_transcripts_exist_beyond_the_caps() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    for n in 0..6 {
+        write_session(dir.path(), n, "a", 100 + u64::from(n));
+    }
+    let limits = ScanLimits {
+        max_per_dir: 2,
+        ..ScanLimits::default()
+    };
+    let mut scanner = DirectoryScanner::new(limits);
+
+    let (sessions, _) = scanner.scan(&[scan_dir(dir.path(), origin("/p", None, true))]);
+
+    assert_eq!(sessions.len(), 2);
+    assert_eq!(scanner.total_found(), 6);
+}

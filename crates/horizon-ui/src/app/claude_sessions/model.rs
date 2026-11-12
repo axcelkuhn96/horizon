@@ -1,10 +1,13 @@
 //! Pure logic of the recent-sessions modal: which sessions are listed, how a row reads, and how
 //! a resume picks its account. Nothing here touches egui or the disk, so all of it is tested.
 
-use std::path::Path;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use horizon_core::PanelId;
 use horizon_core::claude_sessions::{SessionAccount, SessionSummary, sanitize_text};
+use horizon_core::git_overview::RepoOverview;
 
 /// Sessions listed before "Show all".
 pub(super) const WINDOW_LIMIT: usize = 30;
@@ -49,6 +52,36 @@ pub(super) struct ListRow {
     /// Branch chip text; `None` for the main checkout.
     pub(super) chip: Option<String>,
     pub(super) tooltip: String,
+    /// Set when the session is live right now (see [`ListView::mark_running`]).
+    pub(super) running: Option<Running>,
+}
+
+/// A session that is live right now, so a second Claude must not resume it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Running {
+    /// The Horizon panel running it; `None` for a Claude outside Horizon (or in another instance).
+    pub(super) panel: Option<PanelId>,
+}
+
+/// Which sessions are live: those the scanner saw in the profiles' live-session files and those
+/// of Horizon's own panels. Ids are lowercase.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct LiveSessions {
+    external: BTreeSet<String>,
+    panels: BTreeMap<String, PanelId>,
+}
+
+impl LiveSessions {
+    pub(super) fn new(external: BTreeSet<String>, panels: BTreeMap<String, PanelId>) -> Self {
+        Self { external, panels }
+    }
+
+    /// `Some` when `session_id` is live; the panel is known when a Horizon panel runs it.
+    pub(super) fn running(&self, session_id: &str) -> Option<Running> {
+        let id = session_id.to_ascii_lowercase();
+        let panel = self.panels.get(&id).copied();
+        (panel.is_some() || self.external.contains(&id)).then_some(Running { panel })
+    }
 }
 
 /// An entry of the list.
@@ -88,6 +121,15 @@ impl ListView {
             Item::AgentHeader { .. } => None,
         }
     }
+
+    /// Flags the rows whose session is live.
+    pub(super) fn mark_running(&mut self, live: &LiveSessions) {
+        for item in &mut self.items {
+            if let Item::Row(row) = item {
+                row.running = live.running(&row.id);
+            }
+        }
+    }
 }
 
 /// Everything a list build depends on; the cached view is rebuilt only when this changes.
@@ -98,6 +140,7 @@ pub(super) struct ViewKey {
     pub(super) window: ListWindow,
     pub(super) agents_expanded: bool,
     pub(super) accounts_version: u64,
+    pub(super) live_version: u64,
 }
 
 /// The list for `sessions` (newest first): the `window.limit` most recent that match `filter`,
@@ -187,7 +230,48 @@ impl ListRow {
             size: size_label(session.size),
             chip,
             tooltip: row_tooltip(session),
+            running: None,
         }
+    }
+}
+
+/// What the header says about the number of sessions: the count, or how many are shown of at
+/// least how many exist when the scan stopped at its caps.
+pub(super) fn header_count_label(shown: usize, total_found: usize) -> String {
+    if total_found > shown {
+        return format!("{shown} shown (of \u{2265}{total_found})");
+    }
+    let noun = if shown == 1 { "session" } else { "sessions" };
+    format!("{shown} {noun}")
+}
+
+/// What the directories to scan depend on, taken from data the app already holds (no disk): the
+/// workspace folder and, once its git overview has arrived, the worktrees of its repository.
+/// The open modal rescans when this changes.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct ScanSignature {
+    folder: Option<PathBuf>,
+    /// `(path, branch, is main, prunable)` of each worktree; `None` until the overview arrives.
+    worktrees: Option<Vec<(PathBuf, Option<String>, bool, bool)>>,
+}
+
+pub(super) fn scan_signature(folder: Option<&Path>, overview: Option<&RepoOverview>) -> ScanSignature {
+    ScanSignature {
+        folder: folder.map(Path::to_path_buf),
+        worktrees: overview.map(|overview| {
+            overview
+                .worktrees
+                .iter()
+                .map(|worktree| {
+                    (
+                        worktree.path.clone(),
+                        worktree.branch.clone(),
+                        worktree.is_main,
+                        worktree.prunable,
+                    )
+                })
+                .collect()
+        }),
     }
 }
 
@@ -300,7 +384,6 @@ pub(super) fn resume_cwd(session: &SessionSummary) -> &Path {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
     use std::time::Duration;
 
     use horizon_core::claude_sessions::SessionOrigin;
@@ -539,5 +622,97 @@ mod tests {
         let view = build_view(&sessions, "", ListWindow::default(), false, now(), &[]);
 
         assert_eq!(view.row(0).map(|row| row.title.as_str()), Some("<b>bold</b>evil"));
+    }
+
+    fn worktree_info(
+        path: &str,
+        branch: Option<&str>,
+        dirty: Option<usize>,
+    ) -> horizon_core::git_overview::WorktreeInfo {
+        horizon_core::git_overview::WorktreeInfo {
+            path: PathBuf::from(path),
+            branch: branch.map(str::to_owned),
+            head_short: None,
+            is_main: false,
+            is_current: false,
+            locked: false,
+            prunable: false,
+            dirty_count: dirty,
+            is_agent: false,
+        }
+    }
+
+    fn overview_of(worktrees: Vec<horizon_core::git_overview::WorktreeInfo>) -> RepoOverview {
+        RepoOverview {
+            repo_root: PathBuf::from("/p"),
+            branch: Some("main".to_owned()),
+            detached: false,
+            head_short: None,
+            dirty_count: 0,
+            upstream: None,
+            ahead: 0,
+            behind: 0,
+            worktrees,
+        }
+    }
+
+    #[test]
+    fn scan_signature_changes_when_the_overview_arrives_and_ignores_dirty_counts() {
+        let folder = Path::new("/p");
+        let before = scan_signature(Some(folder), None);
+        let clean = overview_of(vec![worktree_info("/p", Some("main"), Some(0))]);
+        let dirty = overview_of(vec![worktree_info("/p", Some("main"), Some(7))]);
+        let more = overview_of(vec![
+            worktree_info("/p", Some("main"), None),
+            worktree_info("/p-wt", Some("feat"), None),
+        ]);
+
+        let arrived = scan_signature(Some(folder), Some(&clean));
+
+        assert_ne!(before, arrived, "the worktrees now count");
+        assert_eq!(
+            arrived,
+            scan_signature(Some(folder), Some(&dirty)),
+            "uncommitted files do not"
+        );
+        assert_ne!(arrived, scan_signature(Some(folder), Some(&more)));
+        assert_ne!(
+            arrived,
+            scan_signature(Some(Path::new("/q")), Some(&clean)),
+            "nor does a new folder"
+        );
+    }
+
+    #[test]
+    fn header_count_says_shown_of_at_least_when_the_scan_was_capped() {
+        assert_eq!(header_count_label(1, 1), "1 session");
+        assert_eq!(header_count_label(12, 12), "12 sessions");
+        assert_eq!(header_count_label(0, 0), "0 sessions");
+        assert_eq!(header_count_label(1_000, 1_342), "1000 shown (of \u{2265}1342)");
+    }
+
+    #[test]
+    fn running_sessions_are_marked_and_know_their_panel() {
+        let sessions = many(3, false);
+        let mut view = build_view(&sessions, "", ListWindow::default(), false, now(), &[]);
+        let live = LiveSessions::new(
+            BTreeSet::from([sessions[0].id.clone()]),
+            BTreeMap::from([(sessions[1].id.clone(), PanelId(9))]),
+        );
+
+        view.mark_running(&live);
+
+        assert_eq!(view.row(0).and_then(|row| row.running), Some(Running { panel: None }));
+        assert_eq!(
+            view.row(1).and_then(|row| row.running),
+            Some(Running {
+                panel: Some(PanelId(9))
+            })
+        );
+        assert_eq!(view.row(2).and_then(|row| row.running), None);
+        assert_eq!(
+            live.running(&sessions[0].id.to_uppercase()),
+            Some(Running { panel: None })
+        );
     }
 }

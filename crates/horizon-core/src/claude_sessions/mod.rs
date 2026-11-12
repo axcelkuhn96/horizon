@@ -22,8 +22,6 @@ mod scan;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use crate::ClaudeProfile;
-use crate::config::expand_config_dir;
 use crate::git_overview::RepoOverview;
 
 pub use index::{AccountEntry, AccountIndex, AccountIndexWriter, MAX_INDEX_ENTRIES};
@@ -210,21 +208,6 @@ pub fn attribute_accounts(sessions: &mut [SessionSummary], index: &AccountIndex)
             session.account = SessionAccount::Unknown;
         }
     }
-}
-
-/// Name of the profile whose expanded config dir is `config_dir` (a trailing `/` is ignored).
-#[must_use]
-pub fn profile_for_config_dir(profiles: &[ClaudeProfile], home: &Path, config_dir: &Path) -> Option<String> {
-    let wanted = config_dir.components().collect::<PathBuf>();
-    profiles
-        .iter()
-        .find(|profile| {
-            expand_config_dir(&profile.config_dir, home)
-                .components()
-                .collect::<PathBuf>()
-                == wanted
-        })
-        .map(|profile| profile.name.clone())
 }
 
 /// Removes control characters (and bidirectional overrides, which can reorder what is read) and
@@ -445,21 +428,6 @@ mod tests {
         assert_eq!(sanitize_text("abcdefghij", 4), "abcd");
         assert_eq!(sanitize_text("ab cd ef", 5), "ab cd");
         assert_eq!(sanitize_text("\n\n", 5), "");
-    }
-
-    #[test]
-    fn profile_matches_expanded_config_dir_ignoring_trailing_slash() {
-        let profiles = vec![ClaudeProfile {
-            name: "conta2".to_owned(),
-            config_dir: "~/.claude-conta2".to_owned(),
-        }];
-        let home = Path::new("/home/u");
-
-        assert_eq!(
-            profile_for_config_dir(&profiles, home, Path::new("/home/u/.claude-conta2/")).as_deref(),
-            Some("conta2")
-        );
-        assert_eq!(profile_for_config_dir(&profiles, home, Path::new("/elsewhere")), None);
     }
 
     #[test]

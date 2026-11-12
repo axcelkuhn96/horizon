@@ -71,33 +71,13 @@ impl AccountIndex {
     #[must_use]
     pub fn load(path: PathBuf) -> Self {
         let mut index = Self::empty(path);
-        let Ok(meta) = std::fs::metadata(&index.path) else {
-            return index;
-        };
-        let parsed = if meta.len() > MAX_FILE_BYTES {
-            None
-        } else {
-            std::fs::read(&index.path)
-                .ok()
-                .and_then(|bytes| serde_json::from_slice::<FileFormat>(&bytes).ok())
-                .filter(|file| file.version == FILE_VERSION)
-        };
-        match parsed {
-            Some(file) => {
-                index.entries = file
-                    .sessions
-                    .into_iter()
-                    .filter(|(id, entry)| entry_is_sane(id, entry))
-                    .collect();
+        match read_disk(&index.path) {
+            Disk::Missing => {}
+            Disk::Entries(entries) => {
+                index.entries = entries;
                 index.trim();
             }
-            None => {
-                let mut bad = index.path.as_os_str().to_owned();
-                bad.push(".bad");
-                if let Err(error) = std::fs::rename(&index.path, PathBuf::from(bad)) {
-                    tracing::warn!("could not set aside a corrupt Claude session index: {error}");
-                }
-            }
+            Disk::Unusable => set_aside(&index.path),
         }
         index
     }
@@ -167,6 +147,27 @@ impl AccountIndex {
         }
     }
 
+    /// Folds in what the file holds now (another Horizon instance may have recorded sessions
+    /// since this index was loaded), then saves. A file that cannot be read is set aside.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::save_atomic`].
+    pub fn save_merged(&mut self) -> Result<(), SessionError> {
+        match read_disk(&self.path) {
+            Disk::Missing => {}
+            Disk::Entries(entries) => {
+                let on_disk = Self {
+                    path: self.path.clone(),
+                    entries,
+                };
+                self.merge(&on_disk);
+            }
+            Disk::Unusable => set_aside(&self.path),
+        }
+        self.save_atomic()
+    }
+
     /// Writes the index next to its final path (mode 0600 on Unix) and renames it into place,
     /// so a reader never sees a partial file.
     ///
@@ -189,6 +190,45 @@ impl AccountIndex {
             let _ = std::fs::remove_file(&tmp);
         }
         Ok(written?)
+    }
+}
+
+/// What the index file holds right now.
+enum Disk {
+    Missing,
+    Entries(BTreeMap<String, AccountEntry>),
+    /// Corrupt, oversized or of another version.
+    Unusable,
+}
+
+fn read_disk(path: &Path) -> Disk {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return Disk::Missing;
+    };
+    let parsed = if meta.len() > MAX_FILE_BYTES {
+        None
+    } else {
+        std::fs::read(path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<FileFormat>(&bytes).ok())
+            .filter(|file| file.version == FILE_VERSION)
+    };
+    match parsed {
+        Some(file) => Disk::Entries(
+            file.sessions
+                .into_iter()
+                .filter(|(id, entry)| entry_is_sane(id, entry))
+                .collect(),
+        ),
+        None => Disk::Unusable,
+    }
+}
+
+fn set_aside(path: &Path) {
+    let mut bad = path.as_os_str().to_owned();
+    bad.push(".bad");
+    if let Err(error) = std::fs::rename(path, PathBuf::from(bad)) {
+        tracing::warn!("could not set aside a corrupt Claude session index: {error}");
     }
 }
 
@@ -244,7 +284,7 @@ impl AccountIndexWriter {
                         ts,
                     } = message;
                     if index.record(&session_id, &profile, &config_dir, ts)
-                        && let Err(error) = index.save_atomic()
+                        && let Err(error) = index.save_merged()
                     {
                         tracing::warn!("could not save the Claude session index: {error}");
                     }
@@ -411,6 +451,48 @@ mod tests {
 
         assert_eq!(ours.lookup(A).map(|e| e.profile.as_str()), Some("new"));
         assert!(ours.lookup(B).is_some());
+    }
+
+    #[test]
+    fn save_merged_keeps_sessions_another_instance_wrote() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("idx.json");
+        let mut ours = AccountIndex::empty(path.clone());
+        ours.record(A, "conta1", "/x", 1);
+        // Another instance saved its own record after we loaded.
+        let mut theirs = AccountIndex::empty(path.clone());
+        theirs.record(B, "conta2", "/y", 2);
+        theirs.save_atomic().expect("their save");
+
+        ours.save_merged().expect("merged save");
+
+        let saved = AccountIndex::load(path);
+        assert_eq!(saved.lookup(A).map(|e| e.profile.as_str()), Some("conta1"));
+        assert_eq!(saved.lookup(B).map(|e| e.profile.as_str()), Some("conta2"));
+        assert!(ours.lookup(B).is_some(), "what was merged in is kept in memory");
+    }
+
+    #[test]
+    fn save_merged_prefers_our_newer_entry_and_sets_a_corrupt_file_aside() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("idx.json");
+        let mut theirs = AccountIndex::empty(path.clone());
+        theirs.record(A, "old", "/x", 1);
+        theirs.save_atomic().expect("their save");
+        let mut ours = AccountIndex::empty(path.clone());
+        ours.record(A, "new", "/x", 9);
+
+        ours.save_merged().expect("merged save");
+
+        assert_eq!(
+            AccountIndex::load(path.clone()).lookup(A).map(|e| e.profile.as_str()),
+            Some("new")
+        );
+
+        std::fs::write(&path, b"{ not json").expect("corrupt");
+        ours.save_merged().expect("save over corrupt");
+        assert!(dir.path().join("idx.json.bad").exists());
+        assert!(AccountIndex::load(path).lookup(A).is_some());
     }
 
     #[test]
