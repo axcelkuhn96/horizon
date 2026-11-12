@@ -18,7 +18,7 @@ type OverviewResult = Result<Option<RepoOverview>, GitOverviewError>;
 enum Command<K> {
     SetCwds(Cwds<K>),
     Refresh,
-    RefreshDirty(PathBuf),
+    SetDirtyWatch(HashSet<PathBuf>),
     Stop,
 }
 
@@ -74,12 +74,12 @@ impl<K: Clone + Eq + Hash + Send + 'static> OverviewPoller<K> {
         let _ = self.commands.send(Command::Refresh);
     }
 
-    /// Ask for the dirty count of the worktree at `path` (a
-    /// [`super::WorktreeInfo::path`]) and recompute now. From then on every
-    /// cycle keeps that count filled in, so it arrives in the next overview of
-    /// each key whose repository contains the worktree.
-    pub fn refresh_worktree_dirty(&self, path: PathBuf) {
-        let _ = self.commands.send(Command::RefreshDirty(path));
+    /// Replace the set of worktree paths (see [`super::WorktreeInfo::path`])
+    /// whose dirty count is kept filled in and recompute now. Paths no longer
+    /// in the set report `dirty_count: None` from the next overview on, so
+    /// callers pass only what is currently visible (e.g. expanded groups).
+    pub fn set_dirty_watch(&self, paths: Vec<PathBuf>) {
+        let _ = self.commands.send(Command::SetDirtyWatch(paths.into_iter().collect()));
     }
 
     #[must_use]
@@ -106,16 +106,16 @@ impl<K> Drop for OverviewPoller<K> {
 /// Commands that arrived together, folded into one poll.
 struct Batch<K> {
     cwds: Option<Cwds<K>>,
-    dirty: Vec<PathBuf>,
+    dirty: Option<HashSet<PathBuf>>,
     stop: bool,
 }
 
 /// Fold `first` and everything already queued behind it: the last `SetCwds`
-/// wins, dirty requests are merged and `Stop` ends the batch.
+/// wins, the last `SetDirtyWatch` wins and `Stop` ends the batch.
 fn collect_batch<K>(first: Command<K>, commands: &Receiver<Command<K>>) -> Batch<K> {
     let mut batch = Batch {
         cwds: None,
-        dirty: Vec::new(),
+        dirty: None,
         stop: false,
     };
     let mut next = Some(first);
@@ -123,7 +123,7 @@ fn collect_batch<K>(first: Command<K>, commands: &Receiver<Command<K>>) -> Batch
         match command {
             Command::SetCwds(cwds) => batch.cwds = Some(cwds),
             Command::Refresh => {}
-            Command::RefreshDirty(path) => batch.dirty.push(path),
+            Command::SetDirtyWatch(paths) => batch.dirty = Some(paths),
             Command::Stop => {
                 batch.stop = true;
                 break;
@@ -161,7 +161,9 @@ fn poll_loop<K: Clone + Eq + Hash>(
                     last.retain(|key, _| next.iter().any(|(k, _)| k == key));
                     cwds = next;
                 }
-                requested.extend(batch.dirty);
+                if let Some(paths) = batch.dirty {
+                    requested = paths;
+                }
             }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => return,
@@ -355,7 +357,7 @@ mod tests {
     }
 
     #[test]
-    fn refresh_worktree_dirty_fills_the_count_in_the_next_overview() {
+    fn dirty_watch_fills_the_count_and_replacing_it_clears_it() {
         let fx = Fixture::with_commit();
         let wt = fx.dir.path().join("wts/feature");
         std::fs::create_dir_all(wt.parent().expect("parent")).expect("mkdir");
@@ -367,9 +369,28 @@ mod tests {
         let overview = first.1.expect("ok").expect("some");
         assert_eq!(overview.worktrees[1].dirty_count, None);
 
-        poller.refresh_worktree_dirty(overview.worktrees[1].path.clone());
+        poller.set_dirty_watch(vec![overview.worktrees[1].path.clone()]);
         let second = wait_for(&poller, Duration::from_secs(5)).expect("refreshed");
         let overview = second.1.expect("ok").expect("some");
         assert_eq!(overview.worktrees[1].dirty_count, Some(1));
+
+        poller.set_dirty_watch(Vec::new());
+        let third = wait_for(&poller, Duration::from_secs(5)).expect("unwatched");
+        let overview = third.1.expect("ok").expect("some");
+        assert_eq!(overview.worktrees[1].dirty_count, None);
+    }
+
+    #[test]
+    fn last_dirty_watch_in_a_batch_wins() {
+        let (command_tx, command_rx) = mpsc::channel::<Command<u32>>();
+        command_tx
+            .send(Command::SetDirtyWatch(HashSet::from([PathBuf::from("/a")])))
+            .expect("send");
+        command_tx
+            .send(Command::SetDirtyWatch(HashSet::from([PathBuf::from("/b")])))
+            .expect("send");
+        let first = command_rx.try_recv().expect("first");
+        let batch = collect_batch(first, &command_rx);
+        assert_eq!(batch.dirty, Some(HashSet::from([PathBuf::from("/b")])));
     }
 }
