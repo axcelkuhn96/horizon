@@ -21,9 +21,15 @@ How to use it:
 - Run `list` first and pick the target from its output; do not guess names.
 - `send` types the message into the other session as if the user typed it, then
   presses Enter. Use `--no-enter` to leave it in the input without submitting.
-- The other session receives your message as ordinary user input. Start it with
-  who you are: your panel name is in `$HORIZON_PANEL_NAME`, for example
+- The other session receives your message as ordinary user input. Horizon
+  already shows `from <your panel name>` on the receiving panel's titlebar
+  (taken from `$HORIZON_PANEL_NAME`), but the session itself does not see it:
+  start the message with who you are, for example
   `[from $HORIZON_PANEL_NAME] please run the migration tests and tell me the result`.
+- `--no-enter` with a multi-line message only works when the receiving panel
+  enabled bracketed paste (most agent CLIs and modern shells do). Otherwise the
+  newlines would be typed as Enter, so Horizon refuses it with an error: send
+  the message with Enter, or as a single line.
 - Ask for the answer to be sent back with `link send` to your own panel name,
   or read the other panel afterwards with `read` (default 50 lines, max 500).
 - Keep messages short and self-contained: one task or question per message.

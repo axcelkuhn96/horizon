@@ -100,14 +100,30 @@ fn socket_path_from(value: Option<OsString>) -> Result<PathBuf, String> {
         .ok_or_else(|| "HORIZON_SOCKET is not set; run inside a Horizon terminal".to_owned())
 }
 
-/// Serializes the command into one newline-terminated request line.
-fn request_line(command: &LinkCommand) -> Result<String, String> {
+/// Longest sender name sent with a message.
+const MAX_SENDER_CHARS: usize = 64;
+
+/// This panel's name (`HORIZON_PANEL_NAME`) as the sender of a message: escapes and control
+/// characters dropped, capped to [`MAX_SENDER_CHARS`]; `None` when unset or empty.
+fn sender_name(value: Option<OsString>) -> Option<String> {
+    let name: String = terminal_safe(&value?.to_string_lossy())
+        .trim()
+        .chars()
+        .take(MAX_SENDER_CHARS)
+        .collect();
+    (!name.is_empty()).then_some(name)
+}
+
+/// Serializes the command into one newline-terminated request line. `from` names the sending
+/// panel and travels with `send` only.
+fn request_line(command: &LinkCommand, from: Option<&str>) -> Result<String, String> {
     let request = match command {
         LinkCommand::List => LinkRequest::List,
         LinkCommand::Send { target, text, enter } => LinkRequest::Send {
             target: target.clone(),
             text: text.clone(),
             enter: *enter,
+            from: from.map(str::to_owned),
         },
         LinkCommand::Read { target, lines } => LinkRequest::Read {
             target: target.clone(),
@@ -240,7 +256,8 @@ fn execute(args: &[String]) -> Result<String, String> {
     }
     let command = parse_link_args(args)?;
     let socket = socket_path_from(std::env::var_os("HORIZON_SOCKET"))?;
-    let line = request_line(&command)?;
+    let from = sender_name(std::env::var_os("HORIZON_PANEL_NAME"));
+    let line = request_line(&command, from.as_deref())?;
     render(exchange(&socket, &line)?)
 }
 
@@ -271,7 +288,7 @@ mod tests {
 
     use horizon_core::link::{LinkOk, LinkResponse, PanelInfo};
 
-    use super::{LinkCommand, format_panels, parse_link_args, request_line, socket_path_from};
+    use super::{LinkCommand, format_panels, parse_link_args, request_line, sender_name, socket_path_from};
 
     fn args(items: &[&str]) -> Vec<String> {
         items.iter().map(|item| (*item).to_owned()).collect()
@@ -394,29 +411,72 @@ mod tests {
 
     #[test]
     fn request_line_is_one_json_line_with_version() {
-        let line = request_line(&LinkCommand::Send {
-            target: "a".to_owned(),
-            text: "x\ny".to_owned(),
-            enter: true,
-        })
+        let line = request_line(
+            &LinkCommand::Send {
+                target: "a".to_owned(),
+                text: "x\ny".to_owned(),
+                enter: true,
+            },
+            None,
+        )
         .expect("line");
         assert_eq!(
             line,
             "{\"v\":1,\"op\":\"send\",\"target\":\"a\",\"text\":\"x\\ny\",\"enter\":true}\n"
         );
         assert_eq!(
-            request_line(&LinkCommand::List).expect("line"),
+            request_line(&LinkCommand::List, Some("ignored")).expect("line"),
             "{\"v\":1,\"op\":\"list\"}\n"
         );
     }
 
     #[test]
-    fn request_line_rejects_oversized_text() {
-        let error = request_line(&LinkCommand::Send {
+    fn request_line_carries_the_sender_name_on_send_only() {
+        let send = LinkCommand::Send {
             target: "a".to_owned(),
-            text: "x".repeat(horizon_core::link::MAX_REQUEST_BYTES),
-            enter: true,
-        })
+            text: "hi".to_owned(),
+            enter: false,
+        };
+        assert_eq!(
+            request_line(&send, Some("backend")).expect("line"),
+            "{\"v\":1,\"op\":\"send\",\"target\":\"a\",\"text\":\"hi\",\"enter\":false,\"from\":\"backend\"}\n"
+        );
+        assert_eq!(
+            request_line(
+                &LinkCommand::Read {
+                    target: "a".to_owned(),
+                    lines: 5
+                },
+                Some("backend")
+            )
+            .expect("line"),
+            "{\"v\":1,\"op\":\"read\",\"target\":\"a\",\"lines\":5}\n"
+        );
+    }
+
+    #[test]
+    fn sender_name_is_cleaned_capped_and_optional() {
+        assert_eq!(sender_name(None), None);
+        assert_eq!(sender_name(Some(OsString::new())), None);
+        assert_eq!(sender_name(Some(OsString::from("\u{1b}[31m \u{7}"))), None);
+        assert_eq!(
+            sender_name(Some(OsString::from(" my\u{1b}[31m panel\n "))),
+            Some("my panel".to_owned())
+        );
+        let long = sender_name(Some(OsString::from("x".repeat(200)))).expect("name");
+        assert_eq!(long.chars().count(), super::MAX_SENDER_CHARS);
+    }
+
+    #[test]
+    fn request_line_rejects_oversized_text() {
+        let error = request_line(
+            &LinkCommand::Send {
+                target: "a".to_owned(),
+                text: "x".repeat(horizon_core::link::MAX_REQUEST_BYTES),
+                enter: true,
+            },
+            None,
+        )
         .expect_err("too large");
         assert!(error.contains("too large"), "{error}");
     }

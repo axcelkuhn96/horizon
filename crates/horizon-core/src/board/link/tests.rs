@@ -59,6 +59,7 @@ fn send(board: &mut Board, target: &str, text: &str, enter: bool) -> LinkRespons
         target: target.to_owned(),
         text: text.to_owned(),
         enter,
+        from: None,
     })
 }
 
@@ -120,6 +121,48 @@ fn board_send_uses_bracketed_paste_when_enabled() {
     let _ = send(&mut board, "sink", "line1\nline2", true);
     assert!(
         file_equals(&file, "\u{1b}[200~line1\nline2\u{1b}[201~\r"),
+        "{:?}",
+        std::fs::read(&file)
+    );
+}
+
+#[test]
+fn board_send_refuses_multiline_without_enter_when_paste_is_not_bracketed() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let file = dir.path().join("in");
+    let mut board = Board::new();
+    let id = command_panel(&mut board, "sink", &sink_script(&file, false));
+    assert!(screen_contains(&mut board, id, "ready"));
+
+    match send(&mut board, "sink", "line1\nline2", false) {
+        LinkResponse::Err { code, message } => {
+            assert_eq!(code, LinkErrorCode::BadRequest);
+            assert!(message.contains("multi-line"), "{message}");
+        }
+        other => panic!("expected bad_request, got {other:?}"),
+    }
+    // A single line still goes through.
+    assert_eq!(
+        send(&mut board, "sink", "one line", false),
+        LinkResponse::Ok(LinkOk::Sent)
+    );
+    assert!(file_equals(&file, "one line"), "{:?}", std::fs::read(&file));
+}
+
+#[test]
+fn board_send_allows_multiline_without_enter_under_bracketed_paste() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let file = dir.path().join("in");
+    let mut board = Board::new();
+    let id = command_panel(&mut board, "sink", &sink_script(&file, true));
+    assert!(screen_contains(&mut board, id, "ready"));
+
+    assert_eq!(
+        send(&mut board, "sink", "line1\nline2", false),
+        LinkResponse::Ok(LinkOk::Sent)
+    );
+    assert!(
+        file_equals(&file, "\u{1b}[200~line1\nline2\u{1b}[201~"),
         "{:?}",
         std::fs::read(&file)
     );

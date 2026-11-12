@@ -19,6 +19,10 @@ pub enum LinkRequest {
         text: String,
         #[serde(default)]
         enter: bool,
+        /// Name of the sending panel, shown on the receiver's badge. Optional so older
+        /// clients keep working; the receiver cleans and caps it before use.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from: Option<String>,
     },
     Read {
         target: String,
@@ -209,9 +213,44 @@ mod tests {
             Ok(LinkRequest::Send {
                 target: "a".to_owned(),
                 text: "hi".to_owned(),
-                enter: false
+                enter: false,
+                from: None,
             })
         );
+    }
+
+    #[test]
+    fn parse_send_reads_the_optional_sender_name() {
+        let req = parse_request_line(br#"{"v":1,"op":"send","target":"a","text":"hi","from":"backend"}"#);
+        assert_eq!(
+            req,
+            Ok(LinkRequest::Send {
+                target: "a".to_owned(),
+                text: "hi".to_owned(),
+                enter: false,
+                from: Some("backend".to_owned()),
+            })
+        );
+    }
+
+    #[test]
+    fn send_with_a_sender_round_trips_and_without_one_omits_the_field() {
+        let with = LinkRequest::Send {
+            target: "a".to_owned(),
+            text: "x".to_owned(),
+            enter: false,
+            from: Some("api".to_owned()),
+        };
+        let json = serde_json::to_string(&RequestEnvelope {
+            v: LINK_PROTOCOL_VERSION,
+            request: with.clone(),
+        })
+        .unwrap();
+        assert_eq!(
+            json,
+            r#"{"v":1,"op":"send","target":"a","text":"x","enter":false,"from":"api"}"#
+        );
+        assert_eq!(parse_request_line(json.as_bytes()), Ok(with));
     }
 
     #[test]
@@ -222,6 +261,7 @@ mod tests {
                 target: "a".to_owned(),
                 text: "x\ny".to_owned(),
                 enter: true,
+                from: None,
             },
         };
         let json = serde_json::to_string(&envelope).unwrap();

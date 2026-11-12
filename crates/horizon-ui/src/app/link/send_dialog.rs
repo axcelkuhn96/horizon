@@ -237,7 +237,7 @@ impl HorizonApp {
         }
         if let SendAction::Send { enter } = action {
             match send_request(&state, enter) {
-                Ok(request) => match self.execute_link_request(request, &state.source_name) {
+                Ok(request) => match self.execute_link_request(request) {
                     LinkResponse::Ok(_) => {
                         ctx.request_repaint();
                         return;
@@ -276,6 +276,7 @@ fn send_request(state: &SendToPanelState, enter: bool) -> Result<LinkRequest, Se
         target: row.id.clone(),
         text: state.message.clone(),
         enter,
+        from: Some(state.source_name.clone()),
     })
 }
 
@@ -691,6 +692,7 @@ mod tests {
                 target: "b".to_owned(),
                 text: "hello".to_owned(),
                 enter: false,
+                from: Some("src".to_owned()),
             })
         );
     }

@@ -66,7 +66,9 @@ impl Board {
     pub fn handle_link_request(&mut self, request: LinkRequest) -> LinkResponse {
         let result = match request {
             LinkRequest::List => Ok(LinkOk::Panels(self.link_panels())),
-            LinkRequest::Send { target, text, enter } => self.link_send(&target, &text, enter),
+            LinkRequest::Send {
+                target, text, enter, ..
+            } => self.link_send(&target, &text, enter),
             LinkRequest::Read { target, lines } => self.link_read(&target, lines),
         };
         match result {
@@ -112,6 +114,15 @@ impl Board {
         let panel = self.panel_mut(id).ok_or(LinkError::Closed)?;
         let bracketed = live_terminal_mode(panel)?.contains(TermMode::BRACKETED_PASTE);
         let text = sanitize_send_text(text);
+        // Without bracketed paste a newline is a typed Enter: the lines would execute, which
+        // `--no-enter` / "Send without Enter" promises not to do.
+        if !bracketed && !enter && text.contains('\n') {
+            return Err(LinkError::BadRequest(
+                "this panel has no bracketed paste, so a multi-line message cannot be left unsent; \
+                 send it with Enter or as a single line"
+                    .to_owned(),
+            ));
+        }
         if !text.is_empty() {
             panel.write_input(&paste_payload(&text, bracketed));
         }

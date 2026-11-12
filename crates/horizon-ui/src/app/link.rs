@@ -23,8 +23,8 @@ use crate::theme;
 
 /// Requests answered per frame; the rest wait for the next frame.
 const MAX_REQUESTS_PER_FRAME: usize = 8;
-/// Sender label shown on the badge for requests that arrive over the socket.
-const SOCKET_SENDER: &str = "link";
+/// Badge sender label for a request that names no sender.
+const FALLBACK_SENDER: &str = "link";
 
 /// Badge fully opaque until here, then fades out linearly until `BADGE_TOTAL`.
 const BADGE_FULL: Duration = Duration::from_millis(2300);
@@ -118,6 +118,24 @@ fn answer_batch(batch: Vec<PendingRequest>, cap: usize, mut run: impl FnMut(Link
         repaint = true;
     }
     repaint
+}
+
+/// Badge label of a request's `from`: escape-free (it may come from a terminal-controlled
+/// title), control characters dropped, capped to the badge width; `link` when there is no
+/// usable name.
+fn sender_label(from: Option<&str>) -> String {
+    let clean: String = from
+        .map(strip_escapes)
+        .unwrap_or_default()
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .collect();
+    let clean = clean.trim();
+    if clean.is_empty() {
+        FALLBACK_SENDER.to_owned()
+    } else {
+        truncate_chars(clean, BADGE_NAME_CHARS)
+    }
 }
 
 /// Name shortened to `max` characters, ending in an ellipsis when cut.
@@ -225,7 +243,7 @@ impl HorizonApp {
         };
         let batch = drain_capped(|| server.try_recv(), MAX_REQUESTS_PER_FRAME);
         if answer_batch(batch, MAX_REQUESTS_PER_FRAME, |request| {
-            self.execute_link_request(request, SOCKET_SENDER)
+            self.execute_link_request(request)
         }) {
             ctx.request_repaint();
         }
@@ -233,10 +251,10 @@ impl HorizonApp {
 
     /// Runs one request on the board (the same sanitizing path for the socket
     /// and the dialog) and flags the receiving panel's badge after a delivery.
-    fn execute_link_request(&mut self, request: LinkRequest, from: &str) -> LinkResponse {
-        let receiver = match &request {
-            LinkRequest::Send { target, .. } => self.link_receiver(target),
-            _ => None,
+    fn execute_link_request(&mut self, request: LinkRequest) -> LinkResponse {
+        let (receiver, sender) = match &request {
+            LinkRequest::Send { target, from, .. } => (self.link_receiver(target), sender_label(from.as_deref())),
+            _ => (None, FALLBACK_SENDER.to_owned()),
         };
         let response = self.board.handle_link_request(request);
         if matches!(response, LinkResponse::Ok(LinkOk::Sent))
@@ -246,8 +264,7 @@ impl HorizonApp {
                 panel_id,
                 LinkBadge {
                     received_at: Instant::now(),
-                    // The sender label may come from a terminal-controlled title.
-                    from: truncate_chars(&strip_escapes(from), BADGE_NAME_CHARS),
+                    from: sender,
                 },
             );
         }
@@ -550,6 +567,7 @@ mod tests {
             target: "a".to_owned(),
             text: text.to_owned(),
             enter: false,
+            from: None,
         })
     }
 
@@ -611,5 +629,83 @@ mod tests {
             batch.push(request);
         }
         assert!(answer_batch(batch, MAX_REQUESTS_PER_FRAME, ok_sent));
+    }
+
+    #[test]
+    fn sender_label_cleans_caps_and_falls_back() {
+        assert_eq!(sender_label(Some("backend")), "backend");
+        assert_eq!(sender_label(Some("a\u{1b}[31mb\u{7}c\n")), "abc");
+        assert_eq!(
+            sender_label(Some("a-very-long-panel-name")).chars().count(),
+            BADGE_NAME_CHARS
+        );
+        assert_eq!(sender_label(Some("  \u{1b}[2J ")), FALLBACK_SENDER);
+        assert_eq!(sender_label(Some("")), FALLBACK_SENDER);
+        assert_eq!(sender_label(None), FALLBACK_SENDER);
+    }
+
+    fn app_with_command_panel() -> (HorizonApp, PanelId) {
+        use horizon_core::{PanelKind, PanelOptions};
+
+        let mut app = crate::app::test_support::test_app();
+        let workspace = app.board.ensure_workspace();
+        let panel = app
+            .board
+            .create_panel(
+                PanelOptions {
+                    name: Some("receiver".to_owned()),
+                    kind: PanelKind::Command,
+                    command: Some("sh".to_owned()),
+                    args: vec!["-c".to_owned(), "exec cat".to_owned()],
+                    ..PanelOptions::default()
+                },
+                workspace,
+            )
+            .expect("panel should spawn");
+        (app, panel)
+    }
+
+    fn send_from(app: &mut HorizonApp, from: Option<&str>) -> LinkResponse {
+        app.execute_link_request(LinkRequest::Send {
+            target: "receiver".to_owned(),
+            text: "hi".to_owned(),
+            enter: false,
+            from: from.map(str::to_owned),
+        })
+    }
+
+    #[test]
+    fn a_delivered_send_badges_the_receiver_with_the_sender_name() {
+        let (mut app, panel) = app_with_command_panel();
+
+        let response = send_from(&mut app, Some("backend"));
+
+        assert_eq!(response, LinkResponse::Ok(LinkOk::Sent));
+        let view = app.link_badge_view(panel).expect("badge");
+        assert_eq!(view.from, "backend");
+    }
+
+    #[test]
+    fn a_send_without_a_sender_badges_the_receiver_as_from_link() {
+        let (mut app, panel) = app_with_command_panel();
+
+        send_from(&mut app, None);
+
+        assert_eq!(app.link_badge_view(panel).expect("badge").from, FALLBACK_SENDER);
+    }
+
+    #[test]
+    fn a_failed_send_leaves_no_badge() {
+        let (mut app, panel) = app_with_command_panel();
+
+        let response = app.execute_link_request(LinkRequest::Send {
+            target: "nobody".to_owned(),
+            text: "hi".to_owned(),
+            enter: false,
+            from: Some("backend".to_owned()),
+        });
+
+        assert!(matches!(response, LinkResponse::Err { .. }));
+        assert!(app.link_badge_view(panel).is_none());
     }
 }
