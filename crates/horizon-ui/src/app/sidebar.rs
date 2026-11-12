@@ -14,7 +14,9 @@ use labels::{LabelInputs, ProfileRef, claude_profile_for};
 use routing::{
     should_focus_workspace_on_row_click, sidebar_workspace_drop_should_dock, sidebar_workspace_insert_dock_side,
 };
-use rows::{GROUP_GAP, GitChipPlacement, HEADER_HEIGHT, RowIcon, SidebarPanelEntry, git_chip_placement};
+use rows::{
+    GROUP_GAP, GitChipPlacement, HEADER_HEIGHT, RowIcon, SidebarPanelEntry, git_chip_placement, request_panel_rename,
+};
 
 use std::collections::HashMap;
 use std::time::Instant;
@@ -62,6 +64,7 @@ struct SidebarActions {
     detach_workspace: Option<WorkspaceId>,
     reattach_workspace: Option<WorkspaceId>,
     close_panel: Option<PanelId>,
+    rename_panel: Option<PanelId>,
     close_all_in_workspace: Option<WorkspaceId>,
     clear_layout: Option<WorkspaceId>,
     arrange_layout: Option<(WorkspaceId, WorkspaceLayout)>,
@@ -671,6 +674,13 @@ impl HorizonApp {
             }
 
             ui.separator();
+            if ui
+                .add(Button::new(egui::RichText::new("Rename\u{2026}").size(12.0).color(theme::FG_SOFT())).frame(false))
+                .clicked()
+            {
+                request_panel_rename(actions, panel_id);
+                ui.close();
+            }
             if (kind.is_agent()
                 || matches!(
                     kind,
@@ -773,6 +783,9 @@ impl HorizonApp {
             self.reattach_workspace(workspace_id);
         }
 
+        if let Some(panel_id) = actions.rename_panel {
+            self.start_panel_rename(panel_id);
+        }
         if let Some(panel_id) = actions.close_panel {
             self.close_panel(panel_id);
             self.panel_screen_rects.remove(&panel_id);

@@ -1,5 +1,7 @@
 use egui::{Align, Color32, CornerRadius, Id, Layout, Margin, Pos2, Rect, Sense, Stroke, StrokeKind, UiBuilder, Vec2};
-use horizon_core::{AttentionSeverity, PanelId, PanelKind, SshConnectionStatus, agent_definition};
+use horizon_core::{
+    AttentionSeverity, MAX_PANEL_NAME_CHARS, PanelId, PanelKind, SshConnectionStatus, agent_definition,
+};
 
 use crate::theme;
 
@@ -888,6 +890,7 @@ pub(super) fn show_inline_rename_editor(
         .font(font)
         .text_color(theme::FG())
         .frame(false)
+        .char_limit(MAX_PANEL_NAME_CHARS)
         .desired_width(rect.width())
         .margin(Margin::ZERO);
     let response = ui.add(edit);

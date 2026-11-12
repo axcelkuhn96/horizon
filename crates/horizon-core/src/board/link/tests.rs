@@ -1054,3 +1054,73 @@ fn deliver_text_closed_panel_errors() {
     );
     assert!(!board.bracketed_paste_enabled(id));
 }
+
+fn listed_names(board: &mut Board) -> Vec<String> {
+    match board.handle_link_request(LinkRequest::List) {
+        LinkResponse::Ok(LinkOk::Panels(panels)) => panels.into_iter().map(|panel| panel.name).collect(),
+        other => panic!("expected panels, got {other:?}"),
+    }
+}
+
+#[test]
+fn link_list_reports_current_custom_name() {
+    let mut board = Board::new();
+    let id = command_panel(&mut board, "spawn name", "exec cat");
+
+    assert!(board.rename_panel(id, "  reviewer  "));
+
+    assert_eq!(listed_names(&mut board), vec!["reviewer".to_owned()]);
+    board.shutdown_terminal_panels();
+}
+
+#[test]
+fn link_resolves_target_by_custom_name() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let file = dir.path().join("in");
+    let mut board = Board::new();
+    let id = command_panel(&mut board, "sink", &sink_script(&file, false));
+    assert!(screen_contains(&mut board, id, "ready"));
+    assert!(board.rename_panel(id, "Reviewer"));
+
+    assert_eq!(
+        send(&mut board, "reviewer", "hi", true),
+        LinkResponse::Ok(LinkOk::sent_to(&panel_local_id(&board, id)))
+    );
+    assert!(file_equals(&file, "hi\r"), "{:?}", std::fs::read(&file));
+    match send(&mut board, "sink", "nope", true) {
+        LinkResponse::Err { code, .. } => assert_eq!(code, LinkErrorCode::NotFound),
+        other => panic!("the spawn name must stop resolving after a rename, got {other:?}"),
+    }
+}
+
+#[test]
+fn link_ambiguous_custom_name_is_typed_error() {
+    let mut board = Board::new();
+    let first = command_panel(&mut board, "one", "exec cat");
+    let second = command_panel(&mut board, "two", "exec cat");
+    assert!(board.rename_panel(first, "worker"));
+    assert!(board.rename_panel(second, "Worker"));
+
+    match send(&mut board, "WORKER", "hi", true) {
+        LinkResponse::Err { code, message } => {
+            assert_eq!(code, LinkErrorCode::Ambiguous);
+            assert!(message.contains(&panel_local_id(&board, first)), "{message}");
+            assert!(message.contains(&panel_local_id(&board, second)), "{message}");
+        }
+        other => panic!("expected an ambiguity error, got {other:?}"),
+    }
+    board.shutdown_terminal_panels();
+}
+
+#[test]
+fn rejected_rename_keeps_the_name_link_reports() {
+    let mut board = Board::new();
+    let id = command_panel(&mut board, "stable", "exec cat");
+
+    assert!(!board.rename_panel(id, "   "));
+    assert!(!board.rename_panel(id, &"x".repeat(81)));
+    assert!(!board.rename_panel(id, "two\nlines"));
+
+    assert_eq!(listed_names(&mut board), vec!["stable".to_owned()]);
+    board.shutdown_terminal_panels();
+}
