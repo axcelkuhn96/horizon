@@ -3,6 +3,41 @@
 Fork pessoal do [peters/horizon](https://github.com/peters/horizon) com melhorias de navegação e UX.
 Patch aditivo sobre o upstream **v0.2.7**.
 
+## [0.5.0] — 2026-11-12
+
+### Claude Hub — contas, uso e sessões
+- **Perfis Claude**: até 4 contas, com presets derivados e `CLAUDE_CONFIG_DIR` por perfil; o resume é ciente da conta (retoma a sessão na conta que a criou).
+- **Launcher `Ctrl+Shift+L`** com conta **Auto** (escolhe a conta com mais cota restante).
+- **Chips de uso**: nome da conta + início do e-mail + % semanal; a janela de 5h fica oculta quando a conta não a tem. **Alertas de cota** a 80% e 90%.
+- **Botão ✳ Claude inline no título do painel**: New / Continue / Resume… no mesmo terminal. **Badge da conta** com anel de cota restante.
+- **Status do agente** via `sessions/<pid>.json` + hooks, e nome da sessão vindo do `ListAgents`.
+- **Sessões recentes por projeto** (incluindo worktrees) com resume em 1 clique.
+
+### Configuração e workspaces
+- **Aba Settings → Claude** e **aba Settings → Workspaces** (sem editar YAML).
+- **Menu do workspace**: Rename / New terminal / Save as template / Delete / Recent sessions / Send to all Claudes.
+- **Prompts salvos** e **preferências de UI persistidas**, com auto-hide do minimapa.
+
+### Sidebar, git e worktrees
+- **Sidebar mais densa** com rótulos úteis; **git + worktrees** na sidebar.
+- **Nova worktree + Claude em 1 clique** e limpeza segura (nunca apaga dados ignorados, submódulos nem worktrees desmontadas; branch só enviada não conta como mergeada).
+
+### Link entre terminais
+- **Socket local** (`HORIZON_SOCKET`) e CLI `horizon link list/send/read/ask/reply`, **broadcast**, skill **horizon-link**, **Send to panel…** e badge.
+
+### UX
+- **Renomear painel** vale em todo lugar (sidebar, link, título); **painel novo** nasce sem sobreposição, em slot livre.
+
+### Correções
+- Rename mantém rótulos inteligentes e rejeita nomes inválidos com aviso visível; loop de pin no rename da sidebar.
+- Shell só é tratado como agente enquanto o `claude` segura o foreground do terminal.
+- Entradas de atenção resolvidas saem do status; histórico de fechados limitado a 64.
+- Quick start: limpa linha digitada pela metade, recusa caracteres inseguros em palavras de comando, hint de reply com aspas simples.
+- Prompts salvos inválidos ou editados à mão são tolerados; edição de YAML preservada ao trocar de aba.
+
+### Notas
+- Dependência nova: `ureq` 3.x com rustls. Protocolo do link v2. Tokens OAuth do Claude são apenas lidos — nunca renovados nem gravados pelo Horizon.
+
 ## [0.4.0] — 2026-08-04
 
 ### Merge do upstream v0.2.7 (peters/horizon)
