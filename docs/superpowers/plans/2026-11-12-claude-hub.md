@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-Repo `/home/axcel/horizon-fork`, branch `feat/claude-hub` (already checked out). One commit per task, imperative scoped message (`feat(core): …`), ending with the attribution line the harness provides. No worktree, no push.
+Repo `/home/axcel/horizon-fork`, branch `feat/claude-hub` (already checked out). One commit per task, imperative scoped message (`feat(core): …`), ending with the attribution line the harness provides. No push. No worktree for sequential execution; parallel groups use one worktree per track as defined in `## Parallel Tracks`.
 
 ### Rulebooks CBS (ler ANTES de agir; primeiro caminho existente vence; ausente → seguir sem ele e anotar `rulebook ausente: <caminho>` no report)
 - Persona dev (todo implementer): `~/.claude/skills/executor-bmad-superpowers/referencia/persona-dev.md`
@@ -28,7 +28,7 @@ Repo `/home/axcel/horizon-fork`, branch `feat/claude-hub` (already checked out).
 3. TDD: `regra-de-negocio` = RED→GREEN com evidência no report; `operacional`/`ui` = validação E2E/screenshot nativo aceita, saída no report.
 4. UI aqui é egui nativo, não web: ler o rulebook frontend só pelos princípios de UX/a11y; não invocar skills web/browser; validação visual = screenshot nativo da janela do Horizon pelo PID (`DISPLAY=:1`, XWayland).
 5. Input externo validado; segredo nunca logado/exibido/gravado; `node ~/.claude/scripts/gate-seguranca.js` antes de DONE em task `review: seguranca` (exit 1 = não está DONE; "gate parcial" = anotar no report).
-6. Branch `feat/claude-hub`; sem worktree; um commit por task.
+6. Branch `feat/claude-hub`; um commit por task; worktree só nos grupos paralelos de `## Parallel Tracks` (merge de volta em `feat/claude-hub`).
 7. Subagent não dispara subagents; devolve só status, commits, 1 linha de teste, preocupações; detalhe no report file. Não narrar: só tool calls até o fim.
 
 ### Validação AGENTS.md (cada task deixa verde antes do commit)
@@ -51,6 +51,63 @@ cargo clippy --workspace --lib --bins --examples --features speech -- -D warning
 
 ---
 
+## Parallel Tracks
+
+Execution may run independent tasks concurrently. Each parallel track runs in its own git worktree (branch `feat/claude-hub-<track>` cut from the current tip of `feat/claude-hub`, own `CARGO_TARGET_DIR` per worktree to avoid build locks) and is merged back into `feat/claude-hub` (`git merge --no-ff`) at the end of its wave; the next wave is cut only after all merges of the previous wave are green (`cargo test --workspace`). Sequential execution of tasks in numeric order remains valid; Task 0 must still run first.
+
+### Shared files and single owners
+
+These files are edited by several tasks as written. In parallel mode each has exactly one owner; every other task must NOT edit it (edits below that the task bodies list for these files are reassigned as stated).
+
+| Shared file | Owner | Rule for the others |
+|---|---|---|
+| `crates/horizon-core/src/lib.rs` | Task 0 | Task 0 adds `pub mod claude_usage;` and `pub mod link;`; tasks 1, 7, 10, 13 do not touch `lib.rs` and expose their API by path (`horizon_core::claude_usage::…`, `horizon_core::link::…`, `horizon_core::config::…`); ignore "Modify `lib.rs`" in those tasks |
+| `crates/horizon-core/src/config.rs` | Wave-1 track A (T1→T2→T3), then T5 (wave 2), then T9 (wave 3) — never two at once | Task 0 adds the `mod claude_profiles; mod workspace_template;` lines; Task 10 does not edit `config.rs` |
+| `crates/horizon-core/src/panel.rs`, `panel/spawn.rs`, `runtime_state.rs` | Track A (T2, T4); later T14 (`spawn.rs` only, wave 2) | no other task |
+| `crates/horizon-ui/src/app/mod.rs` | Task 0 (declares `mod claude_launcher; mod usage_chips; mod link;` and the field `pending_delete_workspace: Option<WorkspaceId>`), T5 (field `claude_launcher`, wave 2), T9 (field `claude_usage`, wave 3), T16 (fields `link_server`, `link_badges`, `send_to_panel`, wave 4) | one per wave; T12 uses the Task 0 field and does not edit `app/mod.rs` |
+| `app/lifecycle.rs` | T9 (wave 3), then T16 (wave 4) | never concurrent |
+| `app/settings/mod.rs` | Task 0 (adds `SettingsTab::{Claude, Workspaces}`, `ALL: [Self; 6]`, labels, dispatch to `claude::show` / `workspaces::show`, and the editor fields `claude_tab`, `workspaces_tab`) | T6 and T11 only fill their own `settings/claude.rs` / `settings/workspaces.rs`; ignore "Modify `settings/mod.rs`" in those tasks |
+| `command_registry.rs`, `app/actions/command_palette.rs`, `app/actions/pickers.rs`, `shortcuts.rs`, `app/shortcuts.rs`, `app/shortcut_inventory.rs`, `app/settings/shortcuts.rs` | T5 only | no other task |
+| `app/actions.rs` (mod declarations) | Task 0 (declares `mod open_template; mod workspace_templates;`) | T11 creates `actions/open_template.rs`, T12 creates `actions/workspace_templates.rs` |
+| `app/root_chrome.rs`, `app/sidebar/toolbar.rs`, `app/settings/general.rs` | T9 only | no other task |
+| `app/sidebar.rs` | T12 only | no other task |
+| `crates/horizon-ui/src/main.rs`, `plugin_install.rs` | T15 only | no other task |
+| `Cargo.toml` / `Cargo.lock` | T8 only | no other task |
+| `app/panels.rs`, `app/panel_chrome.rs` | T16 only | no other task |
+
+### Dependency graph
+
+```
+T0 ─┬─ T1 ─ T2 ─ T3 ─ T4            (track A, sequential: config/panel/runtime_state)
+    ├─ T7 ─ T8                       (track B: claude_usage + Cargo.toml)
+    └─ T13                           (track C: link pure core)
+
+T3 ─ T5 (launcher)          T1 ─ T6 (settings Claude)
+T2 ─ T10 (template core)    T2+T13 ─ T14 (socket server)    T13 ─ T15 (CLI + skill)
+
+T5+T8 ─ T9 (chips)    T3+T10 ─ T11 (settings Workspaces)    T3+T10 ─ T12 (sidebar menu)
+T14 ─ T16 (drain + panel menu + badge)           all ─ T17
+```
+
+### Waves
+
+| Wave | Runs in parallel (one worktree each) | Why they do not collide |
+|---|---|---|
+| 0 | **Task 0** (wiring), on `feat/claude-hub` directly | single task |
+| 1 | **A:** T1→T2→T3→T4 (sequential inside the track) ‖ **B:** T7→T8 ‖ **C:** T13 | A owns config/panel/runtime_state/agent_detect; B owns `claude_usage/` + `Cargo.toml`; C owns `link/` (pure files) |
+| 2 | **T5** ‖ **T6** ‖ **T10** ‖ **T14** ‖ **T15** | T5: shortcuts/config.rs/palette/pickers/app/mod.rs; T6: `settings/claude.rs`; T10: `config/workspace_template.rs`; T14: `link/server.rs`, `panel/spawn.rs`, `board/link.rs`, `terminal.rs`; T15: `main.rs`, `link_cli.rs`, `plugin_install.rs` — disjoint |
+| 3 | **T9** ‖ **T11** ‖ **T12** | T9: config.rs (features), general.rs, root_chrome, toolbar, app/mod.rs, lifecycle; T11: `settings/workspaces.rs`, `actions/open_template.rs`; T12: `sidebar.rs`, `sidebar/workspace_menu.rs`, `actions/workspace_templates.rs` — disjoint |
+| 4 | **T16** | needs app/mod.rs + lifecycle.rs after T9 merged |
+| 5 | **T17** | needs everything; single task |
+
+### Rules for parallel execution
+- Task 0 and the post-merge `cargo test --workspace` after each wave are mandatory gates; a failing merge is fixed on `feat/claude-hub` by a `build-fixer` before the next wave is cut.
+- UI visual tasks in the same wave (T5, T6, T9, T11, T12) each launch their own `target/debug/horizon` from their own worktree with an isolated `HOME`/`--config` and a different PID; screenshot by that exact PID only. Evidence directories are per task, so they do not collide.
+- If a task discovers it needs a file owned by another task of the same wave, it stops and reports `NEEDS_CONTEXT` instead of editing it.
+- A track that finishes early waits for the wave merge; tasks never rebase onto in-flight sibling branches.
+
+---
+
 ## File Structure
 
 | File | Responsibility |
@@ -67,6 +124,20 @@ cargo clippy --workspace --lib --bins --examples --features speech -- -D warning
 | `plugins`: `HorizonHome::claude_plugin_dir()` content | skill `horizon-link/SKILL.md` |
 
 ---
+
+### Task 0: Wiring de módulos e pontos compartilhados (domínio: ; tipo: operacional)
+
+**Files:**
+- Modify: `crates/horizon-core/src/lib.rs`, `crates/horizon-core/src/config.rs` (mod lines only), `crates/horizon-ui/src/app/mod.rs`, `crates/horizon-ui/src/app/actions.rs`, `crates/horizon-ui/src/app/settings/mod.rs`
+- Create (empty or stub): `crates/horizon-core/src/claude_usage/mod.rs`, `link/mod.rs`, `config/claude_profiles.rs`, `config/workspace_template.rs`, `crates/horizon-ui/src/app/{claude_launcher,usage_chips,link}.rs`, `app/settings/{claude,workspaces}.rs`, `app/actions/{open_template,workspace_templates}.rs`
+
+**Interfaces:**
+- Produces: module declarations only (see "Shared files and single owners"); `SettingsTab::{Claude, Workspaces}` (labels "Claude", "Workspaces", `ALL: [Self; 6]`) dispatching to `claude::show(ui: &mut egui::Ui, editor: &mut SettingsEditor)` and `workspaces::show(ui: &mut egui::Ui, editor: &mut SettingsEditor)` (stubs rendering "Coming soon" text, signatures fixed so owners never edit `settings/mod.rs`); editor fields `claude_tab: claude::ClaudeTabState` and `workspaces_tab: workspaces::WorkspacesTabState` (both `#[derive(Default)]`); `HorizonApp.pending_delete_workspace: Option<WorkspaceId>`.
+- Dead-code warnings from not-yet-used stub items: use `#[expect(dead_code, reason = "wired in Task N")]` on each (the owning task deletes the attribute); this is the only allowed suppression.
+
+- [ ] **Step 1:** Add the declarations and stubs above; no behavior change.
+- [ ] **Step 2:** Run Global validation — Expected: all green, identical test count to baseline (`cargo test --workspace` before/after).
+- [ ] **Step 3:** Commit `chore: wire claude-hub module skeleton`.
 
 ### Task 1: Perfis Claude no config (domínio: ; tipo: regra-de-negocio)
 
@@ -442,4 +513,4 @@ cargo clippy --workspace --lib --bins --examples --features speech -- -D warning
 7. **New dependency `ureq` 3.5.2** (crates.io latest stable checked 2026-11-12, MSRV 1.85 ≤ project 1.88): chosen over `reqwest` (pulls tokio full runtime/hyper) and over shelling out to `curl` (would put the token on a command line); `default-features = false` + `rustls` only; justification repeated in the Task 8 commit.
 8. **Config compatibility (S9)** — every new field is `serde(default)` and skipped when empty; no migration; a test per field asserts old YAML loads and round-trips without noise.
 9. **Resume signature changes (Task 4)** — callers of `live_claude_session_ids`/`classify_agent_from_environ` span core and UI; `cargo test --workspace` after the change is the safety net, and the panel's config dir defaults to `~/.claude` so non-profile panels behave as before.
-10. **Scope** — large (17 tasks). If the session runs out, stop after a part boundary (A, C, B, D are independently shippable in that order); `/mapear` was the alternative.
+10. **Scope** — large (18 tasks). If the session runs out, stop after a part boundary (A, C, B, D are independently shippable in that order); `/mapear` was the alternative.

@@ -63,8 +63,9 @@ aliases, tabs and `/usage` by hand.
 
 ## Tasks
 
-See `docs/superpowers/plans/2026-11-12-claude-hub.md` (17 tasks, order A → C → B → D → delivery). Checklist is tracked there.
+See `docs/superpowers/plans/2026-11-12-claude-hub.md` (18 tasks: Task 0 wiring + 1–17; order A → C → B → D → delivery; parallel waves in the plan's `## Parallel Tracks`). Checklist is tracked there.
 
+- [ ] Task 0 — module wiring
 - [ ] Part A — Tasks 1–6
 - [ ] Part C — Tasks 7–9
 - [ ] Part B — Tasks 10–12
