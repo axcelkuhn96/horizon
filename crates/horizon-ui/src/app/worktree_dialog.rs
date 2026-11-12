@@ -111,6 +111,11 @@ impl WorktreeUi {
         }
     }
 
+    /// The new-worktree or the cleanup dialog is on screen.
+    pub(in crate::app) fn dialog_open(&self) -> bool {
+        self.new.is_some() || self.cleanup.is_some()
+    }
+
     /// A job whose result a dialog is waiting for is in flight.
     fn busy(&self) -> bool {
         self.new

@@ -229,10 +229,6 @@ impl SendToPanelState {
     /// Dialog opened from a workspace-level entry: preselects "All Claudes in <workspace>".
     /// The panel it sends from (and leaves out) is the workspace's focused terminal panel,
     /// else its first one. `None` when the workspace has no terminal panel.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "wired by the workspace menu entry \"Send to all Claudes\"")
-    )]
     pub(super) fn open_for_workspace(board: &mut Board, workspace: WorkspaceId) -> Option<Self> {
         let in_workspace = |id: &PanelId| {
             board

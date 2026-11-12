@@ -18,7 +18,7 @@ use horizon_core::link::{
     LinkOk, LinkRequest, LinkResponse, LinkServer, PanelInfo, PendingRequest, resolve_target, socket_path,
     strip_escapes,
 };
-use horizon_core::{PanelId, Waker};
+use horizon_core::{PanelId, Waker, WorkspaceId};
 
 use self::send_dialog::SendToPanelState;
 pub(super) use self::visual::LinkVisual;
@@ -210,11 +210,19 @@ pub(super) struct LinkUiState {
     badges: HashMap<PanelId, LinkBadge>,
     send: Option<SendToPanelState>,
     copied_at: Option<Instant>,
+    /// Titlebar label of the panel each pending ask waits on, keyed `(asker, target)` and built
+    /// once when the ask first shows up, so the title is not formatted every frame.
+    waiting_labels: HashMap<(PanelId, PanelId), String>,
 }
 
 impl LinkUiState {
     pub(super) fn set_server(&mut self, server: Option<LinkServer>) {
         self.server = server;
+    }
+
+    /// The "Send to panel" dialog is on screen.
+    pub(super) fn send_dialog_open(&self) -> bool {
+        self.send.is_some()
     }
 
     fn badge_view(&self, panel_id: PanelId, now: Instant) -> Option<LinkBadgeView> {
@@ -274,6 +282,7 @@ impl HorizonApp {
         self.drain_link_requests(ctx);
         let now = Instant::now();
         self.sweep_link_asks(ctx, now);
+        self.refresh_waiting_labels();
         let wakes = [
             self.hub.link.prune_and_next_wake(now),
             visual::prune_visuals(&mut self.hub.link_visuals, now),
@@ -283,6 +292,23 @@ impl HorizonApp {
         }
         self.render_copied_notice(ctx, now);
         self.render_hub_toasts(ctx);
+    }
+
+    /// Builds the label of every newly pending ask and forgets those of finished ones.
+    fn refresh_waiting_labels(&mut self) {
+        let asks = &self.hub.link_asks;
+        self.hub
+            .link
+            .waiting_labels
+            .retain(|pair, _| asks.pairs().any(|pending| pending == *pair));
+        for pair in asks.pairs() {
+            if !self.hub.link.waiting_labels.contains_key(&pair)
+                && let Some(target) = self.board.panel(pair.1)
+            {
+                let label = sender_label(Some(&target.display_title()));
+                self.hub.link.waiting_labels.insert(pair, label);
+            }
+        }
     }
 
     fn drain_link_requests(&mut self, ctx: &Context) {
@@ -326,9 +352,13 @@ impl HorizonApp {
             return Some(view);
         }
         let target = self.hub.link_asks.waiting_on(panel_id)?;
-        let name = self.board.panel(target)?.display_title();
+        let from = match self.hub.link.waiting_labels.get(&(panel_id, target)) {
+            Some(label) => label.clone(),
+            // Before the first `poll_link` that saw the ask.
+            None => sender_label(Some(&self.board.panel(target)?.display_title())),
+        };
         Some(LinkBadgeView {
-            from: sender_label(Some(&name)),
+            from,
             opacity: 1.0,
             prefix: "asking",
             pending: true,
@@ -360,6 +390,12 @@ impl HorizonApp {
             self.copy_panel_address(ui.ctx(), panel_id);
             ui.close();
         }
+    }
+
+    /// "Send to all Claudes\u{2026}" in the workspace menu: opens the send dialog with the
+    /// workspace's broadcast row selected. Does nothing when the workspace has no terminal.
+    pub(in crate::app) fn open_send_to_workspace(&mut self, workspace: WorkspaceId) {
+        self.hub.link.send = SendToPanelState::open_for_workspace(&mut self.board, workspace);
     }
 
     fn copy_panel_address(&mut self, ctx: &Context, panel_id: PanelId) {

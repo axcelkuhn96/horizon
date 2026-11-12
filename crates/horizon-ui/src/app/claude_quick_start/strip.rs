@@ -219,6 +219,15 @@ fn dismissal(ctx: &Context, layer: egui::LayerId, rect: Rect, esc_free: bool) ->
 }
 
 impl HorizonApp {
+    /// A hub modal, the palette or a link/worktree dialog is open: Esc belongs to it, not to the strip.
+    fn overlay_owns_escape(&self) -> bool {
+        self.hub.claude_launcher.is_some()
+            || self.hub.pending_delete_workspace.is_some()
+            || self.hub.link.send_dialog_open()
+            || self.hub.worktree_ui.dialog_open()
+            || self.command_palette.is_some()
+    }
+
     /// Draws-and-senses the quick-start strip of one panel's titlebar. Returns what to paint, or
     /// `None` when this panel gets no strip (not a local shell, too narrow, hidden).
     pub(in crate::app) fn quick_start_strip(&mut self, ui: &Ui, args: &StripArgs) -> Option<StripView> {
@@ -255,7 +264,7 @@ impl HorizonApp {
         let clicked = event.is_some();
 
         if stage != Stage::Collapsed && event.is_none() {
-            event = dismissal(&ctx, ui.layer_id(), rect, self.hub.claude_launcher.is_none());
+            event = dismissal(&ctx, ui.layer_id(), rect, !self.overlay_owns_escape());
         }
         if let Some(event) = event {
             self.apply_quick_start_event(&ctx, panel_id, stage, event);
