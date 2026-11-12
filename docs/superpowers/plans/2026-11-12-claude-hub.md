@@ -142,8 +142,8 @@ T14 ─ T16 (drain + panel menu + badge)           all ─ T17
 ### Task 1: Perfis Claude no config (domínio: ; tipo: regra-de-negocio)
 
 **Files:**
-- Create: `crates/horizon-core/src/config/claude_profiles.rs`
-- Modify: `crates/horizon-core/src/config.rs` (add `mod claude_profiles;`, re-export, field `claude_profiles` on `Config`, validation call), `crates/horizon-core/src/lib.rs` (re-exports)
+- Fill (file created empty by Task 0): `crates/horizon-core/src/config/claude_profiles.rs`
+- Modify: `crates/horizon-core/src/config.rs` (re-export from the `claude_profiles` module declared by Task 0, field `claude_profiles` on `Config`, validation call); `lib.rs` is Task 0's — expose the API by path `horizon_core::config::…`
 - Test: inline `#[cfg(test)]` in `claude_profiles.rs`
 
 **Interfaces:**
@@ -222,7 +222,7 @@ T14 ─ T16 (drain + panel menu + badge)           all ─ T17
 ### Task 5: Atalho `claude_launcher` + picker (domínio: frontend; tipo: ui)
 
 **Files:**
-- Create: `crates/horizon-ui/src/app/claude_launcher.rs`
+- Fill (stub from Task 0): `crates/horizon-ui/src/app/claude_launcher.rs`
 - Modify: `horizon-core/src/shortcuts.rs` (:254,284 `claude_launcher: ShortcutBinding`, default Ctrl+Shift+L), `config.rs` (ShortcutsConfig :367/396/435/462 + collision test), `horizon-ui/src/app/settings/shortcuts.rs`, `app/shortcut_inventory.rs`, `app/shortcuts.rs`, `app/mod.rs` (state `claude_launcher: Option<ClaudeLauncherState>`), `command_registry.rs` + `app/actions/command_palette.rs` (entry "Claude launcher"), `app/actions/pickers.rs`
 - Test: core shortcut tests mirroring `toggle_scroll_pan` ones; pure-logic tests in `claude_launcher.rs`
 
@@ -244,8 +244,8 @@ T14 ─ T16 (drain + panel menu + badge)           all ─ T17
 ### Task 6: Aba Settings "Claude" (domínio: frontend; tipo: ui)
 
 **Files:**
-- Create: `crates/horizon-ui/src/app/settings/claude.rs`
-- Modify: `app/settings/mod.rs` (`SettingsTab::Claude`, `ALL: [Self; 5]`, label, dispatch), `app/settings/general.rs` untouched
+- Fill (stub from Task 0): `crates/horizon-ui/src/app/settings/claude.rs`
+- No edit to `app/settings/mod.rs` (Task 0 owns tab registration and dispatches to `claude::show(ui, editor)`; this task implements `show` and `ClaudeTabState` in `settings/claude.rs`)
 - Test: pure-logic tests in `claude.rs`
 
 **Interfaces:**
@@ -264,8 +264,8 @@ T14 ─ T16 (drain + panel menu + badge)           all ─ T17
 ### Task 7: Domínio de uso — modelo, credenciais, parser (domínio: integracao; tipo: regra-de-negocio; review: seguranca)
 
 **Files:**
-- Create: `crates/horizon-core/src/claude_usage/{mod.rs,model.rs,credentials.rs}`
-- Modify: `crates/horizon-core/src/lib.rs`
+- Fill (mod.rs stub from Task 0; others new): `crates/horizon-core/src/claude_usage/{mod.rs,model.rs,credentials.rs}`
+- No edit to `lib.rs` (Task 0 declares `pub mod claude_usage;`)
 - Test: inline tests with fixture JSON strings
 
 **Interfaces:**
@@ -313,7 +313,7 @@ T14 ─ T16 (drain + panel menu + badge)           all ─ T17
 ### Task 9: Chips de uso no toolbar (domínio: frontend; tipo: ui)
 
 **Files:**
-- Create: `crates/horizon-ui/src/app/usage_chips.rs`
+- Fill (stub from Task 0): `crates/horizon-ui/src/app/usage_chips.rs`
 - Modify: `config.rs` or a new `config/features.rs` (`FeaturesConfig.claude_usage_bar: bool`, default `true`), `app/settings/general.rs` (toggle), `app/mod.rs` (state: `claude_usage: ClaudeUsageState { poller, snapshot: Vec<ProfileUsage>, loaded_at }`; start poller at boot from effective profiles + load cache; rebuild on config apply), `app/root_chrome.rs` (`ToolbarItem::UsageChips`, width estimation, compact mode, overflow), `app/sidebar/toolbar.rs` (paint), `app/lifecycle.rs` (drain `try_recv` each frame — cheap; repaint only when a new snapshot arrives)
 - Test: pure fns in `usage_chips.rs`; layout tests in `root_chrome.rs` style
 
@@ -336,8 +336,8 @@ T14 ─ T16 (drain + panel menu + badge)           all ─ T17
 ### Task 10: Layout e conversão de templates em `horizon-core` (domínio: ; tipo: regra-de-negocio)
 
 **Files:**
-- Create: `crates/horizon-core/src/config/workspace_template.rs`
-- Modify: `config.rs` (mod + re-export only), `lib.rs`
+- Fill (stub from Task 0): `crates/horizon-core/src/config/workspace_template.rs`
+- No edit to `config.rs` or `lib.rs` (Task 0 declares the `workspace_template` module; API exposed as `horizon_core::config::workspace_template::…`)
 - Test: inline
 
 **Interfaces:**
@@ -358,8 +358,8 @@ T14 ─ T16 (drain + panel menu + badge)           all ─ T17
 ### Task 11: Aba Settings "Workspaces" (domínio: frontend; tipo: ui)
 
 **Files:**
-- Create: `crates/horizon-ui/src/app/settings/workspaces.rs`
-- Modify: `app/settings/mod.rs` (`SettingsTab::Workspaces`, `ALL: [Self; 6]`), `app/settings/presets.rs` untouched; "Open now" action wiring in `app/actions/` (new fn in a new small file, not `sidebar.rs`)
+- Fill (stub from Task 0): `crates/horizon-ui/src/app/settings/workspaces.rs`
+- No edit to `app/settings/mod.rs` (Task 0 registers the tab and dispatches to `workspaces::show(ui, editor)`); "Open now" lives in `app/actions/open_template.rs` (declared by Task 0), not `sidebar.rs`
 - Test: pure logic tests
 
 **Interfaces:**
@@ -400,8 +400,8 @@ T14 ─ T16 (drain + panel menu + badge)           all ─ T17
 ### Task 13: Protocolo, resolução e texto puro do link (domínio: integracao; tipo: regra-de-negocio; review: seguranca)
 
 **Files:**
-- Create: `crates/horizon-core/src/link/{mod.rs,protocol.rs,resolve.rs,text.rs}`
-- Modify: `lib.rs`
+- Fill (mod.rs stub from Task 0; others new): `crates/horizon-core/src/link/{mod.rs,protocol.rs,resolve.rs,text.rs}`
+- No edit to `lib.rs` (Task 0 declares `pub mod link;`)
 - Test: inline
 
 **Interfaces:**
@@ -466,7 +466,7 @@ T14 ─ T16 (drain + panel menu + badge)           all ─ T17
 ### Task 16: Drenagem na UI, menu do painel e badge (domínio: frontend, integracao; tipo: ui; review: seguranca)
 
 **Files:**
-- Create: `crates/horizon-ui/src/app/link.rs`
+- Fill (stub from Task 0): `crates/horizon-ui/src/app/link.rs`
 - Modify: `app/mod.rs` (state `link_server: Option<LinkServer>`, `link_badges: HashMap<PanelId, Instant>`, `send_to_panel: Option<SendToPanelState>`), `app/lifecycle.rs` (start server at boot, set `HORIZON_SOCKET` in the spawn context before panels spawn, drain `try_recv` each frame with a per-frame cap, answer replies; request repaint only when a request was handled), `app/panels.rs:716` `show_panel_context_menu` (two entries; extract new menu code to `app/link.rs`), `app/panel_chrome.rs` (badge, mirror `paint_ssh_status_badge`)
 - Test: pure logic tests
 
