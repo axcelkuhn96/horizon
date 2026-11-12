@@ -1,12 +1,34 @@
 use std::time::{Duration, Instant};
 
-use horizon_core::{DetachedWorkspaceState, RuntimeState};
+use horizon_core::{DetachedWorkspaceState, RuntimeState, UiPrefs};
 
 use super::HorizonApp;
 
 impl HorizonApp {
     pub(super) fn mark_runtime_dirty(&mut self) {
         self.runtime_dirty_since.get_or_insert_with(Instant::now);
+    }
+
+    /// Single entry point for the minimap toggle (shortcut, palette, detached menu).
+    pub(super) fn set_minimap_visible(&mut self, visible: bool) {
+        if replace_if_changed(&mut self.minimap_visible, visible) {
+            self.mark_runtime_dirty();
+        }
+    }
+
+    /// Single entry point for the HUD toggle (shortcut, palette).
+    pub(super) fn set_hud_visible(&mut self, visible: bool) {
+        if replace_if_changed(&mut self.hud_visible, visible) {
+            self.mark_runtime_dirty();
+        }
+    }
+
+    pub(super) fn toggle_minimap(&mut self) {
+        self.set_minimap_visible(!self.minimap_visible);
+    }
+
+    pub(super) fn toggle_hud(&mut self) {
+        self.set_hud_visible(!self.hud_visible);
     }
 
     pub(super) fn flush_runtime_if_dirty(&mut self) {
@@ -34,13 +56,14 @@ impl HorizonApp {
             })
             .collect();
 
-        let runtime_state = RuntimeState::from_board_with_detached_workspaces(
+        let mut runtime_state = RuntimeState::from_board_with_detached_workspaces(
             &self.board,
             self.window_config.clone(),
             self.canvas_view,
             detached_workspaces,
             &self.template_config.effective_claude_profiles(),
         );
+        runtime_state.ui = UiPrefs::from_visibility(self.minimap_visible, self.hud_visible);
         if let Err(error) = self
             .session_store
             .save_runtime_state(&active_session.session_id, &runtime_state)
@@ -72,5 +95,33 @@ impl HorizonApp {
                 }
             }
         });
+    }
+}
+
+/// Stores `new` and reports whether it differs from the current value.
+fn replace_if_changed(current: &mut bool, new: bool) -> bool {
+    let changed = *current != new;
+    *current = new;
+    changed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn toggle_minimap_marks_state_dirty() {
+        let mut visible = true;
+
+        assert!(replace_if_changed(&mut visible, false));
+        assert!(!visible);
+    }
+
+    #[test]
+    fn setting_the_same_visibility_does_not_mark_state_dirty() {
+        let mut visible = true;
+
+        assert!(!replace_if_changed(&mut visible, true));
+        assert!(visible);
     }
 }

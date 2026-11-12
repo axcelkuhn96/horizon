@@ -465,6 +465,7 @@ mod tests {
                 minimap_height: 180.0,
                 minimap_width: 320.0,
                 sidebar_auto_hide: false,
+                minimap_auto_hide: false,
             },
             &board,
         )

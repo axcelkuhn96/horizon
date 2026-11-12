@@ -1,5 +1,6 @@
 //! State owned by the claude-hub features; later tasks add their fields here.
 
+use std::collections::HashMap;
 use std::time::Instant;
 
 use horizon_core::WorkspaceId;
@@ -7,6 +8,7 @@ use horizon_core::WorkspaceId;
 use super::claude_launcher::ClaudeLauncherState;
 use super::hub_ui;
 use super::link::LinkUiState;
+use super::minimap::MinimapAutoHide;
 use super::sidebar::GitSidebarState;
 use super::usage_chips::ClaudeUsageState;
 
@@ -37,6 +39,8 @@ pub(super) struct HubState {
     pub(super) git: GitSidebarState,
     /// Panel-link server, receive badges and the send-to-panel dialog.
     pub(super) link: LinkUiState,
+    /// Reveal state of each auto-hiding minimap overlay (root canvas and detached viewports).
+    pub(super) minimap_auto_hide: HashMap<egui::Id, MinimapAutoHide>,
 }
 
 impl HubState {

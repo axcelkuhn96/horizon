@@ -224,6 +224,8 @@ impl HorizonApp {
         self.pending_detached_reattach.clear();
         self.canvas_view = runtime_state.canvas_view_or_default();
         self.pan_target = None;
+        self.minimap_visible = runtime_state.ui.minimap_visible_or_default();
+        self.hud_visible = runtime_state.ui.hud_visible_or_default();
         self.initial_pan_done = runtime_state.has_persisted_canvas_view();
         self.runtime_dirty_since = None;
         self.git_watchers.clear();

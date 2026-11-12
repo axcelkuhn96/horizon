@@ -508,6 +508,7 @@ pub struct OverlaysConfig {
     pub minimap_height: f32,
     pub minimap_width: f32,
     pub sidebar_auto_hide: bool,
+    pub minimap_auto_hide: bool,
 }
 
 impl Default for OverlaysConfig {
@@ -518,6 +519,7 @@ impl Default for OverlaysConfig {
             minimap_height: 180.0,
             minimap_width: 320.0,
             sidebar_auto_hide: false,
+            minimap_auto_hide: false,
         }
     }
 }

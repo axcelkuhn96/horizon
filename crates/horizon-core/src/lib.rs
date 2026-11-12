@@ -74,7 +74,7 @@ pub use remote_hosts::{
 };
 pub use runtime_state::{
     AgentSessionBinding, AgentSessionCatalog, AgentSessionRecord, DetachedWorkspaceState, PanelState, PanelTemplateRef,
-    RuntimeState, WorkspaceState, WorkspaceTemplateRef, claude_config_dir_for_env, live_claude_session_ids,
+    RuntimeState, UiPrefs, WorkspaceState, WorkspaceTemplateRef, claude_config_dir_for_env, live_claude_session_ids,
     most_recent_unclaimed_session_for, new_local_id,
 };
 pub use search::{PanelSearchResult, SearchMatch, SearchOptions, SearchResults, search_board};
