@@ -7,7 +7,10 @@ mod claude_profiles;
 mod input;
 mod workspace_template;
 
-pub use claude_profiles::{ClaudeProfile, discover_claude_profiles, expand_config_dir, validate_claude_profiles};
+pub use claude_profiles::{
+    CLAUDE_BASE_PRESET_NAME, ClaudeProfile, claude_profile_preset, discover_claude_profiles, expand_config_dir,
+    validate_claude_profiles,
+};
 pub use input::{InputConfig, scroll_should_pan_canvas};
 
 use crate::config_migration::{self, CURRENT_CONFIG_VERSION};
@@ -711,6 +714,14 @@ impl Config {
             .filter_map(|preset| preset.ssh_connection.as_ref())
             .map(normalized_ssh_target)
             .collect();
+
+        if let Some(home) = std::env::var_os("HOME") {
+            for preset in self.derived_claude_presets(Path::new(&home)) {
+                if known_names.insert(preset.name.to_ascii_lowercase()) {
+                    presets.push(preset);
+                }
+            }
+        }
 
         match discover_ssh_hosts(None) {
             Ok(discovered_hosts) => {

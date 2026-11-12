@@ -48,10 +48,10 @@ pub use board::{
     Board, Direction, PanelRect, ShutdownProgress, WorkspaceDockSide, WorkspaceLayout, nearest_in_direction,
 };
 pub use config::{
-    AppearanceConfig, AppearanceTheme, ClaudeProfile, Config, FeaturesConfig, InputConfig, OverlaysConfig,
-    PresetConfig, ShortcutsConfig, SpeechBackend, SpeechConfig, SpeechHotkeyMode, SpeechProfile, SpeechTask,
-    TerminalConfig, WindowConfig, WorkspaceConfig, discover_claude_profiles, expand_config_dir,
-    scroll_should_pan_canvas, validate_claude_profiles,
+    AppearanceConfig, AppearanceTheme, CLAUDE_BASE_PRESET_NAME, ClaudeProfile, Config, FeaturesConfig, InputConfig,
+    OverlaysConfig, PresetConfig, ShortcutsConfig, SpeechBackend, SpeechConfig, SpeechHotkeyMode, SpeechProfile,
+    SpeechTask, TerminalConfig, WindowConfig, WorkspaceConfig, claude_profile_preset, discover_claude_profiles,
+    expand_config_dir, scroll_should_pan_canvas, validate_claude_profiles,
 };
 pub use editor::{MarkdownEditor, PanelContent, PreviewMode};
 pub use error::{Error, Result};
