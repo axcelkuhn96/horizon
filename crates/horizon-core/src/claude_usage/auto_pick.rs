@@ -68,8 +68,9 @@ impl ProfileUsageView {
 
     /// The figures were fetched recently enough to rank on.
     fn is_fresh(&self, now: SystemTime) -> bool {
+        // A fetch time in the future (clock skew) counts as fresh.
         self.fetched_at
-            .is_some_and(|at| now.duration_since(at).map_or(true, |age| age <= FRESH_FOR))
+            .is_some_and(|at| now.duration_since(at).unwrap_or_default() <= FRESH_FOR)
     }
 
     /// Why Auto never picks this profile, if so.
