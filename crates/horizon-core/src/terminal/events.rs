@@ -1,4 +1,8 @@
-use super::{AgentNotification, ColorLookup, Event, HorizonOscTitle, Rgb, TermMode, Terminal, term};
+use super::{
+    AgentNotification, ColorLookup, Event, HorizonOscTitle, MAX_PENDING_STATUS_EVENTS, Rgb, StatusEvent, TermMode,
+    Terminal, term,
+};
+use crate::agent_status::{STATUS_OSC_PREFIX, parse_status_osc};
 
 impl Terminal {
     /// Drain pending PTY events. Returns `true` if any events were processed.
@@ -22,7 +26,16 @@ impl Terminal {
         self.pending_notification.take()
     }
 
+    /// Takes the status events received since the last call, oldest first.
+    pub fn take_status_events(&mut self) -> Vec<StatusEvent> {
+        self.pending_status.drain(..).collect()
+    }
+
     pub(super) fn parse_horizon_title(title: &str) -> Option<HorizonOscTitle> {
+        if title.starts_with(STATUS_OSC_PREFIX) {
+            return Some(parse_status_osc(title).map_or(HorizonOscTitle::Ignore, HorizonOscTitle::Status));
+        }
+
         if let Some(payload) = title.strip_prefix("HORIZON_NOTIFY:") {
             let Some((severity, message)) = payload.split_once(':') else {
                 return Some(HorizonOscTitle::Ignore);
@@ -87,6 +100,12 @@ impl Terminal {
                 }
                 Some(HorizonOscTitle::ClearTitle) => {
                     self.title.clear();
+                }
+                Some(HorizonOscTitle::Status(status)) => {
+                    if self.pending_status.len() >= MAX_PENDING_STATUS_EVENTS {
+                        self.pending_status.pop_front();
+                    }
+                    self.pending_status.push_back(status);
                 }
                 Some(HorizonOscTitle::Ignore) => {}
                 None => {

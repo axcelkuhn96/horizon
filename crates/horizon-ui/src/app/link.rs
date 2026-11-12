@@ -474,6 +474,7 @@ mod tests {
             workspace: "ws".to_owned(),
             kind: "shell".to_owned(),
             is_agent: false,
+            session: None,
         }
     }
 

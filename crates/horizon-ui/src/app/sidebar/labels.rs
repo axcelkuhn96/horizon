@@ -2,7 +2,8 @@
 //! right-aligned hint.
 //!
 //! Label rules (first match wins): the user's own panel name; `Claude · <profile>`
-//! (plain `Claude Code` for the default profile) for Claude panels; the terminal
+//! (plain `Claude Code` for the default profile) for Claude panels, followed by
+//! ` — <session name>` once Claude's session has a name; the terminal
 //! title with the `user@host` prefix stripped and `$HOME` shown as `~`; the kind
 //! name. SSH panels keep `Panel::display_title()` as is (host identity included).
 //! Strings and galleys are built once per change (see [`PanelLabelCache`]),
@@ -47,6 +48,8 @@ pub(super) struct LabelInputs<'a> {
     pub(super) launch_command: Option<&'a str>,
     /// `Panel::display_title()` of an SSH panel (host identity kept); empty for other kinds.
     pub(super) display_title: &'a str,
+    /// Name of the Claude session running in the panel, when it has one.
+    pub(super) session_name: Option<&'a str>,
 }
 
 // ---------------------------------------------------------------------------
@@ -193,9 +196,14 @@ pub(super) fn smart_label(inputs: &LabelInputs<'_>, home: Option<&str>) -> Strin
     if has_user_name(inputs) {
         return inputs.title.trim().to_owned();
     }
+    let session = inputs.session_name.map(str::trim).filter(|name| !name.is_empty());
+    let with_session = |label: String| match session {
+        Some(name) => format!("{label} \u{2014} {name}"),
+        None => label,
+    };
     match inputs.profile {
-        ProfileRef::Named(name) => return format!("Claude \u{b7} {name}"),
-        ProfileRef::Default => return DEFAULT_CLAUDE_LABEL.to_owned(),
+        ProfileRef::Named(name) => return with_session(format!("Claude \u{b7} {name}")),
+        ProfileRef::Default => return with_session(DEFAULT_CLAUDE_LABEL.to_owned()),
         ProfileRef::None => {}
     }
     clean_terminal_title(inputs.terminal_title, home)
@@ -246,6 +254,7 @@ fn effective<'a>(inputs: &LabelInputs<'a>) -> LabelInputs<'a> {
         custom_name: false,
         profile: ProfileRef::None,
         display_title: "",
+        session_name: None,
         ..*inputs
     };
     if ssh_title(inputs).is_some() {
@@ -264,6 +273,7 @@ fn effective<'a>(inputs: &LabelInputs<'a>) -> LabelInputs<'a> {
     if inputs.profile != ProfileRef::None {
         return LabelInputs {
             profile: inputs.profile,
+            session_name: inputs.session_name,
             ..base
         };
     }
@@ -284,6 +294,7 @@ struct StoredInputs {
     profile: Option<Option<String>>,
     launch_command: Option<String>,
     display_title: String,
+    session_name: Option<String>,
 }
 
 impl StoredInputs {
@@ -300,6 +311,7 @@ impl StoredInputs {
             },
             launch_command: inputs.launch_command.map(str::to_owned),
             display_title: inputs.display_title.to_owned(),
+            session_name: inputs.session_name.map(str::to_owned),
         }
     }
 
@@ -317,6 +329,7 @@ impl StoredInputs {
             && self.terminal_title == inputs.terminal_title
             && self.launch_command.as_deref() == inputs.launch_command
             && self.display_title == inputs.display_title
+            && self.session_name.as_deref() == inputs.session_name
     }
 }
 
@@ -486,6 +499,7 @@ mod tests {
             profile: ProfileRef::None,
             launch_command: None,
             display_title: "",
+            session_name: None,
         }
     }
 
@@ -509,6 +523,53 @@ mod tests {
         let mut panel = inputs("Claude", "✳ Task", PanelKind::Claude);
         panel.profile = ProfileRef::Named("claude2");
         assert_eq!(smart_label(&panel, HOME), "Claude \u{b7} claude2");
+    }
+
+    #[test]
+    fn claude_panels_append_the_session_name() {
+        let mut named = inputs("Claude", "", PanelKind::Claude);
+        named.profile = ProfileRef::Named("claude2");
+        named.session_name = Some("expia-11");
+        assert_eq!(smart_label(&named, HOME), "Claude \u{b7} claude2 \u{2014} expia-11");
+
+        let mut default = inputs("Claude", "", PanelKind::Claude);
+        default.profile = ProfileRef::Default;
+        default.session_name = Some("  expia-11 ");
+        assert_eq!(smart_label(&default, HOME), "Claude Code \u{2014} expia-11");
+
+        default.session_name = Some("  ");
+        assert_eq!(smart_label(&default, HOME), "Claude Code");
+    }
+
+    #[test]
+    fn the_session_name_never_reaches_shell_or_custom_named_panels() {
+        let mut shell = inputs("shell", "axcel@box: ~/a", PanelKind::Shell);
+        shell.session_name = Some("expia-11");
+        assert_eq!(smart_label(&shell, HOME), "~/a");
+
+        let mut custom = inputs("Backend", "", PanelKind::Claude);
+        custom.custom_name = true;
+        custom.profile = ProfileRef::Named("claude2");
+        custom.session_name = Some("expia-11");
+        assert_eq!(smart_label(&custom, HOME), "Backend");
+    }
+
+    #[test]
+    fn a_new_session_name_rebuilds_the_label_and_the_same_one_does_not() {
+        let mut cache = PanelLabelCache {
+            env_read: true,
+            ..PanelLabelCache::default()
+        };
+        let mut claude = inputs("Claude", "", PanelKind::Claude);
+        claude.profile = ProfileRef::Named("claude2");
+        let bare = cache.resolve(PanelId(1), &claude, None);
+        assert_eq!(&*bare.label, "Claude \u{b7} claude2");
+
+        claude.session_name = Some("expia-11");
+        let named = cache.resolve(PanelId(1), &claude, None);
+        assert_eq!(&*named.label, "Claude \u{b7} claude2 \u{2014} expia-11");
+        let again = cache.resolve(PanelId(1), &claude, None);
+        assert!(Arc::ptr_eq(&named.label, &again.label));
     }
 
     #[test]

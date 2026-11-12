@@ -7,6 +7,7 @@ use horizon_core::WorkspaceId;
 use horizon_core::claude_usage::AlertTracker;
 use horizon_core::link::AskTable;
 
+use super::agent_status_ui::StatusUi;
 use super::claude_launcher::ClaudeLauncherState;
 use super::claude_quick_start::QuickStartUi;
 use super::hub_toast::HubToasts;
@@ -53,6 +54,8 @@ pub(super) struct HubState {
     pub(super) quick_start: QuickStartUi,
     /// Saved prompts: cached effective list, palette rows and the one-time warnings about prompts skipped at use time.
     pub(super) prompts: PromptsUi,
+    /// Agent status: the Claude found in each panel, its session name and the pending toasts.
+    pub(super) status_ui: StatusUi,
     /// Asks waiting for a reply; their connections are held by the link server.
     pub(super) link_asks: AskTable,
     /// Recent messages drawn as a line between the two panels.

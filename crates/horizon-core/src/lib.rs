@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 pub mod agent_detect;
+pub mod agent_status;
 mod agents;
 mod attention;
 mod board;
@@ -50,7 +51,8 @@ pub use alacritty_terminal::index::Side as TerminalSide;
 pub use alacritty_terminal::selection::SelectionType;
 pub use attention::{AttentionId, AttentionItem, AttentionSeverity, AttentionState};
 pub use board::{
-    Board, Direction, PanelRect, ShutdownProgress, WorkspaceDockSide, WorkspaceLayout, nearest_in_direction,
+    Board, Direction, PanelRect, STATUS_ATTENTION_SOURCE, ShutdownProgress, StatusNotice, WorkspaceDockSide,
+    WorkspaceLayout, nearest_in_direction,
 };
 pub use config::{
     AppearanceConfig, AppearanceTheme, CLAUDE_BASE_PRESET_NAME, ClaudeProfile, Config, EffectivePrompt, FeaturesConfig,

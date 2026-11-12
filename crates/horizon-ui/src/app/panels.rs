@@ -17,8 +17,8 @@ use super::super::usage_widget::UsageDashboardView;
 use super::claude_quick_start::{StripArgs, paint_strip};
 use super::link::LinkBadgeView;
 pub(super) use super::panel_chrome::{
-    MicControl, PanelChrome, QuickStartControl, paint_panel_chrome, panel_kind_icon, panel_title_content_rect,
-    quick_start_strip_right, show_inline_rename_editor,
+    MicControl, PanelChrome, QuickStartControl, agent_chip_rect, paint_panel_chrome, panel_kind_icon,
+    panel_title_content_rect, quick_start_strip_right, show_inline_rename_editor,
 };
 use super::shortcut_inventory::ssh_reconnect_shortcut_conflicts;
 use super::speech::MicState;
@@ -599,6 +599,34 @@ impl HorizonApp {
                     self.board.panel(panel_id).map(|p| p.display_title())
                 };
 
+                // The agent chip (status dot and session name) sits left of the quick-start strip;
+                // collapsed panels keep it (their history meter is not painted, so it moves right).
+                let name_galley = if snapshot.is_renaming {
+                    None
+                } else {
+                    self.hub.status_ui.name_galley(
+                        ui.painter(),
+                        panel_id,
+                        super::agent_status_ui::name_visible(snapshot.canvas_size.x),
+                    )
+                };
+                let agent_chip = if snapshot.is_renaming {
+                    None
+                } else {
+                    self.agent_chip(panel_id, snapshot.canvas_size.x, name_galley)
+                        .map(|chip| {
+                            let rect = agent_chip_rect(
+                                rects.titlebar,
+                                if mic_eligible { rects.mic } else { rects.close },
+                                rects.collapse,
+                                snapshot.scrollback_limit > 0 && !snapshot.collapsed,
+                                quick_start.as_ref().map(|strip| strip.rect),
+                                chip.width(),
+                            );
+                            chip.placed(rect)
+                        })
+                };
+
                 paint_panel_chrome(
                     ui,
                     PanelChrome {
@@ -627,6 +655,7 @@ impl HorizonApp {
                             state: mic.state,
                         }),
                         quick_start: quick_start.as_ref().map(|strip| QuickStartControl { rect: strip.rect }),
+                        agent: agent_chip.as_ref(),
                     },
                 );
 
@@ -636,6 +665,7 @@ impl HorizonApp {
 
                 // Release the shared board borrow before the mutable borrow below.
                 drop(display_title);
+                drop(agent_chip);
 
                 if snapshot.is_renaming {
                     outcome.rename_action = show_inline_rename_editor(

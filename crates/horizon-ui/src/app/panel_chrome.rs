@@ -1,9 +1,10 @@
-use egui::{Align, Color32, CornerRadius, Id, Layout, Margin, Pos2, Rect, Stroke, StrokeKind, UiBuilder, Vec2};
+use egui::{Align, Color32, CornerRadius, Id, Layout, Margin, Pos2, Rect, Sense, Stroke, StrokeKind, UiBuilder, Vec2};
 use horizon_core::{AttentionSeverity, PanelId, PanelKind, SshConnectionStatus, agent_definition};
 
 use crate::theme;
 
 use super::RenameEditAction;
+use super::agent_status_ui::{AgentChip, status_label};
 use super::claude_quick_start::titlebar::{self as quick_start, STRIP_GAP};
 use super::link::{LinkBadgeView, paint_link_badge};
 use super::speech::MicState;
@@ -35,6 +36,8 @@ pub(super) struct PanelChrome<'a> {
     pub mic: Option<MicControl>,
     /// Claude quick-start strip on local shell panels.
     pub quick_start: Option<QuickStartControl>,
+    /// Status dot and session name of the agent in this panel, already placed in the titlebar.
+    pub agent: Option<&'a AgentChip<'a>>,
 }
 
 #[derive(Clone, Copy)]
@@ -63,11 +66,15 @@ impl PanelChrome<'_> {
         self.mic.map_or(self.close_rect, |mic| mic.rect)
     }
 
-    /// Where the badges stack from: the controls anchor, moved left of the quick-start strip.
+    /// Titlebar width taken left of the history meter by the quick-start strip and the agent chip.
+    fn right_slots(&self) -> f32 {
+        self.quick_start.map_or(0.0, QuickStartControl::slot) + self.agent.map_or(0.0, AgentChip::slot)
+    }
+
+    /// Where the badges stack from: the controls anchor, moved left of the quick-start strip and
+    /// the agent chip.
     fn badge_anchor(&self) -> Rect {
-        let anchor = self.controls_anchor();
-        self.quick_start
-            .map_or(anchor, |strip| anchor.translate(Vec2::new(-strip.slot(), 0.0)))
+        self.controls_anchor().translate(Vec2::new(-self.right_slots(), 0.0))
     }
 }
 
@@ -245,6 +252,12 @@ pub(super) fn paint_panel_chrome(ui: &mut egui::Ui, chrome: PanelChrome<'_>) {
             ],
             Stroke::new(1.0_f32, theme::alpha(theme::BORDER_STRONG(), 120)),
         );
+    }
+
+    // The agent chip stays on collapsed panels: a hidden Claude that waits for the user must
+    // still show it.
+    if let Some(chip) = chrome.agent {
+        paint_agent_chip(ui, &painter, chrome.panel_id, chip, chrome.focused);
     }
 
     // Collapsed panels are titlebar-only: skip the badges/history meter that
@@ -451,6 +464,46 @@ fn paint_close_and_resize_controls(
     );
 }
 
+/// Rect of the agent chip in the titlebar: it ends one gap left of the quick-start strip, or
+/// where the strip would end when the panel has none.
+pub(super) fn agent_chip_rect(
+    titlebar_rect: Rect,
+    controls: Rect,
+    collapse: Rect,
+    has_history_meter: bool,
+    strip: Option<Rect>,
+    width: f32,
+) -> Rect {
+    let right = strip.map_or_else(
+        || quick_start_strip_right(titlebar_rect, controls, collapse, has_history_meter),
+        |strip| strip.min.x - STRIP_GAP,
+    );
+    Rect::from_min_size(
+        Pos2::new(right - width, titlebar_rect.center().y - AgentChip::height() * 0.5),
+        Vec2::new(width, AgentChip::height()),
+    )
+}
+
+/// Paints the agent chip and gives it a hover-only tooltip (status, session name, id, account).
+fn paint_agent_chip(
+    ui: &mut egui::Ui,
+    painter: &egui::Painter,
+    panel_id: PanelId,
+    chip: &AgentChip<'_>,
+    focused: bool,
+) {
+    chip.paint(painter, focused);
+    let response = ui.interact(
+        chip.rect,
+        ui.make_persistent_id(("panel_agent_chip", panel_id.0)),
+        Sense::hover(),
+    );
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, status_label(chip.status)));
+    response.on_hover_ui(|ui| {
+        ui.label(chip.tooltip());
+    });
+}
+
 /// Compute the right x boundary where the title text must stop, accounting
 /// for all badges (history meter, SSH status, attention) that sit to its right.
 fn title_right_boundary(chrome: &PanelChrome<'_>) -> f32 {
@@ -473,11 +526,9 @@ fn title_right_boundary(chrome: &PanelChrome<'_>) -> f32 {
         // Link badge sits left of the status badges; reserve ~120px.
         right -= 120.0;
     }
-    if let Some(strip) = chrome.quick_start {
-        // The quick-start strip sits left of the history meter and the badges stack left of it.
-        right -= strip.slot();
-    }
-    right
+    // The quick-start strip and the agent chip sit left of the history meter; the badges stack
+    // left of them.
+    right - chrome.right_slots()
 }
 
 /// Gap between stacked titlebar badges.

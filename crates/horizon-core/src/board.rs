@@ -1,3 +1,4 @@
+mod agent_status;
 mod arrangement;
 mod attention;
 mod geometry;
@@ -6,6 +7,7 @@ mod navigation;
 mod shutdown;
 mod workspaces;
 
+pub use agent_status::{STATUS_ATTENTION_SOURCE, StatusNotice};
 pub use navigation::{Direction, PanelRect, nearest_in_direction};
 pub use shutdown::ShutdownProgress;
 
@@ -96,6 +98,11 @@ pub struct Board {
     next_workspace_id: u64,
     next_attention_id: u64,
     link_socket: Option<PathBuf>,
+    /// Status changes that want a toast; drained by the interface.
+    status_notices: Vec<StatusNotice>,
+    /// Whether any Horizon window has the OS focus; a focused panel in an unfocused window is
+    /// not being looked at (agent status notifications).
+    window_focused: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -121,7 +128,14 @@ impl Board {
             next_workspace_id: 1,
             next_attention_id: 1,
             link_socket: None,
+            status_notices: Vec::new(),
+            window_focused: true,
         }
+    }
+
+    /// Tells the board whether any Horizon window has the OS focus (default `true`).
+    pub fn set_window_focused(&mut self, focused: bool) {
+        self.window_focused = focused;
     }
 
     /// Build a board from a YAML config.
@@ -337,6 +351,7 @@ impl Board {
             output.had_terminal_output |= panel_output.had_output;
             output.cwd_changed |= panel_output.cwd_changed;
         }
+        self.process_agent_status();
         // Only run attention detection when terminals actually produced new
         // output.  The expensive path — `detect_attention()` — locks the
         // terminal mutex and iterates the full display, so skipping it on

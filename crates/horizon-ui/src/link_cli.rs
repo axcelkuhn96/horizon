@@ -295,7 +295,7 @@ fn output_safe(text: &str) -> String {
 }
 
 fn format_panels(panels: &[PanelInfo]) -> String {
-    let rows: Vec<[String; 5]> = panels
+    let rows: Vec<[String; 6]> = panels
         .iter()
         .map(|panel| {
             [
@@ -303,12 +303,13 @@ fn format_panels(panels: &[PanelInfo]) -> String {
                 terminal_safe(&panel.name),
                 terminal_safe(&panel.workspace),
                 terminal_safe(&panel.kind),
+                panel.session.as_deref().map_or_else(|| "-".to_owned(), terminal_safe),
                 (if panel.is_agent { "yes" } else { "no" }).to_owned(),
             ]
         })
         .collect();
-    let header = ["ID", "NAME", "WORKSPACE", "KIND", "AGENT"].map(str::to_owned);
-    let mut widths = [0usize; 5];
+    let header = ["ID", "NAME", "WORKSPACE", "KIND", "SESSION", "AGENT"].map(str::to_owned);
+    let mut widths = [0usize; 6];
     for row in std::iter::once(&header).chain(rows.iter()) {
         for (width, cell) in widths.iter_mut().zip(row) {
             *width = (*width).max(cell.chars().count());
@@ -697,6 +698,7 @@ mod tests {
                 workspace: "api".to_owned(),
                 kind: "claude".to_owned(),
                 is_agent: true,
+                session: Some("expia-11".to_owned()),
             },
             PanelInfo {
                 id: "12".to_owned(),
@@ -704,6 +706,7 @@ mod tests {
                 workspace: "w".to_owned(),
                 kind: "shell".to_owned(),
                 is_agent: false,
+                session: None,
             },
         ];
         let table = format_panels(&panels);
@@ -720,6 +723,13 @@ mod tests {
         assert_eq!(column(lines[1]), column(lines[2]));
         assert!(lines[1].ends_with("yes"));
         assert!(lines[2].ends_with("no"));
+        assert!(lines[0].contains("SESSION"));
+        assert!(lines[1].contains("expia-11"));
+        assert!(
+            lines[2].contains(" -  "),
+            "a panel without a session shows a dash: {}",
+            lines[2]
+        );
     }
 
     #[test]

@@ -302,6 +302,7 @@ impl HorizonApp {
                     profile,
                     launch_command: panel.launch_command.as_deref(),
                     display_title: ssh_title.as_deref().unwrap_or(""),
+                    session_name: panel.agent_session_name(),
                 };
                 let (icon, seven_day) = match profile {
                     ProfileRef::Named(name) => (

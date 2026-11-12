@@ -9,6 +9,7 @@ mod editor_widget;
 mod file_search_widget;
 mod file_tree_widget;
 mod git_changes_widget;
+mod hook_cli;
 mod image_paste;
 mod input;
 mod link_cli;
@@ -41,6 +42,9 @@ fn main() -> std::process::ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if let Some((_, link_args)) = args.split_first().filter(|(first, _)| first.as_str() == "link") {
         return link_cli::run(link_args);
+    }
+    if let Some((_, hook_args)) = args.split_first().filter(|(first, _)| first.as_str() == "hook") {
+        return hook_cli::run(hook_args);
     }
 
     match run_gui() {

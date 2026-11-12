@@ -35,6 +35,10 @@ back into large multi-purpose modules.
     templates
   - `panel/env.rs`: the single place that builds the `HORIZON_*` /
     `CLAUDE_CONFIG_DIR` environment for panel children
+  - `agent_status/` and `board/agent_status.rs`: per-panel agent status state
+    machine, the `HORIZON_STATUS` OSC parser, the reader of Claude's
+    `sessions/<pid>.json` (never the `.key` files) and the attention/toast
+    notices the board raises on a status change
 - If a UI feature needs to reconstruct runtime state, sync template-backed
   workspace metadata, or format panel/workspace domain labels, prefer adding a
   core API instead of rebuilding that logic in `horizon-ui`.
@@ -54,6 +58,8 @@ back into large multi-purpose modules.
   - `hub_ui`: shared paint primitives (pills, mini bars, swatches, key badges,
     modal frame) used by chips, launcher, settings tabs and sidebar menus
   - `lifecycle`: frame orchestration, shutdown flow, and repaint pacing
+  - `agent_status_ui/`: status dot, titlebar session chip, and the throttled
+    per-panel Claude process / session-file cache (`StatusUi`)
   - `panel_chrome`: panel titlebar chrome, badges, context menus, and rename UI
   - `panels`: panel-area orchestration and body rendering
   - `remote_hosts_overlay`: overlay state/input shell with query/filter,

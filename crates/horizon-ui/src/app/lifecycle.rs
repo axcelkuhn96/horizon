@@ -356,6 +356,12 @@ impl HorizonApp {
 
     #[profiling::function]
     pub(super) fn process_frame_inputs(&mut self, ctx: &Context) -> bool {
+        // A focused panel counts as looked at only while a Horizon window has the OS focus.
+        // `any_viewport_focused` still holds last frame's aggregate here (the root viewport
+        // re-seeds it below), which covers a panel living in a detached window.
+        let root_has_focus = ctx.input(|input| input.viewport().focused.unwrap_or(true));
+        self.board
+            .set_window_focused(root_has_focus || self.any_viewport_focused);
         self.sync_panel_focus_from_pointer_press(ctx);
         // Speech runs before the fullscreen handler so that Escape cancels an
         // active recording instead of also exiting panel fullscreen.
@@ -379,6 +385,7 @@ impl HorizonApp {
         self.poll_worktree_events(ctx);
         self.poll_config_reload();
         self.poll_claude_usage(ctx);
+        self.poll_agent_status();
         self.poll_update_check();
         self.maybe_start_update_check();
 

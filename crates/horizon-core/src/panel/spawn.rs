@@ -150,6 +150,7 @@ impl StaticPanelSeed {
             env: BTreeMap::new(),
             link_socket: None,
             expanded_height: None,
+            agent_status: crate::agent_status::AgentStatusState::default(),
         }
     }
 }
@@ -594,6 +595,7 @@ fn build_terminal_panel(
         env,
         link_socket,
         expanded_height: None,
+        agent_status: crate::agent_status::AgentStatusState::default(),
     }
 }
 

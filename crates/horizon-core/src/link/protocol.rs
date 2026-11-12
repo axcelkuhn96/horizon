@@ -126,6 +126,10 @@ pub struct PanelInfo {
     pub workspace: String,
     pub kind: String,
     pub is_agent: bool,
+    /// Name of the Claude session running in the panel, when it has one. Optional on the wire
+    /// (absent from older servers and clients), so protocol v2 stays compatible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -421,6 +425,7 @@ mod tests {
             workspace: "w".to_owned(),
             kind: "claude".to_owned(),
             is_agent: true,
+            session: Some("expia-11".to_owned()),
         };
         let responses = [
             LinkResponse::Ok(LinkOk::Panels(vec![panel])),
@@ -449,6 +454,22 @@ mod tests {
             json,
             r#"{"status":"ok","kind":"sent","data":{"delivered":["7"],"skipped":[]}}"#
         );
+    }
+
+    #[test]
+    fn panel_info_session_is_optional_on_the_wire() {
+        let old = r#"{"id":"7","name":"n","workspace":"w","kind":"shell","is_agent":false}"#;
+        let parsed: PanelInfo = serde_json::from_str(old).unwrap();
+        assert_eq!(parsed.session, None);
+        assert_eq!(serde_json::to_string(&parsed).unwrap(), old, "no session, no field");
+
+        let named = PanelInfo {
+            session: Some("expia-11".to_owned()),
+            ..parsed
+        };
+        let json = serde_json::to_string(&named).unwrap();
+        assert!(json.ends_with(r#""session":"expia-11"}"#), "{json}");
+        assert_eq!(serde_json::from_str::<PanelInfo>(&json).unwrap(), named);
     }
 
     #[test]
