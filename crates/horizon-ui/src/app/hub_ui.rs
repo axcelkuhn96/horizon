@@ -16,9 +16,11 @@
 
 #![expect(dead_code, reason = "used by claude-hub UI tasks")]
 
+use std::sync::Arc;
+
 use egui::{
-    Align2, Color32, CornerRadius, FontId, Frame, Key, Margin, Modifiers, Painter, Pos2, Rect, Response, Sense, Stroke,
-    StrokeKind, Ui, Vec2, WidgetInfo, WidgetType,
+    Align2, Color32, CornerRadius, FontId, Frame, Galley, Key, Margin, Modifiers, Painter, Pos2, Rect, Response, Sense,
+    Stroke, StrokeKind, Ui, Vec2, WidgetInfo, WidgetType,
 };
 
 use crate::theme;
@@ -34,6 +36,14 @@ const BAR_MIN_FILL_WIDTH: f32 = 2.0;
 
 const WARNING_PCT: f32 = 75.0;
 const CRITICAL_PCT: f32 = 90.0;
+
+/// One-line galley truncated with an ellipsis at `max_width`. Laid out with
+/// `Color32::PLACEHOLDER`: the paint call supplies the (theme) colour.
+pub(crate) fn elided(painter: &Painter, text: &str, font: FontId, max_width: f32) -> Arc<Galley> {
+    let mut job = egui::text::LayoutJob::simple_singleline(text.to_owned(), font, Color32::PLACEHOLDER);
+    job.wrap = egui::text::TextWrapping::truncate_at_width(max_width.max(1.0));
+    painter.layout_job(job)
+}
 
 // ---------------------------------------------------------------------------
 // Profile accents

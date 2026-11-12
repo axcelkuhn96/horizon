@@ -123,7 +123,10 @@ fn render_features_section(
                 egui::RichText::new("Claude usage bar").color(theme::FG()).size(12.0),
             )
             .changed();
-        super::dim_label(ui, "Show each Claude profile's 5h / 7d usage as chips in the toolbar.");
+        super::dim_label(
+            ui,
+            "Show each Claude profile's 5h / 7d usage as chips in the toolbar. Usage is still fetched for the Claude launcher when this is off.",
+        );
 
         ui.add_space(10.0);
         changed |= super::speech::render(ui, config, model_info_cache);

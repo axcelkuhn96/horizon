@@ -112,6 +112,9 @@ impl HorizonApp {
         if let Some(profile) = output.launch {
             self.launch_claude_profile(ui.ctx(), &profile);
         }
+        if output.wants_tokens {
+            self.hub.usage.start_tokens_poll();
+        }
         if output.refresh {
             self.hub.usage.request_refresh();
             ui.ctx().request_repaint();

@@ -12,11 +12,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use egui::{Context, FontId, Galley, Id, LayerId, Order, Painter};
+use egui::{Color32, Context, FontId, Galley, Id, LayerId, Order, Painter};
 use horizon_core::claude_usage::{
     ProfileUsage, UsagePoller, UsageState, UsageWindow, parse_rfc3339_unix, used_percent_label,
 };
-use horizon_core::{ClaudeProfile, HorizonHome};
+use horizon_core::{ClaudeProfile, HorizonHome, UsageDashboard, format_tokens};
 
 use super::HorizonApp;
 use super::hub_state::HubState;
@@ -50,8 +50,10 @@ const BAR_WIDTH_FULL: f32 = 28.0;
 const BAR_WIDTH_COMPACT: f32 = 20.0;
 const GROUP_WIDTH_FULL: f32 = LABEL_WIDTH + LABEL_GAP + BAR_WIDTH_FULL + LABEL_GAP + PCT_WIDTH;
 const GROUP_WIDTH_COMPACT: f32 = LABEL_WIDTH + LABEL_GAP + BAR_WIDTH_COMPACT + LABEL_GAP + PCT_WIDTH;
-/// Width assumed per chip before the real text has been measured.
+/// Per-chip widths used by layout tests (no font measurement available there).
+#[cfg(test)]
 const CHIP_FULL_ESTIMATE: f32 = 300.0;
+#[cfg(test)]
 const CHIP_COMPACT_ESTIMATE: f32 = 185.0;
 
 // ---------------------------------------------------------------------------
@@ -96,10 +98,11 @@ pub(super) fn account_id(email: Option<&str>, max_chars: usize) -> Option<String
     Some(cut)
 }
 
-fn window_text(window: &UsageWindow) -> String {
-    match window.percent {
-        Some(_) => format!("{}%", used_percent_label(window)),
-        None => "\u{2014}".to_owned(),
+/// `42%`, or `—` when the window (or the whole profile) has no value yet.
+fn window_text(window: Option<&UsageWindow>) -> String {
+    match window {
+        Some(window) if window.percent.is_some() => format!("{}%", used_percent_label(window)),
+        _ => "\u{2014}".to_owned(),
     }
 }
 
@@ -123,12 +126,12 @@ fn chip_label_parts(name: &str, usage: Option<&ProfileUsage>, compact: bool) -> 
             let seven = match u.state {
                 UsageState::Expired => "expired".to_owned(),
                 UsageState::Missing => "no login".to_owned(),
-                UsageState::Ok | UsageState::Stale => format!("7d {}", window_text(&u.seven_day)),
+                UsageState::Ok | UsageState::Stale => format!("7d {}", window_text(Some(&u.seven_day))),
             };
             if compact {
                 seven
             } else {
-                format!("5h {}  {seven}", window_text(&u.five_hour))
+                format!("5h {}  {seven}", window_text(Some(&u.five_hour)))
             }
         }
     };
@@ -182,21 +185,6 @@ fn count_as_f32(count: usize) -> f32 {
     f32::from(u16::try_from(count).unwrap_or(u16::MAX))
 }
 
-/// Estimated width of `count` chips side by side (gaps included) before the
-/// real text widths are known.
-#[must_use]
-pub(super) fn chips_width(count: usize, compact: bool) -> f32 {
-    if count == 0 {
-        return 0.0;
-    }
-    let each = if compact {
-        CHIP_COMPACT_ESTIMATE
-    } else {
-        CHIP_FULL_ESTIMATE
-    };
-    count_as_f32(count) * each + count_as_f32(count - 1) * CHIP_GAP
-}
-
 /// Full chip: dot, name, id, 5h group and 7d group (or a status pill in place of 7d).
 #[must_use]
 fn full_chip_width(name_w: f32, id_w: f32, pill_w: Option<f32>) -> f32 {
@@ -233,12 +221,14 @@ static NO_CHIPS: ChipWidths = ChipWidths {
 
 impl ChipWidths {
     /// No chips at all.
+    #[cfg(test)]
     #[must_use]
     pub(super) fn none() -> Self {
         Self::default()
     }
 
-    /// `count` chips at the pre-measurement estimate.
+    /// `count` chips at a fixed width.
+    #[cfg(test)]
     #[must_use]
     pub(super) fn estimated(count: usize) -> Self {
         Self {
@@ -365,6 +355,12 @@ pub(super) struct ChipLayout {
     id_full: Option<Arc<Galley>>,
     id_compact: Option<Arc<Galley>>,
     pill_width: Option<f32>,
+    /// `5h` / `7d` captions and their percentages, laid out with
+    /// `Color32::PLACEHOLDER`; the paint call supplies the colour.
+    label_five: Arc<Galley>,
+    label_seven: Arc<Galley>,
+    pct_five: Arc<Galley>,
+    pct_seven: Arc<Galley>,
     pub(super) accent_slot: usize,
 }
 
@@ -380,6 +376,15 @@ impl ChipLayout {
             self.id_full.as_ref()
         }
     }
+
+    /// Caption and percentage galleys of the 5h or 7d window.
+    fn window(&self, five_hour: bool) -> (&Arc<Galley>, &Arc<Galley>) {
+        if five_hour {
+            (&self.label_five, &self.pct_five)
+        } else {
+            (&self.label_seven, &self.pct_seven)
+        }
+    }
 }
 
 /// Galleys and widths of every chip. Rebuilt only when the snapshot, the
@@ -391,14 +396,15 @@ pub(super) struct UsageChipsCache {
     pub(super) chips: Vec<ChipLayout>,
 }
 
-fn elided(painter: &Painter, text: &str, font: FontId, max_width: f32) -> Arc<Galley> {
-    let mut job = egui::text::LayoutJob::simple_singleline(text.to_owned(), font, egui::Color32::PLACEHOLDER);
-    job.wrap = egui::text::TextWrapping::truncate_at_width(max_width.max(1.0));
-    painter.layout_job(job)
+fn id_galley(painter: &Painter, id: Option<&str>) -> Option<Arc<Galley>> {
+    id.map(|id| hub_ui::elided(painter, &format!(" \u{b7} {id}"), FontId::proportional(10.5), 120.0))
 }
 
-fn id_galley(painter: &Painter, id: Option<&str>) -> Option<Arc<Galley>> {
-    id.map(|id| elided(painter, &format!(" \u{b7} {id}"), FontId::proportional(10.5), 120.0))
+fn window_galleys(painter: &Painter, caption: &str, window: Option<&UsageWindow>) -> (Arc<Galley>, Arc<Galley>) {
+    (
+        painter.layout_no_wrap(caption.to_owned(), FontId::proportional(8.5), Color32::PLACEHOLDER),
+        painter.layout_no_wrap(window_text(window), FontId::monospace(10.5), Color32::PLACEHOLDER),
+    )
 }
 
 fn build_cache(painter: &Painter, entries: &[ChipEntry], slots: &[usize], key: (u64, u32)) -> UsageChipsCache {
@@ -408,8 +414,8 @@ fn build_cache(painter: &Painter, entries: &[ChipEntry], slots: &[usize], key: (
     };
     for (index, entry) in entries.iter().enumerate() {
         let name_font = FontId::proportional(11.5);
-        let name_full = elided(painter, &entry.name, name_font.clone(), NAME_MAX_FULL);
-        let name_compact = elided(painter, &entry.name, name_font, NAME_MAX_COMPACT);
+        let name_full = hub_ui::elided(painter, &entry.name, name_font.clone(), NAME_MAX_FULL);
+        let name_compact = hub_ui::elided(painter, &entry.name, name_font, NAME_MAX_COMPACT);
         let id_full = id_galley(painter, entry.id(false));
         let id_compact = id_galley(painter, entry.id(true));
         let pill_width = entry.pill_text().map(|text| hub_ui::pill_width(painter, text));
@@ -423,12 +429,19 @@ fn build_cache(painter: &Painter, entries: &[ChipEntry], slots: &[usize], key: (
             width_of(&id_compact),
             pill_width,
         ));
+        let usage = entry.usage.as_ref();
+        let (label_five, pct_five) = window_galleys(painter, "5h", usage.map(|u| &u.five_hour));
+        let (label_seven, pct_seven) = window_galleys(painter, "7d", usage.map(|u| &u.seven_day));
         cache.chips.push(ChipLayout {
             name_full,
             name_compact,
             id_full,
             id_compact,
             pill_width,
+            label_five,
+            label_seven,
+            pct_five,
+            pct_seven,
             accent_slot: slots.get(index).copied().unwrap_or(0),
         });
     }
@@ -445,11 +458,14 @@ pub(super) struct ClaudeUsageState {
     entries: Vec<ChipEntry>,
     /// Bumped whenever `entries` change; keys the layout cache.
     version: u64,
-    loaded_at: Option<Instant>,
     /// Set by a manual refresh or a profile change until fresh data arrives.
     refresh_started: Option<(Instant, i64)>,
     /// `HubState::rows_version` the profile list was last synced against.
     synced_rows_version: Option<u64>,
+    /// Stats poll behind the "Tokens today" tooltip line; started by the first hover.
+    tokens_poll: Option<UsageDashboard>,
+    /// Claude tokens used today across all accounts, formatted on arrival.
+    tokens_today: Option<String>,
     pub(super) cache: UsageChipsCache,
 }
 
@@ -479,16 +495,12 @@ impl ClaudeUsageState {
 
     /// Takes a finished snapshot from the poller.
     fn apply_snapshot(&mut self, snapshot: Vec<ProfileUsage>) {
-        // Fresh data (fetched after the refresh began) ends the refreshing state.
         if let Some((_, started_ms)) = self.refresh_started
-            && snapshot
-                .iter()
-                .any(|usage| usage.fetched_at_ms.is_some_and(|at| at >= started_ms))
+            && refresh_answered(&snapshot, started_ms)
         {
             self.refresh_started = None;
         }
         self.snapshot = snapshot;
-        self.loaded_at = Some(Instant::now());
         self.rebuild_entries();
     }
 
@@ -514,6 +526,38 @@ impl ClaudeUsageState {
         self.entries.iter().find(|entry| entry.name == name)?.summary.as_deref()
     }
 
+    /// Starts the stats poll for the "Tokens today" line (once).
+    pub(super) fn start_tokens_poll(&mut self) {
+        if self.tokens_poll.is_none() {
+            self.tokens_poll = Some(UsageDashboard::new());
+        }
+    }
+
+    /// Takes a finished stats snapshot; returns whether one arrived.
+    fn poll_tokens(&mut self) -> bool {
+        let Some(dashboard) = self.tokens_poll.as_mut() else {
+            return false;
+        };
+        if !dashboard.poll() {
+            return false;
+        }
+        let tokens = dashboard.snapshot.as_ref().map(|snapshot| snapshot.claude.today_tokens);
+        if let Some(tokens) = tokens {
+            self.set_tokens_today(tokens);
+        }
+        true
+    }
+
+    fn set_tokens_today(&mut self, tokens: u64) {
+        self.tokens_today = Some(format_tokens(tokens));
+    }
+
+    /// `1.2M`-style tokens used today by all Claude accounts, once known.
+    #[must_use]
+    pub(super) fn tokens_today(&self) -> Option<&str> {
+        self.tokens_today.as_deref()
+    }
+
     /// A refresh was requested and has not produced fresh data (or timed out).
     #[must_use]
     pub(super) fn is_refreshing(&self, now: Instant) -> bool {
@@ -535,6 +579,16 @@ impl ClaudeUsageState {
     pub(super) fn chip_widths(&self, enabled: bool) -> &ChipWidths {
         if enabled { &self.cache.widths } else { &NO_CHIPS }
     }
+}
+
+/// Whether `snapshot` answers a refresh that began at `started_ms`: some profile
+/// was fetched since, or none can be (every profile is expired, missing or
+/// failed, so no `fetched_at_ms` will ever advance).
+fn refresh_answered(snapshot: &[ProfileUsage], started_ms: i64) -> bool {
+    snapshot
+        .iter()
+        .any(|usage| usage.fetched_at_ms.is_some_and(|at| at >= started_ms))
+        || (!snapshot.is_empty() && snapshot.iter().all(|usage| usage.state != UsageState::Ok))
 }
 
 pub(super) fn now_unix_ms() -> i64 {
@@ -560,33 +614,10 @@ impl HubState {
     }
 }
 
-impl HorizonApp {
-    /// Per-frame work, cheap when idle: sync the polled profiles with the
-    /// config, start the poller, and take a finished snapshot. Repaints only
-    /// when a snapshot arrived, or (once a second, for at most 30 s) while a
-    /// refresh is waiting for its result.
-    pub(super) fn poll_claude_usage(&mut self, ctx: &Context) {
-        if self.hub.usage.synced_rows_version != Some(self.hub.rows_version) {
-            self.sync_usage_profiles();
-            self.hub.usage.synced_rows_version = Some(self.hub.rows_version);
-        }
-        let received = self.hub.usage.poller.as_ref().and_then(UsagePoller::try_recv);
-        if let Some(snapshot) = received {
-            self.hub.usage.apply_snapshot(snapshot);
-            // The launcher shows the same data: its rows rebuild once. Our own
-            // bump must not trigger another profile sync.
-            self.hub.invalidate_launcher_rows();
-            self.hub.usage.synced_rows_version = Some(self.hub.rows_version);
-            ctx.request_repaint();
-        } else if self.hub.usage.is_refreshing(Instant::now()) {
-            ctx.request_repaint_after(REFRESH_WAKE);
-        }
-    }
-
-    /// Aligns the poller with the effective profiles of the current config.
-    fn sync_usage_profiles(&mut self) {
-        let profiles = self.template_config.effective_claude_profiles();
-        let usage = &mut self.hub.usage;
+impl HubState {
+    /// Aligns the poller with `profiles` (the effective profiles of the config).
+    fn sync_usage_profiles(&mut self, profiles: Vec<ClaudeProfile>) {
+        let usage = &mut self.usage;
         let changed = usage.set_profiles(profiles.clone());
         if profiles.is_empty() {
             usage.poller = None;
@@ -604,7 +635,44 @@ impl HorizonApp {
             usage.refresh_started = Some((Instant::now(), now_unix_ms()));
         }
         if changed {
-            self.hub.invalidate_launcher_rows();
+            self.invalidate_launcher_rows();
+        }
+        // Our own bump must not trigger another profile sync.
+        self.usage.synced_rows_version = Some(self.rows_version);
+    }
+
+    /// Applies a finished snapshot; the launcher shows the same data, so its rows rebuild once.
+    fn apply_usage_snapshot(&mut self, snapshot: Vec<ProfileUsage>) {
+        self.usage.apply_snapshot(snapshot);
+        self.invalidate_launcher_rows();
+        self.usage.synced_rows_version = Some(self.rows_version);
+    }
+
+    /// Takes the poller's latest snapshot, if one arrived.
+    fn receive_usage_snapshot(&mut self) -> bool {
+        let Some(snapshot) = self.usage.poller.as_ref().and_then(UsagePoller::try_recv) else {
+            return false;
+        };
+        self.apply_usage_snapshot(snapshot);
+        true
+    }
+}
+
+impl HorizonApp {
+    /// Per-frame work, cheap when idle: sync the polled profiles with the
+    /// config, start the poller, and take a finished snapshot. Repaints only
+    /// when a snapshot arrived, or (once a second, for at most 30 s) while a
+    /// refresh is waiting for its result.
+    pub(super) fn poll_claude_usage(&mut self, ctx: &Context) {
+        if self.hub.usage.synced_rows_version != Some(self.hub.rows_version) {
+            let profiles = self.template_config.effective_claude_profiles();
+            self.hub.sync_usage_profiles(profiles);
+        }
+        let tokens = self.hub.usage.poll_tokens();
+        if self.hub.receive_usage_snapshot() || tokens {
+            ctx.request_repaint();
+        } else if self.hub.usage.is_refreshing(Instant::now()) {
+            ctx.request_repaint_after(REFRESH_WAKE);
         }
     }
 }

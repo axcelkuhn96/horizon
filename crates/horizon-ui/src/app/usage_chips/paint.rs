@@ -4,8 +4,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use egui::{
-    Align2, Color32, CornerRadius, CursorIcon, FontId, Pos2, Rect, Response, Sense, Stroke, StrokeKind, Ui, Vec2,
-    WidgetInfo, WidgetType,
+    Align2, Color32, CornerRadius, CursorIcon, FontId, Frame, Margin, Pos2, Rect, Response, Sense, Stroke, StrokeKind,
+    Ui, Vec2, WidgetInfo, WidgetType,
 };
 use horizon_core::claude_usage::{ProfileUsage, UsageState, UsageWindow, remaining_percent, used_percent_label};
 
@@ -24,6 +24,7 @@ const UNUSABLE_FADE: f32 = 0.55;
 /// Bars of an unusable login still show the last known value, fainter.
 const UNUSABLE_BAR_FADE: f32 = 0.4;
 const TOOLTIP_WIDTH: f32 = 280.0;
+const TOOLTIP_MARGIN: i8 = 12;
 const TOOLTIP_BAR: Vec2 = Vec2::new(120.0, 5.0);
 const OVERFLOW_ROW_HEIGHT: f32 = 26.0;
 const OVERFLOW_ROW_MIN_WIDTH: f32 = 260.0;
@@ -35,6 +36,8 @@ pub(in crate::app) struct ChipsOutput {
     pub(in crate::app) launch: Option<String>,
     /// "Refresh now" was chosen in a chip's context menu.
     pub(in crate::app) refresh: bool,
+    /// A hover card was open: the "Tokens today" stats poll should be running.
+    pub(in crate::app) wants_tokens: bool,
 }
 
 /// How one chip is drawn this frame.
@@ -82,6 +85,7 @@ pub(in crate::app) fn show_chips(
     let total = cache.widths.total(plan.compact, plan.visible);
     let (group, _) = ui.allocate_exact_size(Vec2::new(total, CHIP_HEIGHT), Sense::hover());
     let refreshing = usage.is_refreshing(now);
+    let tokens_today = usage.tokens_today();
     let mut output = ChipsOutput::default();
     let mut x = group.min.x;
     for index in 0..plan.visible {
@@ -95,22 +99,40 @@ pub(in crate::app) fn show_chips(
             Vec2::new(width, CHIP_HEIGHT),
         );
         x += width + CHIP_GAP;
-        show_chip(ui, rect, entry, layout, plan.compact, refreshing, now_ms, &mut output);
+        let frame = ChipFrame {
+            compact: plan.compact,
+            refreshing,
+            now_ms,
+            tokens_today,
+        };
+        show_chip(ui, rect, entry, layout, frame, &mut output);
     }
     output
 }
 
-#[allow(clippy::too_many_arguments)] // one call site; a struct would only rename the arguments
+/// Per-frame inputs shared by every chip.
+#[derive(Clone, Copy)]
+struct ChipFrame<'a> {
+    compact: bool,
+    refreshing: bool,
+    now_ms: i64,
+    tokens_today: Option<&'a str>,
+}
+
 fn show_chip(
     ui: &mut Ui,
     rect: Rect,
     entry: &ChipEntry,
     layout: &ChipLayout,
-    compact: bool,
-    refreshing: bool,
-    now_ms: i64,
+    frame: ChipFrame<'_>,
     output: &mut ChipsOutput,
 ) {
+    let ChipFrame {
+        compact,
+        refreshing,
+        now_ms,
+        tokens_today,
+    } = frame;
     let status = chip_status(entry.usage.as_ref(), now_ms);
     let accent = hub_ui::accent_color(layout.accent_slot);
     let id = ui.id().with(("usage_chip", &entry.name));
@@ -136,7 +158,10 @@ fn show_chip(
         paint_chip(ui.painter(), rect, entry, layout, look);
         hub_ui::paint_focus_ring(ui.painter(), &response, rect, CHIP_RADIUS);
     }
-    let response = response.on_hover_ui_at_pointer(|ui| show_tooltip(ui, entry, accent, status, now_ms));
+    let response = response.on_hover_ui_at_pointer(|ui| {
+        output.wants_tokens = true;
+        show_tooltip(ui, entry, accent, status, now_ms, tokens_today);
+    });
     if response.clicked() {
         output.launch = Some(entry.name.clone());
     }
@@ -206,7 +231,7 @@ fn paint_chip(painter: &egui::Painter, rect: Rect, entry: &ChipEntry, layout: &C
 
     let usage = entry.usage.as_ref();
     if !look.compact {
-        paint_group(painter, Pos2::new(x, cy), "5h", usage, true, look);
+        paint_group(painter, Pos2::new(x, cy), layout, usage, true, look);
         x += GROUP_WIDTH_FULL + SECTION_GAP;
     }
     match (entry.pill_text(), layout.pill_width) {
@@ -219,7 +244,7 @@ fn paint_chip(painter: &egui::Painter, rect: Rect, entry: &ChipEntry, layout: &C
             let pill = hub_ui::pill_rect(Pos2::new(x, cy - 9.0), width);
             hub_ui::pill(painter, pill, text, color);
         }
-        _ => paint_group(painter, Pos2::new(x, cy), "7d", usage, false, look),
+        _ => paint_group(painter, Pos2::new(x, cy), layout, usage, false, look),
     }
 }
 
@@ -238,7 +263,7 @@ fn api_severity(usage: &ProfileUsage, five_hour: bool) -> Option<&str> {
 fn paint_group(
     painter: &egui::Painter,
     left_center: Pos2,
-    label: &str,
+    layout: &ChipLayout,
     usage: Option<&ProfileUsage>,
     five_hour: bool,
     look: ChipLook,
@@ -253,11 +278,10 @@ fn paint_group(
         BAR_WIDTH_FULL
     };
 
-    painter.text(
-        left_center,
-        Align2::LEFT_CENTER,
-        label,
-        FontId::proportional(8.5),
+    let (label, pct) = layout.window(five_hour);
+    painter.galley(
+        Pos2::new(left_center.x, left_center.y - label.size().y / 2.0),
+        Arc::clone(label),
         theme::FG_DIM().gamma_multiply(fade),
     );
     let bar = Rect::from_min_size(
@@ -278,7 +302,6 @@ fn paint_group(
         }
     }
 
-    let text = window.map_or_else(|| "\u{2014}".to_owned(), pct_text);
     let color = if look.status == ChipStatus::Stale {
         theme::FG_DIM()
     } else if severity == Severity::Normal {
@@ -286,20 +309,14 @@ fn paint_group(
     } else {
         hub_ui::severity_color(percent.unwrap_or(0.0), Some(severity))
     };
-    painter.text(
-        Pos2::new(bar.max.x + LABEL_GAP + PCT_WIDTH, left_center.y),
-        Align2::RIGHT_CENTER,
-        text,
-        FontId::monospace(10.5),
+    painter.galley(
+        Pos2::new(
+            bar.max.x + LABEL_GAP + PCT_WIDTH - pct.size().x,
+            left_center.y - pct.size().y / 2.0,
+        ),
+        Arc::clone(pct),
         color.gamma_multiply(fade),
     );
-}
-
-fn pct_text(window: &UsageWindow) -> String {
-    match window.percent {
-        Some(_) => format!("{}%", used_percent_label(window)),
-        None => "\u{2014}".to_owned(),
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -316,7 +333,31 @@ fn status_pill(status: ChipStatus) -> (&'static str, Color32) {
     }
 }
 
-fn show_tooltip(ui: &mut Ui, entry: &ChipEntry, accent: Color32, status: ChipStatus, now_ms: i64) {
+fn show_tooltip(
+    ui: &mut Ui,
+    entry: &ChipEntry,
+    accent: Color32,
+    status: ChipStatus,
+    now_ms: i64,
+    tokens_today: Option<&str>,
+) {
+    Frame::NONE.inner_margin(Margin::same(TOOLTIP_MARGIN)).show(ui, |ui| {
+        tooltip_body(ui, entry, accent, status, now_ms, tokens_today);
+    });
+    if tokens_today.is_none() {
+        // The stats poll is still scanning: look again shortly, only while the card is open.
+        ui.ctx().request_repaint_after(std::time::Duration::from_secs(1));
+    }
+}
+
+fn tooltip_body(
+    ui: &mut Ui,
+    entry: &ChipEntry,
+    accent: Color32,
+    status: ChipStatus,
+    now_ms: i64,
+    tokens_today: Option<&str>,
+) {
     ui.set_width(TOOLTIP_WIDTH);
     ui.spacing_mut().item_spacing.y = 2.0;
 
@@ -355,6 +396,9 @@ fn show_tooltip(ui: &mut Ui, entry: &ChipEntry, accent: Color32, status: ChipSta
     }
     separator(ui);
 
+    if let Some(tokens) = tokens_today {
+        tokens_row(ui, tokens);
+    }
     let age = usage.and_then(|u| u.fetched_at_ms).map_or_else(
         || "Not updated yet".to_owned(),
         |at| format!("Updated {}", time::format_age(now_ms.saturating_sub(at) / 1000)),
@@ -384,6 +428,18 @@ fn show_tooltip(ui: &mut Ui, entry: &ChipEntry, accent: Color32, status: ChipSta
             .size(10.0)
             .color(theme::FG_DIM()),
     );
+}
+
+/// `Tokens today   1.2M` (all accounts).
+fn tokens_row(ui: &mut Ui, tokens: &str) {
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new("Tokens today (all accounts)")
+                .size(11.0)
+                .color(theme::FG_SOFT()),
+        );
+        ui.label(egui::RichText::new(tokens).monospace().size(11.0).color(theme::FG()));
+    });
 }
 
 fn separator(ui: &mut Ui) {

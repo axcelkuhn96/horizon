@@ -589,15 +589,7 @@ fn paint_usage_column(painter: &Painter, rect: Rect, left: f32, usage: Option<&s
     }
 }
 
-/// One-line galley truncated with an ellipsis at `max_width`. Laid out with
-/// `Color32::PLACEHOLDER`: the paint call supplies the (theme) colour.
-fn elided(painter: &Painter, text: &str, font: FontId, max_width: f32) -> Arc<Galley> {
-    let mut job = egui::text::LayoutJob::simple_singleline(text.to_owned(), font, Color32::PLACEHOLDER);
-    job.wrap = egui::text::TextWrapping::truncate_at_width(max_width.max(1.0));
-    painter.layout_job(job)
-}
-
-/// [`elided`] reused from `slot` while `key` is unchanged.
+/// [`hub_ui::elided`] reused from `slot` while `key` is unchanged.
 fn cached_elided(
     slot: &mut Option<CachedGalley>,
     key: LayoutKey,
@@ -611,7 +603,7 @@ fn cached_elided(
     {
         return Arc::clone(&cached.galley);
     }
-    let galley = elided(painter, text, font, max_width);
+    let galley = hub_ui::elided(painter, text, font, max_width);
     *slot = Some(CachedGalley {
         key,
         galley: Arc::clone(&galley),

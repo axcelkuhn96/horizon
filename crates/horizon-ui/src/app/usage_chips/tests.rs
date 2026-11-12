@@ -125,16 +125,65 @@ fn chip_status_goes_stale_after_fifteen_minutes() {
 }
 
 #[test]
-fn widths_scale_with_count_and_compact_is_narrower() {
-    assert!(chips_width(0, false).abs() <= f32::EPSILON);
-    assert!(chips_width(2, false) > chips_width(1, false));
-    assert!(chips_width(3, true) < chips_width(3, false));
+fn widths_total_adds_gaps_and_compact_is_narrower() {
     let widths = ChipWidths::estimated(3);
-    assert!((widths.total(false, 3) - chips_width(3, false)).abs() <= f32::EPSILON);
-    assert!((widths.total(true, 2) - chips_width(2, true)).abs() <= f32::EPSILON);
-    assert!(widths.total(true, 0).abs() <= f32::EPSILON);
+
+    assert!(widths.total(false, 0).abs() <= f32::EPSILON);
+    assert!((widths.total(false, 1) - CHIP_FULL_ESTIMATE).abs() <= f32::EPSILON);
+    assert!((widths.total(false, 3) - (3.0 * CHIP_FULL_ESTIMATE + 2.0 * CHIP_GAP)).abs() <= f32::EPSILON);
+    assert!(widths.total(true, 3) < widths.total(false, 3));
     assert!(full_chip_width(40.0, 40.0, None) <= 340.0);
     assert!(compact_chip_width(40.0, 30.0, None) < full_chip_width(40.0, 40.0, None));
+}
+
+#[test]
+fn window_text_shows_percent_or_dash() {
+    let some = window(Some(42.0));
+
+    assert_eq!(window_text(Some(&some)), "42%");
+    assert_eq!(window_text(Some(&window(None))), "\u{2014}");
+    assert_eq!(window_text(None), "\u{2014}");
+}
+
+#[test]
+fn a_snapshot_with_no_fetchable_profile_ends_the_refresh() {
+    let mut state = ClaudeUsageState::default();
+    state.set_profiles(vec![profile("a"), profile("b")]);
+    state.refresh_started = Some((Instant::now(), 5_000));
+    let mut expired = usage("a", None, Some(1.0), Some(1.0));
+    expired.state = UsageState::Expired;
+    expired.fetched_at_ms = Some(1_000);
+    let mut missing = usage("b", None, None, None);
+    missing.state = UsageState::Missing;
+    missing.fetched_at_ms = None;
+
+    state.apply_snapshot(vec![expired, missing]);
+
+    assert!(!state.is_refreshing(Instant::now()));
+}
+
+#[test]
+fn an_old_ok_snapshot_does_not_end_the_refresh() {
+    let mut old = usage("a", None, Some(1.0), Some(1.0));
+    old.fetched_at_ms = Some(1_000);
+    let mut failed = usage("b", None, Some(1.0), Some(1.0));
+    failed.state = UsageState::Stale;
+
+    assert!(!refresh_answered(&[old.clone()], 5_000));
+    assert!(refresh_answered(&[old, failed.clone()], 1_000));
+    assert!(refresh_answered(&[failed], 5_000));
+    assert!(!refresh_answered(&[], 0));
+}
+
+#[test]
+fn tokens_today_is_formatted_once_when_the_stats_arrive() {
+    let mut state = ClaudeUsageState::default();
+    assert_eq!(state.tokens_today(), None);
+    assert!(!state.poll_tokens());
+
+    state.set_tokens_today(1_240_000);
+
+    assert_eq!(state.tokens_today(), Some("1.2M"));
 }
 
 #[test]
@@ -227,4 +276,73 @@ fn measured_cache_makes_compact_chips_narrower_than_full_ones() {
     assert_eq!(cache.chips.len(), 1);
     assert!(cache.widths.compact[0] < cache.widths.full[0]);
     assert!(cache.widths.full[0] < 340.0);
+}
+
+#[test]
+fn cache_holds_pre_laid_out_window_text() {
+    let ctx = egui::Context::default();
+    let entries = vec![
+        ChipEntry::build("a", Some(&usage("a", None, Some(37.0), None)), Some(0)),
+        ChipEntry::build("b", None, Some(0)),
+    ];
+    let mut cache = None;
+    let _ = ctx.run(egui::RawInput::default(), |ctx| {
+        let painter = ctx.layer_painter(LayerId::new(Order::Tooltip, Id::new("usage_chips_test_text")));
+        cache = Some(build_cache(&painter, &entries, &[0, 1], (1, 0)));
+    });
+    let cache = cache.expect("cache built inside the frame");
+
+    assert_eq!(cache.chips[0].window(true).1.text(), "37%");
+    assert_eq!(cache.chips[0].window(false).1.text(), "\u{2014}");
+    assert_eq!(cache.chips[0].window(true).0.text(), "5h");
+    assert_eq!(cache.chips[1].window(false).0.text(), "7d");
+    assert_eq!(cache.chips[1].window(true).1.text(), "\u{2014}");
+}
+
+#[test]
+fn profile_change_syncs_the_poller_list_and_invalidates_launcher_rows() {
+    let mut hub = HubState::default();
+    let rows = hub.rows_version;
+
+    hub.sync_usage_profiles(vec![profile("a")]);
+
+    assert_eq!(hub.usage.entries().len(), 1);
+    assert_ne!(hub.rows_version, rows);
+    assert_eq!(hub.usage.synced_rows_version, Some(hub.rows_version));
+
+    let rows = hub.rows_version;
+    hub.sync_usage_profiles(vec![profile("a")]);
+    assert_eq!(hub.rows_version, rows);
+
+    hub.sync_usage_profiles(vec![profile("a"), profile("b")]);
+    assert_eq!(hub.usage.entries().len(), 2);
+    assert_ne!(hub.rows_version, rows);
+    assert_eq!(hub.usage.synced_rows_version, Some(hub.rows_version));
+}
+
+#[test]
+fn emptying_the_profiles_stops_the_refresh_and_the_poller() {
+    let mut hub = HubState::default();
+    hub.sync_usage_profiles(vec![profile("a")]);
+    hub.usage.refresh_started = Some((Instant::now(), 1));
+
+    hub.sync_usage_profiles(Vec::new());
+
+    assert!(hub.usage.entries().is_empty());
+    assert!(hub.usage.poller.is_none());
+    assert!(!hub.usage.is_refreshing(Instant::now()));
+}
+
+#[test]
+fn a_snapshot_invalidates_launcher_rows_without_asking_for_another_profile_sync() {
+    let mut hub = HubState::default();
+    hub.sync_usage_profiles(vec![profile("a")]);
+    let rows = hub.rows_version;
+
+    hub.apply_usage_snapshot(vec![usage("a", Some("fulano@example.com"), Some(10.0), Some(20.0))]);
+
+    assert_ne!(hub.rows_version, rows);
+    assert_eq!(hub.usage.synced_rows_version, Some(hub.rows_version));
+    assert_eq!(hub.usage.usage_summary("a"), Some("5h 10%  7d 20%"));
+    assert!(!hub.receive_usage_snapshot(), "no poller in tests: nothing to receive");
 }
