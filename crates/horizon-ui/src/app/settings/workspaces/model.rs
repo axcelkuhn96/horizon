@@ -4,7 +4,7 @@ use std::path::Path;
 
 use horizon_core::{
     ClaudeProfile, DEFAULT_PANEL_SIZE, PresetConfig, TerminalConfig, WORKSPACE_COLORS, WorkspaceConfig,
-    expand_config_dir, grid_position, move_item, terminal_from_preset, upsert_template,
+    expand_config_dir, grid_position, move_item, terminal_from_preset, upsert_template, workspace_color_index,
 };
 
 use crate::app::hub_ui;
@@ -122,16 +122,9 @@ impl NameDraft {
 // Colors
 // ---------------------------------------------------------------------------
 
-/// Saved color format: lowercase `#rrggbb` of an entry in [`WORKSPACE_COLORS`].
-pub(super) fn color_hex(index: usize) -> String {
-    let (r, g, b) = WORKSPACE_COLORS[index % WORKSPACE_COLORS.len()];
-    format!("#{r:02x}{g:02x}{b:02x}")
-}
-
-fn palette_index(color: &str) -> Option<usize> {
-    let wanted = color.trim().to_ascii_lowercase();
-    (0..WORKSPACE_COLORS.len()).find(|index| color_hex(*index) == wanted)
-}
+/// Saved color format (`#rrggbb` of a palette entry) is owned by horizon-core,
+/// which also maps it back to a palette slot when workspaces start.
+pub(super) use horizon_core::workspace_color_hex as color_hex;
 
 /// Palette slot of a template: its saved color when it is a palette entry,
 /// else the slot the board would assign by list position.
@@ -139,7 +132,7 @@ pub(super) fn template_color_index(template: &WorkspaceConfig, position: usize) 
     template
         .color
         .as_deref()
-        .and_then(palette_index)
+        .and_then(workspace_color_index)
         .unwrap_or(position % WORKSPACE_COLORS.len())
 }
 

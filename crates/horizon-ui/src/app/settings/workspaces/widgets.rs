@@ -94,8 +94,14 @@ pub(super) fn template_list_row(
     };
     let mut arrow_hover = (false, false);
     if show_arrows {
-        let up = ui.interact(arrow_up, response.id.with("up"), Sense::click());
-        let down = ui.interact(arrow_down, response.id.with("down"), Sense::click());
+        let up = ui
+            .interact(arrow_up, response.id.with("up"), Sense::click())
+            .on_hover_text("Move template up");
+        let down = ui
+            .interact(arrow_down, response.id.with("down"), Sense::click())
+            .on_hover_text("Move template down");
+        up.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, can_up, "Move template up"));
+        down.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, can_down, "Move template down"));
         arrow_hover = (up.hovered(), down.hovered());
         if up.clicked() && can_up {
             action = ListRowAction::MoveUp;

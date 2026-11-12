@@ -5,6 +5,7 @@
 mod model;
 mod widgets;
 
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use egui::{Color32, CornerRadius, Frame, Margin, RichText, Stroke, Ui, Vec2};
@@ -21,10 +22,19 @@ const LIST_WIDTH: f32 = 240.0;
 const COLUMN_GAP: f32 = 16.0;
 /// Below this width the template list stacks above the editor instead of beside it.
 const TWO_COLUMN_MIN_WIDTH: f32 = 600.0;
+/// Stacked layout shows about five template rows (36 + 2 gap each) before scrolling.
+const STACKED_LIST_MAX_HEIGHT: f32 = 5.0 * 38.0;
 const LABEL_WIDTH: f32 = 52.0;
 const FIELD_HEIGHT: f32 = 28.0;
 const ADD_LIST_WIDTH: f32 = 260.0;
 const OPENED_FEEDBACK: Duration = Duration::from_secs(3);
+
+/// "Browse" request for the app to open the directory picker (see `actions/pickers.rs`).
+pub(in crate::app) struct BrowseRequest {
+    pub(in crate::app) index: usize,
+    pub(in crate::app) name: String,
+    pub(in crate::app) seed: Option<PathBuf>,
+}
 
 struct OpenFeedback {
     at: Instant,
@@ -39,11 +49,14 @@ pub(super) struct WorkspacesTabState {
     /// Highlighted row of the add-terminal list (keyboard).
     preset_pick: usize,
     add_open: bool,
+    /// Set by `open_add_list`; the next list render skips key reading (see `list_key_for_frame`).
+    add_just_opened: bool,
     /// Resolved presets, refreshed each time the add-terminal list opens.
     choices: Vec<PresetChoice>,
     name_draft: Option<NameDraft>,
     /// "Open now" request for the app to materialize (see `open_template.rs`).
     pending_open: Option<WorkspaceConfig>,
+    pending_browse: Option<BrowseRequest>,
     feedback: Option<OpenFeedback>,
 }
 
@@ -75,12 +88,14 @@ impl WorkspacesTabState {
         self.choices = model::classify_presets(config.resolved_presets(), &config.claude_profiles);
         self.preset_pick = 0;
         self.add_open = true;
+        self.add_just_opened = true;
     }
 
     fn select(&mut self, index: usize) {
         if self.selected != Some(index) {
             self.selected = Some(index);
             self.add_open = false;
+            self.feedback = None;
         }
     }
 }
@@ -89,6 +104,33 @@ impl HorizonApp {
     /// Takes the "Open now" request raised by the Workspaces tab, if any.
     pub(in crate::app) fn take_pending_template_open(&mut self) -> Option<WorkspaceConfig> {
         self.settings.as_mut()?.workspaces_tab.pending_open.take()
+    }
+
+    /// Takes the "Browse" request raised by the Workspaces tab, if any.
+    pub(in crate::app) fn take_pending_template_browse(&mut self) -> Option<BrowseRequest> {
+        self.settings.as_mut()?.workspaces_tab.pending_browse.take()
+    }
+
+    /// Writes a directory chosen in the picker into template `index`, provided
+    /// it is still the template named `name`, and mirrors it into the YAML buffer.
+    pub(in crate::app) fn apply_template_cwd(&mut self, index: usize, name: &str, path: &std::path::Path) {
+        let Some(editor) = self.settings.as_mut() else {
+            return;
+        };
+        let Some(config) = editor.editing_config.as_mut() else {
+            return;
+        };
+        let Some(template) = config
+            .workspaces
+            .get_mut(index)
+            .filter(|template| template.name == name)
+        else {
+            return;
+        };
+        template.cwd = Some(horizon_core::dir_search::abbreviate_home(path));
+        if let Ok(yaml) = config.to_yaml() {
+            editor.buffer = yaml;
+        }
     }
 
     /// Shows the "Opened in current session" confirmation under the Open now button.
@@ -153,7 +195,7 @@ fn render(ui: &mut Ui, config: &mut Config, state: &mut WorkspacesTabState) -> b
                 egui::Layout::top_down(egui::Align::Min),
                 |ui| {
                     ui.set_width(LIST_WIDTH);
-                    changed |= template_list(ui, config, state);
+                    changed |= template_list(ui, config, state, false);
                 },
             );
             divider_x = list.response.rect.right() + COLUMN_GAP / 2.0;
@@ -166,7 +208,7 @@ fn render(ui: &mut Ui, config: &mut Config, state: &mut WorkspacesTabState) -> b
         ui.painter()
             .vline(divider_x, top..=bottom, Stroke::new(1.0_f32, theme::BORDER_SUBTLE()));
     } else {
-        changed |= template_list(ui, config, state);
+        changed |= template_list(ui, config, state, true);
         ui.add_space(12.0);
         ui.separator();
         ui.add_space(12.0);
@@ -189,7 +231,7 @@ fn render(ui: &mut Ui, config: &mut Config, state: &mut WorkspacesTabState) -> b
 // Template list
 // ---------------------------------------------------------------------------
 
-fn template_list(ui: &mut Ui, config: &mut Config, state: &mut WorkspacesTabState) -> bool {
+fn template_list(ui: &mut Ui, config: &mut Config, state: &mut WorkspacesTabState, stacked: bool) -> bool {
     let mut changed = false;
     ui.label(RichText::new("TEMPLATES").size(9.5).color(theme::FG_DIM()));
     ui.add_space(4.0);
@@ -208,26 +250,35 @@ fn template_list(ui: &mut Ui, config: &mut Config, state: &mut WorkspacesTabStat
     }
 
     let mut move_request: Option<(usize, usize)> = None;
-    let row_gap = std::mem::replace(&mut ui.spacing_mut().item_spacing.y, 2.0);
-    for index in 0..count {
-        let color_index = model::template_color_index(&config.workspaces[index], index);
-        let (r, g, b) = WORKSPACE_COLORS[color_index % WORKSPACE_COLORS.len()];
-        let action = widgets::template_list_row(
-            ui,
-            &config.workspaces[index].name,
-            Color32::from_rgb(r, g, b),
-            state.selected == Some(index),
-            index > 0,
-            index + 1 < count,
-        );
-        match action {
-            ListRowAction::None => {}
-            ListRowAction::Select => state.select(index),
-            ListRowAction::MoveUp => move_request = Some((index, index - 1)),
-            ListRowAction::MoveDown => move_request = Some((index, index + 1)),
-        }
-    }
-    ui.spacing_mut().item_spacing.y = row_gap;
+    let max_height = if stacked {
+        STACKED_LIST_MAX_HEIGHT
+    } else {
+        f32::INFINITY
+    };
+    egui::ScrollArea::vertical()
+        .id_salt("workspace_template_list")
+        .max_height(max_height)
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 2.0;
+            for index in 0..count {
+                let color_index = model::template_color_index(&config.workspaces[index], index);
+                let (r, g, b) = WORKSPACE_COLORS[color_index % WORKSPACE_COLORS.len()];
+                let action = widgets::template_list_row(
+                    ui,
+                    &config.workspaces[index].name,
+                    Color32::from_rgb(r, g, b),
+                    state.selected == Some(index),
+                    index > 0,
+                    index + 1 < count,
+                );
+                match action {
+                    ListRowAction::None => {}
+                    ListRowAction::Select => state.select(index),
+                    ListRowAction::MoveUp => move_request = Some((index, index - 1)),
+                    ListRowAction::MoveDown => move_request = Some((index, index + 1)),
+                }
+            }
+        });
     if let Some((from, to)) = move_request {
         let selected = state.selected.unwrap_or(from);
         state.selected = Some(model::move_template(&mut config.workspaces, from, to, selected));
@@ -284,11 +335,25 @@ fn editor_column(ui: &mut Ui, config: &mut Config, state: &mut WorkspacesTabStat
     ui.add_space(4.0);
 
     field_row(ui, "Cwd", |ui| {
-        let mut cwd = config.workspaces[index].cwd.clone().unwrap_or_default();
-        if text_field(ui, &mut cwd, egui::FontId::monospace(11.0), "~/code/project").changed() {
-            config.workspaces[index].cwd = if cwd.trim().is_empty() { None } else { Some(cwd) };
-            changed = true;
-        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if hub_ui::icon_button(ui, hub_ui::IconKind::Browse, "Browse for folder").clicked() {
+                let seed = config.workspaces[index]
+                    .cwd
+                    .as_deref()
+                    .filter(|cwd| !cwd.trim().is_empty())
+                    .map(Config::expand_tilde);
+                state.pending_browse = Some(BrowseRequest {
+                    index,
+                    name: config.workspaces[index].name.clone(),
+                    seed,
+                });
+            }
+            let mut cwd = config.workspaces[index].cwd.clone().unwrap_or_default();
+            if text_field(ui, &mut cwd, egui::FontId::monospace(11.0), "~/code/project").changed() {
+                config.workspaces[index].cwd = if cwd.trim().is_empty() { None } else { Some(cwd) };
+                changed = true;
+            }
+        });
     });
     ui.add_space(4.0);
 
@@ -389,25 +454,18 @@ fn terminals_section(ui: &mut Ui, config: &mut Config, state: &mut WorkspacesTab
 
     let mut row_action: Option<(usize, TerminalRowAction)> = None;
     ui.spacing_mut().item_spacing.y = 4.0;
-    for position in 0..count {
+    for (position, terminal) in terminals.iter_mut().enumerate() {
         let profile_accent = home
             .as_deref()
-            .and_then(|home| model::terminal_profile_index(&terminals[position], profiles, home))
+            .and_then(|home| model::terminal_profile_index(terminal, profiles, home))
             .and_then(|profile| slots.get(profile).copied())
             .map(hub_ui::accent_color);
-        let kind = terminals[position].kind;
+        let kind = terminal.kind;
         let bar = widgets::kind_bar_color(kind, profile_accent);
         let icon_accent = profile_accent.unwrap_or_else(theme::ACCENT);
         let outcome = ui
             .push_id(("workspace_terminal", index, position), |ui| {
-                widgets::terminal_row(
-                    ui,
-                    &mut terminals[position],
-                    bar,
-                    icon_accent,
-                    position == 0,
-                    position + 1 == count,
-                )
+                widgets::terminal_row(ui, terminal, bar, icon_accent, position == 0, position + 1 == count)
             })
             .inner;
         changed |= outcome.changed;
@@ -428,10 +486,20 @@ fn terminals_section(ui: &mut Ui, config: &mut Config, state: &mut WorkspacesTab
     changed
 }
 
+/// Key for this frame's add-terminal list. The frame that opened the list is
+/// skipped so the Enter that activated "+ Add terminal" is not read as Confirm.
+fn list_key_for_frame(state: &mut WorkspacesTabState, read: impl FnOnce() -> ListKey) -> ListKey {
+    if std::mem::take(&mut state.add_just_opened) {
+        ListKey::None
+    } else {
+        read()
+    }
+}
+
 fn add_terminal_list(ui: &mut Ui, config: &mut Config, state: &mut WorkspacesTabState, index: usize) -> bool {
     let len = state.choices.len();
     let mut picked: Option<usize> = None;
-    match widgets::read_list_key(ui) {
+    match list_key_for_frame(state, || widgets::read_list_key(ui)) {
         ListKey::Down => state.preset_pick = (state.preset_pick + 1).min(len.saturating_sub(1)),
         ListKey::Up => state.preset_pick = state.preset_pick.saturating_sub(1),
         ListKey::Confirm => picked = (len > 0).then_some(state.preset_pick),
@@ -631,6 +699,33 @@ mod tests {
         assert!(state.confirm_pending_remove(&mut workspaces));
         assert!(workspaces.is_empty());
         assert_eq!(state.selected, None);
+    }
+
+    #[test]
+    fn opening_frame_does_not_read_list_keys() {
+        let config = Config::default();
+        let mut state = WorkspacesTabState::default();
+        state.open_add_list(&config);
+
+        let first = list_key_for_frame(&mut state, || panic!("must not read keys on the opening frame"));
+        assert_eq!(first, ListKey::None);
+
+        let second = list_key_for_frame(&mut state, || ListKey::Confirm);
+        assert_eq!(second, ListKey::Confirm);
+    }
+
+    #[test]
+    fn select_clears_open_feedback() {
+        let mut state = WorkspacesTabState {
+            selected: Some(0),
+            feedback: Some(OpenFeedback {
+                at: Instant::now(),
+                failed_panels: 0,
+            }),
+            ..WorkspacesTabState::default()
+        };
+        state.select(1);
+        assert!(state.feedback.is_none());
     }
 
     #[test]

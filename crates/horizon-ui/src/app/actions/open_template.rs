@@ -1,17 +1,9 @@
 //! "Open now" for workspace templates: materializes a template in the live board.
 
 use egui::Context;
-use horizon_core::{Config, WORKSPACE_COLORS, WorkspaceConfig, WorkspaceState};
+use horizon_core::{Config, WorkspaceConfig, WorkspaceState, workspace_color_index};
 
 use crate::app::HorizonApp;
-
-/// Palette slot for a saved `#rrggbb` workspace color.
-fn palette_slot(color: &str) -> Option<usize> {
-    let wanted = color.trim().to_ascii_lowercase();
-    WORKSPACE_COLORS
-        .iter()
-        .position(|(r, g, b)| format!("#{r:02x}{g:02x}{b:02x}") == wanted)
-}
 
 impl HorizonApp {
     /// Runs the "Open now" request raised by Settings → Workspaces, if any.
@@ -41,7 +33,7 @@ impl HorizonApp {
                 .filter(|cwd| !cwd.trim().is_empty())
                 .map(Config::expand_tilde);
             workspace.sidebar_collapsed = template.sidebar_collapsed;
-            if let Some(slot) = template.color.as_deref().and_then(palette_slot) {
+            if let Some(slot) = template.color.as_deref().and_then(workspace_color_index) {
                 workspace.color_idx = slot;
             }
         }

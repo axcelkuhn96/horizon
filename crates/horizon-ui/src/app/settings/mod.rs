@@ -72,7 +72,6 @@ pub(super) struct SettingsEditor {
     active_tab: SettingsTab,
     editing_config: Option<Config>,
     claude_tab: claude::ClaudeTabState,
-    #[expect(dead_code, reason = "wired in Task 11")]
     workspaces_tab: workspaces::WorkspacesTabState,
 }
 
@@ -161,6 +160,8 @@ impl HorizonApp {
         if let Some(editor) = self.settings.as_mut() {
             render_settings_panel(ctx, &config_path, editor, &mut self.speech_model_info_cache);
         }
+        self.process_pending_template_open(ctx);
+        self.process_pending_template_browse();
     }
 
     fn apply_live_preview(&mut self, config: &Config) {

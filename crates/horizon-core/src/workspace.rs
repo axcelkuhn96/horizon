@@ -40,6 +40,22 @@ pub const WORKSPACE_COLORS: &[(u8, u8, u8)] = &[
     (250, 179, 135), // peach
 ];
 
+/// Saved color format for workspace templates: lowercase `#rrggbb` of the
+/// [`WORKSPACE_COLORS`] entry at `index` (wrapping).
+#[must_use]
+pub fn workspace_color_hex(index: usize) -> String {
+    let (r, g, b) = WORKSPACE_COLORS[index % WORKSPACE_COLORS.len()];
+    format!("#{r:02x}{g:02x}{b:02x}")
+}
+
+/// Palette slot of a saved `#rrggbb` color (case-insensitive), if it is an
+/// entry of [`WORKSPACE_COLORS`].
+#[must_use]
+pub fn workspace_color_index(color: &str) -> Option<usize> {
+    let wanted = color.trim().to_ascii_lowercase();
+    (0..WORKSPACE_COLORS.len()).find(|index| workspace_color_hex(*index) == wanted)
+}
+
 impl Workspace {
     #[must_use]
     pub fn new(id: WorkspaceId, name: String, color_idx: usize) -> Self {
@@ -76,5 +92,23 @@ impl Workspace {
 
     pub fn remove_panel(&mut self, panel_id: PanelId) {
         self.panels.retain(|&id| id != panel_id);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn workspaces_color_hex_round_trips_through_palette() {
+        for index in 0..WORKSPACE_COLORS.len() {
+            let hex = workspace_color_hex(index);
+            assert_eq!(workspace_color_index(&hex), Some(index));
+            assert_eq!(workspace_color_index(&hex.to_uppercase()), Some(index));
+            assert_eq!(workspace_color_index(&format!("  {hex} ")), Some(index));
+        }
+        assert_eq!(workspace_color_hex(0), "#89b4fa");
+        assert_eq!(workspace_color_index("#123456"), None);
+        assert_eq!(workspace_color_index(""), None);
     }
 }
