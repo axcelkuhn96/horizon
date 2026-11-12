@@ -15,6 +15,7 @@ pub mod file_search;
 pub mod file_search_runner;
 pub mod file_tree;
 pub mod git_changes;
+pub mod git_overview;
 pub mod git_refresher;
 pub mod git_status;
 pub mod git_watcher;
