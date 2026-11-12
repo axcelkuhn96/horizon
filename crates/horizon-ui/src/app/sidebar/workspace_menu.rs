@@ -7,18 +7,22 @@
 //! sidebar, so the "New terminal" submenu is a small `Order::Tooltip` area
 //! positioned next to its row instead.
 
+mod submenu;
+
 use std::time::{Duration, Instant};
 
 use egui::{
-    Align, Align2, Area, Color32, Context, CornerRadius, FontId, Frame, Id, Layout, Margin, Order, Pos2, Rect,
-    Response, RichText, Sense, Ui, Vec2, WidgetInfo, WidgetType,
+    Align, Align2, Area, Color32, Context, CornerRadius, FontId, Frame, Id, Layout, Margin, Order, Pos2, Response,
+    RichText, Sense, Ui, Vec2, WidgetInfo, WidgetType,
 };
 use horizon_core::{PanelKind, PresetConfig, WorkspaceId};
 
 use crate::app::HorizonApp;
+use crate::app::actions::TemplateSaved;
 use crate::app::hub_ui::{self, ModalPlacement};
-use crate::app::panels::panel_kind_icon;
+use crate::app::util;
 use crate::theme;
+use submenu::show_presets_submenu;
 
 const MENU_MIN_WIDTH: f32 = 220.0;
 const SUBMENU_WIDTH: f32 = 240.0;
@@ -31,6 +35,8 @@ const DOT_RADIUS: f32 = 4.0;
 const SUBMENU_OFFSET_X: f32 = 6.0;
 const DELETE_MODAL_WIDTH: f32 = 380.0;
 const NOTICE_DURATION: Duration = Duration::from_secs(3);
+const NOTICE_MAX_WIDTH: f32 = 320.0;
+const NOTICE_MARGIN: f32 = 12.0;
 /// Prefix of the launcher presets derived from Claude profiles (`Claude · <profile>`).
 const CLAUDE_PROFILE_PREFIX: &str = "Claude \u{b7} ";
 
@@ -91,6 +97,16 @@ fn save_item_label(template_target: Option<&str>) -> String {
     match template_target {
         Some(name) => format!("Update template \"{name}\""),
         None => "Save as template".to_string(),
+    }
+}
+
+fn saved_notice_text(saved: &TemplateSaved) -> String {
+    let verb = if saved.updated { "Updated" } else { "Saved" };
+    let name = &saved.name;
+    if saved.pending_in_settings {
+        format!("{verb} template \"{name}\" in Settings \u{2014} save Settings to keep it")
+    } else {
+        format!("{verb} template \"{name}\"")
     }
 }
 
@@ -262,66 +278,6 @@ pub(super) fn show_items(
     chosen
 }
 
-/// Hover-opened presets list next to the "New terminal" row. Returns the index
-/// of the picked preset.
-fn show_presets_submenu(ctx: &Context, id: Id, row: &Response, presets: &[PresetConfig]) -> Option<usize> {
-    let state_id = id.with("state");
-    let last_rect: Option<Rect> = ctx.data(|data| data.get_temp(state_id));
-    let pointer = ctx.pointer_hover_pos();
-    let pointer_in_last = matches!((pointer, last_rect), (Some(pos), Some(rect)) if rect.contains(pos));
-    let over_row = pointer.is_some_and(|pos| row.rect.contains(pos));
-    let open = over_row || row.clicked() || (last_rect.is_some() && (pointer_in_last || row.has_focus()));
-    if !open {
-        ctx.data_mut(|data| data.remove::<Rect>(state_id));
-        return None;
-    }
-
-    let groups = split_presets(presets);
-    let mut picked = None;
-    let area = Area::new(id.with("area"))
-        .order(Order::Tooltip)
-        .fixed_pos(Pos2::new(row.rect.right() + SUBMENU_OFFSET_X, row.rect.top() - 4.0))
-        .constrain(true)
-        .show(ctx, |ui| {
-            Frame::menu(ui.style()).show(ui, |ui| {
-                ui.set_width(SUBMENU_WIDTH);
-                ui.spacing_mut().item_spacing.y = 0.0;
-                if !groups.general.is_empty() {
-                    section_header(ui, "PRESETS");
-                    for &index in &groups.general {
-                        let preset = &presets[index];
-                        let (icon, color) = panel_kind_icon(preset.kind, theme::FG_SOFT(), false);
-                        let item = MenuRow {
-                            lead: RowLead::Icon(icon, color),
-                            ..MenuRow::new(&preset.name)
-                        };
-                        if menu_row(ui, &item).clicked() {
-                            picked = Some(index);
-                        }
-                    }
-                }
-                if !groups.profiles.is_empty() {
-                    if !groups.general.is_empty() {
-                        ui.separator();
-                    }
-                    section_header(ui, "CLAUDE PROFILES");
-                    for &(index, slot) in &groups.profiles {
-                        let item = MenuRow {
-                            lead: RowLead::Dot(hub_ui::accent_color(slot)),
-                            ..MenuRow::new(&presets[index].name)
-                        };
-                        if menu_row(ui, &item).clicked() {
-                            picked = Some(index);
-                        }
-                    }
-                }
-            });
-        });
-    ctx.move_to_top(area.response.layer_id);
-    ctx.data_mut(|data| data.insert_temp(state_id, area.response.rect));
-    picked
-}
-
 // ---------------------------------------------------------------------------
 // Notice (save feedback) and delete confirmation
 // ---------------------------------------------------------------------------
@@ -347,7 +303,9 @@ fn show_notice(ctx: &Context, text: String, error: bool) {
     ctx.request_repaint();
 }
 
-fn render_notice(ctx: &Context) {
+/// `left` is the canvas-side edge of the sidebar: the notice sits to its right
+/// so it never covers the sidebar's bottom controls.
+fn render_notice(ctx: &Context, left: f32) {
     let Some(notice) = ctx.data(|data| data.get_temp::<Notice>(notice_id())) else {
         return;
     };
@@ -363,7 +321,7 @@ fn render_notice(ctx: &Context) {
     };
     Area::new(notice_id().with("area"))
         .order(Order::Tooltip)
-        .anchor(Align2::LEFT_BOTTOM, Vec2::new(12.0, -12.0))
+        .anchor(Align2::LEFT_BOTTOM, Vec2::new(left + NOTICE_MARGIN, -NOTICE_MARGIN))
         .interactable(false)
         .show(ctx, |ui| {
             Frame::new()
@@ -372,6 +330,7 @@ fn render_notice(ctx: &Context) {
                 .corner_radius(CornerRadius::same(8))
                 .inner_margin(Margin::symmetric(10, 6))
                 .show(ui, |ui| {
+                    ui.set_max_width(NOTICE_MAX_WIDTH);
                     ui.label(RichText::new(&notice.text).size(11.0).color(color));
                 });
         });
@@ -419,7 +378,8 @@ fn danger_button(ui: &mut Ui, label: &str) -> Response {
 impl HorizonApp {
     /// Overlays owned by the workspace menu; drawn even while the sidebar is hidden.
     pub(super) fn render_workspace_menu_overlays(&mut self, ctx: &Context) {
-        render_notice(ctx);
+        let sidebar_edge = self.reserved_sidebar_width(util::viewport_local_rect(ctx).width());
+        render_notice(ctx, sidebar_edge);
         self.render_delete_workspace_modal(ctx);
     }
 
@@ -438,9 +398,8 @@ impl HorizonApp {
                 }
             }
             WorkspaceMenuAction::SaveAsTemplate(workspace) => match self.save_workspace_as_template(workspace) {
-                Ok((name, updated)) => {
-                    let verb = if updated { "Updated" } else { "Saved" };
-                    show_notice(ctx, format!("{verb} template \"{name}\""), false);
+                Ok(saved) => {
+                    show_notice(ctx, saved_notice_text(&saved), false);
                 }
                 Err(error) => {
                     tracing::warn!("failed to save workspace template: {error}");
@@ -466,6 +425,7 @@ impl HorizonApp {
         let text = confirm_label(&ws.name, live_panels);
         ctx.data_mut(|data| data.insert_temp(delete_confirm_id(workspace), text));
         self.hub.pending_delete_workspace = Some(workspace);
+        ctx.request_repaint();
     }
 
     fn render_delete_workspace_modal(&mut self, ctx: &Context) {

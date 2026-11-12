@@ -3,6 +3,7 @@ mod menu;
 mod routing;
 mod toolbar;
 mod workspace_menu;
+mod workspace_rename;
 
 use routing::{
     should_focus_workspace_on_row_click, sidebar_workspace_drop_should_dock, sidebar_workspace_insert_dock_side,
@@ -147,7 +148,8 @@ impl HorizonApp {
             strip_hover_rect
         };
 
-        let pointer_over = ctx.pointer_interact_pos().is_some_and(|pos| hover_rect.contains(pos));
+        let pointer_over = ctx.pointer_interact_pos().is_some_and(|pos| hover_rect.contains(pos))
+            || self.workspace_rename_needs_sidebar();
 
         let now = Instant::now();
         if pointer_over {
@@ -392,6 +394,12 @@ impl HorizonApp {
         ui.add_space(4.0);
 
         let row_rect = ui.allocate_space(Vec2::new(ui.available_width(), 32.0)).1;
+        if self.workspace_rename_in_sidebar(workspace.id) {
+            paint_workspace_row_bg(ui, row_rect, workspace.color, workspace.is_active, false, false);
+            self.render_sidebar_rename_editor(ui, row_rect);
+            self.render_sidebar_workspace_panels(ui, workspace, workspace_data, actions);
+            return;
+        }
         let mut click_target_hovered = ui.rect_contains_pointer(row_rect);
         let mut row_clicked = false;
         let mut caret_rect = Rect::NOTHING;
@@ -455,6 +463,16 @@ impl HorizonApp {
         };
         Self::show_workspace_context_menu(&row_response, workspace, &menu_env, actions);
 
+        self.render_sidebar_workspace_panels(ui, workspace, workspace_data, actions);
+    }
+
+    fn render_sidebar_workspace_panels(
+        &mut self,
+        ui: &mut egui::Ui,
+        workspace: &WorkspaceSidebarEntry,
+        workspace_data: &[WorkspaceSidebarEntry],
+        actions: &mut SidebarActions,
+    ) {
         if !workspace.sidebar_collapsed {
             ui.add_space(2.0);
             for panel in &workspace.panels {
@@ -513,7 +531,7 @@ impl HorizonApp {
         menu_env: &WorkspaceMenuEnv<'_>,
         actions: &mut SidebarActions,
     ) {
-        menu::context_menu_above_sidebar(response, |ui| {
+        menu::context_menu_above_sidebar_explicit_close(response, |ui| {
             ui.set_min_width(160.0);
             if let Some(action) = workspace_menu::show_items(ui, workspace.id, menu_env) {
                 if matches!(action, WorkspaceMenuAction::Rename(_)) {

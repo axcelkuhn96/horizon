@@ -68,7 +68,8 @@ pub(super) struct SettingsEditor {
     pub(super) original: String,
     pub(super) status: SettingsStatus,
     active_tab: SettingsTab,
-    editing_config: Option<Config>,
+    /// Parsed `buffer`; `pub(super)` so "Save as template" can merge into it.
+    pub(super) editing_config: Option<Config>,
     #[expect(dead_code, reason = "wired in Task 6")]
     claude_tab: claude::ClaudeTabState,
     #[expect(dead_code, reason = "wired in Task 11")]

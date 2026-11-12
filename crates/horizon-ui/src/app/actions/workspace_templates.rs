@@ -18,6 +18,16 @@ pub(in crate::app) enum TemplateSaveOutcome {
     Updated,
 }
 
+/// Result of "Save as template".
+pub(in crate::app) struct TemplateSaved {
+    pub(in crate::app) name: String,
+    /// An existing template was replaced (`false` = a new one was created).
+    pub(in crate::app) updated: bool,
+    /// The template went into the open Settings editor and is only written to
+    /// disk when Settings are saved.
+    pub(in crate::app) pending_in_settings: bool,
+}
+
 /// Insert or replace `template` in `workspaces` without ever producing two
 /// templates whose names differ only by case.
 ///
@@ -85,6 +95,32 @@ pub(in crate::app) fn save_template_to_path(
     Ok((outcome, config))
 }
 
+/// Saving a workspace without terminals would overwrite a template with an
+/// empty one, so it is refused.
+fn require_terminals(panels: Vec<PanelSnapshotForTemplate>) -> Result<Vec<PanelSnapshotForTemplate>> {
+    if panels.is_empty() {
+        return Err(Error::State("No terminals to save".to_string()));
+    }
+    Ok(panels)
+}
+
+/// Merge `template` into the configuration the open Settings editor holds
+/// (`buffer` is the source of truth: it may carry unsaved YAML edits), so the
+/// editor's next apply/save keeps the template instead of dropping it.
+pub(in crate::app) fn merge_into_settings_buffer(
+    editing_config: &mut Option<Config>,
+    buffer: &mut String,
+    template: WorkspaceConfig,
+    linked_name: Option<&str>,
+) -> Result<TemplateSaveOutcome> {
+    let mut config = Config::from_yaml(buffer)
+        .map_err(|_| Error::State("Fix the configuration in Settings before saving a template".to_string()))?;
+    let outcome = merge_template(&mut config.workspaces, template, linked_name)?;
+    *buffer = config.to_yaml()?;
+    *editing_config = Some(config);
+    Ok(outcome)
+}
+
 /// Workspace-relative position of a panel (templates store positions relative
 /// to the workspace origin).
 fn relative_position(panel: [f32; 2], workspace: [f32; 2]) -> [f32; 2] {
@@ -112,8 +148,11 @@ impl HorizonApp {
         existing_template_name(&self.template_config.workspaces, linked, &workspace.name)
     }
 
-    fn template_snapshot(&self, id: WorkspaceId) -> Option<(WorkspaceConfig, Option<String>)> {
-        let workspace = self.board.workspace(id)?;
+    fn template_snapshot(&self, id: WorkspaceId) -> Result<(WorkspaceConfig, Option<String>)> {
+        let workspace = self
+            .board
+            .workspace(id)
+            .ok_or_else(|| Error::State("workspace no longer exists".to_string()))?;
         let panels: Vec<PanelSnapshotForTemplate> = workspace
             .panels
             .iter()
@@ -140,6 +179,7 @@ impl HorizonApp {
                 ssh_connection: panel.ssh_connection.clone(),
             })
             .collect();
+        let panels = require_terminals(panels)?;
         let template = template_from_workspace(
             &workspace.name,
             Some(color_hex(workspace.accent())),
@@ -147,23 +187,38 @@ impl HorizonApp {
             &panels,
         );
         let linked = workspace.template.as_ref().map(|link| link.workspace_name.clone());
-        Some((template, linked))
+        Ok((template, linked))
     }
 
-    /// Save workspace `id` as a workspace template in `config.yaml` (replacing
-    /// its linked or same-named template) and apply the result to the app.
-    /// Returns the template name and whether an existing template was updated
-    /// (`false` = a new one was created).
-    pub(in crate::app) fn save_workspace_as_template(&mut self, id: WorkspaceId) -> Result<(String, bool)> {
-        let (template, linked) = self
-            .template_snapshot(id)
-            .ok_or_else(|| Error::State("workspace no longer exists".to_string()))?;
+    /// Save workspace `id` as a workspace template (replacing its linked or
+    /// same-named template). With the Settings window open the template goes
+    /// into the editor's buffer instead of the file, so the editor's own
+    /// apply/save keeps it; otherwise `config.yaml` is written and applied.
+    pub(in crate::app) fn save_workspace_as_template(&mut self, id: WorkspaceId) -> Result<TemplateSaved> {
+        let (template, linked) = self.template_snapshot(id)?;
         let name = template.name.clone();
+        if let Some(editor) = self.settings.as_mut() {
+            let outcome = merge_into_settings_buffer(
+                &mut editor.editing_config,
+                &mut editor.buffer,
+                template,
+                linked.as_deref(),
+            )?;
+            return Ok(TemplateSaved {
+                name,
+                updated: outcome == TemplateSaveOutcome::Updated,
+                pending_in_settings: true,
+            });
+        }
         let (outcome, config) =
             save_template_to_path(&self.config_path, &self.template_config, template, linked.as_deref())?;
         self.apply_runtime_config(&config);
         tracing::info!("workspace template \"{name}\" saved to {}", self.config_path.display());
-        Ok((name, outcome == TemplateSaveOutcome::Updated))
+        Ok(TemplateSaved {
+            name,
+            updated: outcome == TemplateSaveOutcome::Updated,
+            pending_in_settings: false,
+        })
     }
 
     /// Close every terminal of workspace `id` and remove it. The last
@@ -189,8 +244,8 @@ mod tests {
     use horizon_core::{Config, PanelKind, PanelResume, TerminalConfig, WorkspaceConfig};
 
     use super::{
-        TemplateSaveOutcome, color_hex, existing_template_name, merge_template, relative_position,
-        save_template_to_path, template_resume,
+        TemplateSaveOutcome, color_hex, existing_template_name, merge_into_settings_buffer, merge_template,
+        relative_position, require_terminals, save_template_to_path, template_resume,
     };
 
     fn template(name: &str, terminal: &str) -> WorkspaceConfig {
@@ -330,5 +385,53 @@ mod tests {
     #[test]
     fn workspace_templates_color_is_lowercase_hex() {
         assert_eq!(color_hex((137, 180, 250)), "#89b4fa");
+    }
+
+    #[test]
+    fn workspace_templates_open_settings_receives_the_template_in_its_buffer() {
+        let mut buffer = seeded_config().to_yaml().expect("yaml");
+        let mut editing = None;
+
+        let outcome =
+            merge_into_settings_buffer(&mut editing, &mut buffer, template("Gamma", "g"), None).expect("merge");
+
+        assert_eq!(outcome, TemplateSaveOutcome::Created);
+        let from_buffer = Config::from_yaml(&buffer).expect("buffer stays valid yaml");
+        assert_eq!(names(&from_buffer), vec!["Alpha", "Beta", "Gamma"]);
+        let editing = editing.expect("editor config is refreshed from the buffer");
+        assert_eq!(names(&editing), vec!["Alpha", "Beta", "Gamma"]);
+    }
+
+    #[test]
+    fn workspace_templates_open_settings_keeps_unsaved_yaml_edits() {
+        let mut edited = seeded_config();
+        edited.workspaces[1].terminals[0].name = "typed-in-settings".to_string();
+        let mut buffer = edited.to_yaml().expect("yaml");
+        let mut stale = Some(seeded_config());
+
+        merge_into_settings_buffer(&mut stale, &mut buffer, template("Alpha", "new"), None).expect("merge");
+
+        let merged = Config::from_yaml(&buffer).expect("yaml");
+        assert_eq!(merged.workspaces[0].terminals[0].name, "new");
+        assert_eq!(merged.workspaces[1].terminals[0].name, "typed-in-settings");
+    }
+
+    #[test]
+    fn workspace_templates_open_settings_with_invalid_yaml_is_refused_untouched() {
+        let mut buffer = "workspaces: [unclosed".to_string();
+        let mut editing = None;
+
+        let result = merge_into_settings_buffer(&mut editing, &mut buffer, template("Gamma", "g"), None);
+
+        assert!(result.is_err());
+        assert_eq!(buffer, "workspaces: [unclosed");
+        assert!(editing.is_none());
+    }
+
+    #[test]
+    fn workspace_templates_workspace_without_terminals_is_not_saved() {
+        let error = require_terminals(Vec::new()).expect_err("empty snapshot must be refused");
+
+        assert!(error.to_string().contains("No terminals to save"), "{error}");
     }
 }
