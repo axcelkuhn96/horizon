@@ -21,9 +21,17 @@ pub(super) struct HubState {
     /// Profile launched last; the launcher preselects it on the next open.
     pub(super) last_launched_profile: Option<String>,
     accents: AccentCache,
+    /// Bumped when the profile list or usage data behind the launcher rows
+    /// changes; the open launcher rebuilds its rows when it moves.
+    pub(super) rows_version: u64,
 }
 
 impl HubState {
+    /// Marks the launcher rows stale (profiles or usage changed).
+    pub(super) fn invalidate_launcher_rows(&mut self) {
+        self.rows_version = self.rows_version.wrapping_add(1);
+    }
+
     /// Accent slot per profile name (list order), cached by the name list.
     pub(super) fn accent_slots(&mut self, names: &[String]) -> &[usize] {
         if self.accents.names != names {
@@ -50,6 +58,16 @@ mod tests {
         assert_ne!(slots[0], slots[1]);
         assert_ne!(slots[1], slots[2]);
         assert_ne!(slots[0], slots[2]);
+    }
+
+    #[test]
+    fn invalidating_launcher_rows_moves_the_version() {
+        let mut hub = HubState::default();
+        let before = hub.rows_version;
+
+        hub.invalidate_launcher_rows();
+
+        assert_ne!(hub.rows_version, before);
     }
 
     #[test]

@@ -26,6 +26,7 @@ fn search_shortcut_command(focused_kind: Option<PanelKind>) -> CommandId {
 
 impl HorizonApp {
     pub(in crate::app) fn open_command_palette(&mut self) {
+        self.hub.claude_launcher = None;
         self.command_palette = Some(CommandPalette::new());
     }
 
@@ -33,6 +34,7 @@ impl HorizonApp {
         self.command_palette = if self.command_palette.is_some() {
             None
         } else {
+            self.hub.claude_launcher = None;
             Some(CommandPalette::new())
         };
     }

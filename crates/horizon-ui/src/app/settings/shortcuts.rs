@@ -350,7 +350,7 @@ mod tests {
 
     #[test]
     fn all_editable_shortcuts_map_to_distinct_config_fields() {
-        assert_eq!(EditableShortcut::ALL.len(), 24);
+        assert_eq!(EditableShortcut::ALL.len(), 25);
 
         // Each variant writes a unique marker into its field; distinct field
         // pointers are proven by recovering every marker afterwards.

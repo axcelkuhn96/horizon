@@ -3,9 +3,11 @@
 //! workspace through the regular `add_panel_to_workspace` flow.
 //! Visual spec: `docs/design/claude-hub-ui.md` §2.
 
+use std::sync::Arc;
+
 use egui::{
-    Align, Align2, Color32, Context, CornerRadius, FontId, Key, Layout, Margin, Modifiers, Painter, Pos2, Rect, Sense,
-    Stroke, StrokeKind, Ui, UiBuilder, Vec2, WidgetInfo, WidgetType,
+    Align, Align2, Color32, Context, CornerRadius, FontId, Galley, Key, Layout, Margin, Modifiers, Painter, Pos2, Rect,
+    Sense, Stroke, StrokeKind, Ui, UiBuilder, Vec2, WidgetInfo, WidgetType,
 };
 use horizon_core::{PanelKind, PresetConfig};
 
@@ -16,6 +18,8 @@ use crate::theme;
 const MODAL_WIDTH: f32 = 480.0;
 const HEADER_HEIGHT: f32 = 44.0;
 const FOOTER_HEIGHT: f32 = 36.0;
+const SEPARATOR_HEIGHT: f32 = 1.0;
+/// Header + separator + this = the 220 px empty state of the spec.
 const EMPTY_BODY_HEIGHT: f32 = 175.0;
 const ROW_HEIGHT: f32 = 52.0;
 const ROW_RADIUS: u8 = 8;
@@ -26,13 +30,28 @@ const LIST_MAX_HEIGHT: f32 = ROW_HEIGHT * 7.0;
 const USAGE_COLUMN_WIDTH: f32 = 132.0;
 const USAGE_BAR_SIZE: Vec2 = Vec2::new(56.0, 4.0);
 const USAGE_LABEL_WIDTH: f32 = 18.0;
+const HEADER_WORKSPACE_WIDTH: f32 = 160.0;
 /// Quick-pick keys cover only the first nine profiles.
 const QUICK_PICK_COUNT: usize = 9;
 
-/// Open launcher overlay. `profiles` is the name list captured when it opened.
+/// Pixels-per-point and available width a galley was laid out for.
+type LayoutKey = (u32, u32);
+
+/// Elided galley kept across frames; relaid out only when its [`LayoutKey`] changes.
+struct CachedGalley {
+    key: LayoutKey,
+    galley: Arc<Galley>,
+}
+
+/// Open launcher overlay. Rows and header text are built when it opens (and
+/// when `HubState::rows_version` moves), never per frame.
 pub(super) struct ClaudeLauncherState {
     pub(super) selected: usize,
-    profiles: Vec<String>,
+    rows: Vec<LauncherRow>,
+    workspace_name: String,
+    header_galley: Option<CachedGalley>,
+    /// `HubState::rows_version` the rows were built from.
+    rows_version: u64,
     /// Keyboard moved the selection: scroll it into view once.
     reveal_selected: bool,
 }
@@ -68,11 +87,11 @@ pub(super) fn move_selection(selected: usize, delta: i32, len: usize) -> usize {
     usize::try_from(moved).unwrap_or(0)
 }
 
-/// Row to preselect: the last launched profile when still listed, else the first.
+/// Row to preselect: the given profile when still listed, else the first.
 #[must_use]
-fn initial_selection(profiles: &[String], last_launched: Option<&str>) -> usize {
-    last_launched
-        .and_then(|last| profiles.iter().position(|name| name == last))
+fn initial_selection(profiles: &[String], preferred: Option<&str>) -> usize {
+    preferred
+        .and_then(|name| profiles.iter().position(|profile| profile == name))
         .unwrap_or(0)
 }
 
@@ -84,6 +103,23 @@ fn find_profile_preset<'a>(presets: &'a [PresetConfig], profile_name: &str) -> O
         .find(|preset| preset.kind == PanelKind::Claude && preset.alias.as_deref() == Some(profile_name))
 }
 
+/// Profile names the picker lists: exactly the presets [`find_profile_preset`]
+/// can resolve, so a listed profile always launches.
+#[must_use]
+fn claude_profile_names(presets: &[PresetConfig]) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for alias in presets
+        .iter()
+        .filter(|preset| preset.kind == PanelKind::Claude)
+        .filter_map(|preset| preset.alias.as_deref())
+    {
+        if !names.iter().any(|name| name == alias) {
+            names.push(alias.to_owned());
+        }
+    }
+    names
+}
+
 /// What the user asked for this frame.
 enum LauncherAction {
     None,
@@ -91,7 +127,7 @@ enum LauncherAction {
     OpenSettings,
 }
 
-/// Per-row data the contents function paints; built once per frame.
+/// Per-row data and layout caches; built on open, not per frame.
 struct LauncherRow {
     name: String,
     accent: Color32,
@@ -99,19 +135,54 @@ struct LauncherRow {
     email: Option<String>,
     /// Pre-formatted usage summary; `None` renders `5h —` / `7d —` without bars.
     usage: Option<String>,
+    name_galley: Option<CachedGalley>,
+    email_galley: Option<CachedGalley>,
 }
 
 impl HorizonApp {
     /// Account e-mail of `profile_name`, once the usage snapshot knows it.
     #[expect(clippy::unused_self, reason = "seam: the usage snapshot is read here")]
-    fn profile_account_email(&self, _profile_name: &str) -> Option<String> {
+    fn profile_account_email(&self, _profile_name: &str) -> Option<&str> {
         None
     }
 
     /// Usage summary of `profile_name` from the usage snapshot, when present.
+    /// Whoever fills this calls `HubState::invalidate_launcher_rows` when it changes.
     #[expect(clippy::unused_self, reason = "seam: the usage snapshot is read here")]
-    fn profile_usage_label(&self, _profile_name: &str) -> Option<String> {
+    fn profile_usage_label(&self, _profile_name: &str) -> Option<&str> {
         None
+    }
+
+    fn active_workspace_label(&self) -> String {
+        self.board
+            .active_workspace
+            .and_then(|id| self.board.workspace(id))
+            .map_or_else(|| "new workspace".to_owned(), |workspace| workspace.name.clone())
+    }
+
+    fn build_launcher_rows(&mut self, names: Vec<String>) -> Vec<LauncherRow> {
+        let accents: Vec<Color32> = self
+            .hub
+            .accent_slots(&names)
+            .iter()
+            .map(|slot| hub_ui::accent_color(*slot))
+            .collect();
+        names
+            .into_iter()
+            .zip(accents)
+            .map(|(name, accent)| {
+                let email = self.profile_account_email(&name).map(str::to_owned);
+                let usage = self.profile_usage_label(&name).map(str::to_owned);
+                LauncherRow {
+                    name,
+                    accent,
+                    email,
+                    usage,
+                    name_galley: None,
+                    email_galley: None,
+                }
+            })
+            .collect()
     }
 
     pub(in crate::app) fn toggle_claude_launcher(&mut self) {
@@ -123,19 +194,20 @@ impl HorizonApp {
     }
 
     pub(in crate::app) fn open_claude_launcher(&mut self) {
-        let profiles: Vec<String> = self
-            .template_config
-            .effective_claude_profiles()
-            .into_iter()
-            .map(|profile| profile.name)
-            .collect();
-        let selected = initial_selection(&profiles, self.hub.last_launched_profile.as_deref());
-        // One modal at a time: the palette and the remote hosts overlay close.
+        // Listed profiles are the derived presets launch resolves from.
+        let names = claude_profile_names(&self.presets);
+        let selected = initial_selection(&names, self.hub.last_launched_profile.as_deref());
+        let rows = self.build_launcher_rows(names);
+        // One modal at a time: the palette, remote hosts and sessions close.
         self.command_palette = None;
         self.remote_hosts_overlay = None;
+        self.session_manager = None;
         self.hub.claude_launcher = Some(ClaudeLauncherState {
             selected,
-            profiles,
+            rows,
+            workspace_name: self.active_workspace_label(),
+            header_galley: None,
+            rows_version: self.hub.rows_version,
             reveal_selected: true,
         });
     }
@@ -168,34 +240,28 @@ impl HorizonApp {
         }
     }
 
+    /// Rebuilds rows when the profile list or usage data changed since they were built.
+    fn refresh_launcher_rows(&mut self, state: &mut ClaudeLauncherState) {
+        if state.rows_version == self.hub.rows_version {
+            return;
+        }
+        let current = state.rows.get(state.selected).map(|row| row.name.clone());
+        let names = claude_profile_names(&self.presets);
+        state.selected = initial_selection(&names, current.as_deref());
+        state.rows = self.build_launcher_rows(names);
+        state.workspace_name = self.active_workspace_label();
+        state.header_galley = None;
+        state.rows_version = self.hub.rows_version;
+        state.reveal_selected = true;
+    }
+
     pub(in crate::app) fn render_claude_launcher(&mut self, ctx: &Context) {
         let Some(mut state) = self.hub.claude_launcher.take() else {
             return;
         };
-        let accents: Vec<Color32> = self
-            .hub
-            .accent_slots(&state.profiles)
-            .iter()
-            .map(|slot| hub_ui::accent_color(*slot))
-            .collect();
-        let rows: Vec<LauncherRow> = state
-            .profiles
-            .iter()
-            .zip(accents)
-            .map(|(name, accent)| LauncherRow {
-                name: name.clone(),
-                accent,
-                email: self.profile_account_email(name),
-                usage: self.profile_usage_label(name),
-            })
-            .collect();
-        let workspace_name = self
-            .board
-            .active_workspace
-            .and_then(|id| self.board.workspace(id))
-            .map_or_else(|| "new workspace".to_owned(), |workspace| workspace.name.clone());
+        self.refresh_launcher_rows(&mut state);
 
-        let mut action = handle_launcher_keys(ctx, &mut state, rows.len());
+        let mut action = handle_launcher_keys(ctx, &mut state);
         let outcome = hub_ui::show_modal(
             ctx,
             egui::Id::new("claude_launcher"),
@@ -203,7 +269,7 @@ impl HorizonApp {
             ModalPlacement::TopFraction(0.18),
             None,
             |ui| {
-                let from_ui = show_launcher_contents(ui, &mut state, &rows, &workspace_name);
+                let from_ui = show_launcher_contents(ui, &mut state);
                 if matches!(action, LauncherAction::None) {
                     action = from_ui;
                 }
@@ -212,8 +278,8 @@ impl HorizonApp {
 
         match action {
             LauncherAction::Launch(index) => {
-                if let Some(row) = rows.get(index) {
-                    self.launch_claude_profile(ctx, &row.name);
+                if let Some(name) = state.rows.get(index).map(|row| row.name.clone()) {
+                    self.launch_claude_profile(ctx, &name);
                 }
             }
             LauncherAction::OpenSettings => self.open_settings_claude_tab(),
@@ -225,7 +291,8 @@ impl HorizonApp {
 
 /// Keyboard handling for one frame. Runs before the rows draw so a consumed
 /// key never reaches a focused row or the terminals behind the modal.
-fn handle_launcher_keys(ctx: &Context, state: &mut ClaudeLauncherState, len: usize) -> LauncherAction {
+fn handle_launcher_keys(ctx: &Context, state: &mut ClaudeLauncherState) -> LauncherAction {
+    let len = state.rows.len();
     ctx.input_mut(|input| {
         if len == 0 {
             return if input.consume_key(Modifiers::NONE, Key::Enter) {
@@ -272,28 +339,29 @@ fn handle_launcher_keys(ctx: &Context, state: &mut ClaudeLauncherState, len: usi
     })
 }
 
-fn show_launcher_contents(
-    ui: &mut Ui,
-    state: &mut ClaudeLauncherState,
-    rows: &[LauncherRow],
-    workspace_name: &str,
-) -> LauncherAction {
+fn show_launcher_contents(ui: &mut Ui, state: &mut ClaudeLauncherState) -> LauncherAction {
+    // Every block is sized explicitly; the theme's item spacing must not add to it.
+    ui.spacing_mut().item_spacing.y = 0.0;
     let width = ui.available_width();
-    paint_header(ui, width, workspace_name);
+    paint_header(ui, width, &state.workspace_name, &mut state.header_galley);
     paint_separator(ui, width);
-    let action = if rows.is_empty() {
+    let action = if state.rows.is_empty() {
         show_empty_body(ui, width)
     } else {
-        let action = show_rows(ui, state, rows);
+        let action = show_rows(ui, state);
         paint_separator(ui, width);
         paint_footer(ui, width);
         action
     };
-    state.selected = state.selected.min(rows.len().saturating_sub(1));
+    state.selected = state.selected.min(state.rows.len().saturating_sub(1));
     action
 }
 
-fn paint_header(ui: &mut Ui, width: f32, workspace_name: &str) {
+fn layout_key(painter: &Painter, width: f32) -> LayoutKey {
+    (painter.ctx().pixels_per_point().to_bits(), width.to_bits())
+}
+
+fn paint_header(ui: &mut Ui, width: f32, workspace_name: &str, name_galley: &mut Option<CachedGalley>) {
     let (rect, response) = ui.allocate_exact_size(Vec2::new(width, HEADER_HEIGHT), Sense::hover());
     response.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, "Open Claude session"));
     let painter = ui.painter();
@@ -312,12 +380,14 @@ fn paint_header(ui: &mut Ui, width: f32, workspace_name: &str) {
         FontId::proportional(10.5),
         theme::FG_DIM(),
     );
-    let name = elided(
+    let key = layout_key(painter, HEADER_WORKSPACE_WIDTH);
+    let name = cached_elided(
+        name_galley,
+        key,
         painter,
         workspace_name,
         FontId::proportional(10.5),
-        theme::FG_DIM(),
-        160.0,
+        HEADER_WORKSPACE_WIDTH,
     );
     painter.galley(
         Pos2::new(right - name.size().x, rect.center().y + 1.0),
@@ -327,7 +397,7 @@ fn paint_header(ui: &mut Ui, width: f32, workspace_name: &str) {
 }
 
 fn paint_separator(ui: &mut Ui, width: f32) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, 1.0), Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, SEPARATOR_HEIGHT), Sense::hover());
     ui.painter()
         .rect_filled(rect, CornerRadius::ZERO, theme::BORDER_SUBTLE());
 }
@@ -337,54 +407,60 @@ fn paint_footer(ui: &mut Ui, width: f32) {
     let builder = UiBuilder::new()
         .max_rect(rect.shrink2(Vec2::new(16.0, 0.0)))
         .layout(Layout::left_to_right(Align::Center));
-    ui.scope_builder(builder, |ui| {
-        ui.spacing_mut().item_spacing.x = 14.0;
-        hub_ui::kbd_hint(ui, "\u{2191}\u{2193}", "move");
-        hub_ui::kbd_hint(ui, "Enter", "open");
-        hub_ui::kbd_hint(ui, "1\u{2013}9", "pick");
-        hub_ui::kbd_hint(ui, "Esc", "close");
-    });
+    // `new_child`, not `scope_builder`: the latter would allocate again in `ui`.
+    let mut footer = ui.new_child(builder);
+    footer.spacing_mut().item_spacing.x = 14.0;
+    hub_ui::kbd_hint(&mut footer, "\u{2191}\u{2193}", "move");
+    hub_ui::kbd_hint(&mut footer, "Enter", "open");
+    hub_ui::kbd_hint(&mut footer, "1\u{2013}9", "pick");
+    hub_ui::kbd_hint(&mut footer, "Esc", "close");
 }
 
 fn show_empty_body(ui: &mut Ui, width: f32) -> LauncherAction {
     let mut action = LauncherAction::None;
-    ui.allocate_ui_with_layout(
-        Vec2::new(width, EMPTY_BODY_HEIGHT),
-        Layout::top_down(Align::Center),
-        |ui| {
-            ui.add_space(24.0);
-            let (icon, _) = ui.allocate_exact_size(Vec2::splat(28.0), Sense::hover());
-            let painter = ui.painter();
-            painter.circle_stroke(icon.center(), 14.0, Stroke::new(1.5_f32, theme::BORDER_STRONG()));
-            painter.circle_filled(icon.center(), 2.5, theme::BORDER_STRONG());
-            ui.add_space(10.0);
-            ui.label(egui::RichText::new("No Claude profiles").size(13.0).color(theme::FG()));
-            ui.add_space(2.0);
-            ui.label(
-                egui::RichText::new("Add one in Settings \u{2192} Claude or run Detect accounts.")
-                    .size(11.0)
-                    .color(theme::FG_DIM()),
-            );
-            ui.add_space(14.0);
-            let response = hub_ui::secondary_button(ui, "Open Settings \u{2192} Claude");
-            // The only actionable control: always shown focused (Enter activates it).
-            ui.painter().rect_stroke(
-                response.rect,
-                CornerRadius::same(ROW_RADIUS),
-                Stroke::new(2.0_f32, theme::ACCENT()),
-                StrokeKind::Outside,
-            );
-            if response.clicked() {
-                action = LauncherAction::OpenSettings;
-            }
-        },
+    // Reserve the exact body height so the modal totals the spec's 220 px.
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, EMPTY_BODY_HEIGHT), Sense::hover());
+    let builder = UiBuilder::new().max_rect(rect).layout(Layout::top_down(Align::Center));
+    // `new_child`, not `scope_builder`: the latter would allocate again in `ui`.
+    let mut body = ui.new_child(builder);
+    let ui = &mut body;
+    ui.add_space(24.0);
+    let (icon, _) = ui.allocate_exact_size(Vec2::splat(28.0), Sense::hover());
+    let painter = ui.painter();
+    painter.circle_stroke(icon.center(), 14.0, Stroke::new(1.5_f32, theme::BORDER_STRONG()));
+    painter.circle_filled(icon.center(), 2.5, theme::BORDER_STRONG());
+    ui.add_space(10.0);
+    ui.label(egui::RichText::new("No Claude profiles").size(13.0).color(theme::FG()));
+    ui.add_space(2.0);
+    ui.label(
+        egui::RichText::new("Add one in Settings \u{2192} Claude or run Detect accounts.")
+            .size(11.0)
+            .color(theme::FG_DIM()),
     );
+    ui.add_space(14.0);
+    let response = hub_ui::secondary_button(ui, "Open Settings \u{2192} Claude");
+    // The only actionable control: always shown focused (Enter activates it).
+    ui.painter().rect_stroke(
+        response.rect,
+        CornerRadius::same(ROW_RADIUS),
+        Stroke::new(2.0_f32, theme::ACCENT()),
+        StrokeKind::Outside,
+    );
+    if response.clicked() {
+        action = LauncherAction::OpenSettings;
+    }
     action
 }
 
-fn show_rows(ui: &mut Ui, state: &mut ClaudeLauncherState, rows: &[LauncherRow]) -> LauncherAction {
+fn show_rows(ui: &mut Ui, state: &mut ClaudeLauncherState) -> LauncherAction {
     let mut action = LauncherAction::None;
     let pointer_moved = ui.input(|input| input.pointer.delta() != Vec2::ZERO);
+    let ClaudeLauncherState {
+        selected,
+        rows,
+        reveal_selected,
+        ..
+    } = state;
     egui::ScrollArea::vertical()
         .max_height(LIST_MAX_HEIGHT + f32::from(LIST_MARGIN_Y) * 2.0)
         .auto_shrink([false, true])
@@ -393,7 +469,7 @@ fn show_rows(ui: &mut Ui, state: &mut ClaudeLauncherState, rows: &[LauncherRow])
                 .inner_margin(Margin::symmetric(LIST_MARGIN_X, LIST_MARGIN_Y))
                 .show(ui, |ui| {
                     ui.spacing_mut().item_spacing.y = 0.0;
-                    for (index, row) in rows.iter().enumerate() {
+                    for (index, row) in rows.iter_mut().enumerate() {
                         let (rect, response) =
                             ui.allocate_exact_size(Vec2::new(ui.available_width(), ROW_HEIGHT), Sense::click());
                         response.widget_info(|| {
@@ -402,20 +478,20 @@ fn show_rows(ui: &mut Ui, state: &mut ClaudeLauncherState, rows: &[LauncherRow])
                         if response.hovered() {
                             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                             if pointer_moved {
-                                state.selected = index;
+                                *selected = index;
                             }
                         }
-                        if state.reveal_selected && state.selected == index {
+                        if *reveal_selected && *selected == index {
                             ui.scroll_to_rect(rect, None);
-                            state.reveal_selected = false;
+                            *reveal_selected = false;
                         }
                         if response.clicked() {
                             action = LauncherAction::Launch(index);
                         }
                         if ui.is_rect_visible(rect) {
-                            let selected = state.selected == index;
+                            let is_selected = *selected == index;
                             let pressed = response.is_pointer_button_down_on();
-                            paint_row(ui.painter(), rect, index, row, selected, pressed);
+                            paint_row(ui.painter(), rect, index, row, is_selected, pressed);
                             hub_ui::paint_focus_ring(ui.painter(), &response, rect, ROW_RADIUS);
                         }
                     }
@@ -424,7 +500,7 @@ fn show_rows(ui: &mut Ui, state: &mut ClaudeLauncherState, rows: &[LauncherRow])
     action
 }
 
-fn paint_row(painter: &Painter, rect: Rect, index: usize, row: &LauncherRow, selected: bool, pressed: bool) {
+fn paint_row(painter: &Painter, rect: Rect, index: usize, row: &mut LauncherRow, selected: bool, pressed: bool) {
     let accent = row.accent;
     if selected {
         let tint = if pressed { 0.30 } else { 0.22 };
@@ -450,14 +526,25 @@ fn paint_row(painter: &Painter, rect: Rect, index: usize, row: &LauncherRow, sel
     let usage_left = rect.right() - ROW_PADDING_X - USAGE_COLUMN_WIDTH;
     let text_left = dot_x + 4.0 + 8.0;
     let text_width = (usage_left - 8.0 - text_left).max(0.0);
-    let name = elided(painter, &row.name, FontId::proportional(13.0), theme::FG(), text_width);
+    let key = layout_key(painter, text_width);
+    let name = cached_elided(
+        &mut row.name_galley,
+        key,
+        painter,
+        &row.name,
+        FontId::proportional(13.0),
+        text_width,
+    );
     painter.galley(Pos2::new(text_left, rect.top() + 10.0), name, theme::FG());
-    let (email_text, email_color) = row
-        .email
-        .as_deref()
-        .map_or(("\u{2014}", theme::FG_DIM()), |email| (email, theme::FG_DIM()));
-    let email = elided(painter, email_text, FontId::proportional(11.0), email_color, text_width);
-    painter.galley(Pos2::new(text_left, rect.top() + 29.0), email, email_color);
+    let email = cached_elided(
+        &mut row.email_galley,
+        key,
+        painter,
+        row.email.as_deref().unwrap_or("\u{2014}"),
+        FontId::proportional(11.0),
+        text_width,
+    );
+    painter.galley(Pos2::new(text_left, rect.top() + 29.0), email, theme::FG_DIM());
 
     paint_usage_column(painter, rect, usage_left, row.usage.as_deref());
 }
@@ -495,11 +582,34 @@ fn paint_usage_column(painter: &Painter, rect: Rect, left: f32, usage: Option<&s
     }
 }
 
-/// One-line galley truncated with an ellipsis at `max_width`.
-fn elided(painter: &Painter, text: &str, font: FontId, color: Color32, max_width: f32) -> std::sync::Arc<egui::Galley> {
-    let mut job = egui::text::LayoutJob::simple_singleline(text.to_owned(), font, color);
+/// One-line galley truncated with an ellipsis at `max_width`. Laid out with
+/// `Color32::PLACEHOLDER`: the paint call supplies the (theme) colour.
+fn elided(painter: &Painter, text: &str, font: FontId, max_width: f32) -> Arc<Galley> {
+    let mut job = egui::text::LayoutJob::simple_singleline(text.to_owned(), font, Color32::PLACEHOLDER);
     job.wrap = egui::text::TextWrapping::truncate_at_width(max_width.max(1.0));
     painter.layout_job(job)
+}
+
+/// [`elided`] reused from `slot` while `key` is unchanged.
+fn cached_elided(
+    slot: &mut Option<CachedGalley>,
+    key: LayoutKey,
+    painter: &Painter,
+    text: &str,
+    font: FontId,
+    max_width: f32,
+) -> Arc<Galley> {
+    if let Some(cached) = slot.as_ref()
+        && cached.key == key
+    {
+        return Arc::clone(&cached.galley);
+    }
+    let galley = elided(painter, text, font, max_width);
+    *slot = Some(CachedGalley {
+        key,
+        galley: Arc::clone(&galley),
+    });
+    galley
 }
 
 #[cfg(test)]
@@ -577,5 +687,80 @@ mod tests {
         let found = find_profile_preset(&presets, "conta2").expect("derived preset");
         assert_eq!(found.name, "Claude \u{b7} conta2");
         assert!(find_profile_preset(&presets, "conta3").is_none());
+    }
+
+    #[test]
+    fn profile_names_follow_the_claude_presets_launch_resolves() {
+        let presets = vec![
+            preset("Shell", None, PanelKind::Shell),
+            preset("Claude Code", None, PanelKind::Claude),
+            preset("Other", Some("conta2"), PanelKind::Codex),
+            preset("Claude \u{b7} conta1", Some("conta1"), PanelKind::Claude),
+            preset("Claude \u{b7} conta2", Some("conta2"), PanelKind::Claude),
+        ];
+
+        let names = claude_profile_names(&presets);
+
+        assert_eq!(names, vec!["conta1".to_owned(), "conta2".to_owned()]);
+        for name in &names {
+            assert!(find_profile_preset(&presets, name).is_some(), "{name} must launch");
+        }
+    }
+
+    fn row(name: &str) -> LauncherRow {
+        LauncherRow {
+            name: name.to_owned(),
+            accent: Color32::WHITE,
+            email: None,
+            usage: None,
+            name_galley: None,
+            email_galley: None,
+        }
+    }
+
+    fn state_with(rows: Vec<LauncherRow>) -> ClaudeLauncherState {
+        ClaudeLauncherState {
+            selected: 0,
+            rows,
+            workspace_name: "ws".to_owned(),
+            header_galley: None,
+            rows_version: 0,
+            reveal_selected: false,
+        }
+    }
+
+    /// Height `show_launcher_contents` claims in a parent that has the default
+    /// (8, 8) item spacing, like the real modal.
+    fn contents_height(rows: Vec<LauncherRow>) -> f32 {
+        let ctx = Context::default();
+        let mut height = 0.0;
+        let mut state = state_with(rows);
+        for _ in 0..2 {
+            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    ui.set_width(MODAL_WIDTH);
+                    let top = ui.cursor().top();
+                    let _ = show_launcher_contents(ui, &mut state);
+                    height = ui.cursor().top() - top;
+                });
+            });
+        }
+        height
+    }
+
+    #[test]
+    fn empty_state_is_220_px_tall_regardless_of_theme_spacing() {
+        assert!((contents_height(Vec::new()) - 220.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn list_state_adds_no_item_spacing_between_blocks() {
+        let expected = HEADER_HEIGHT
+            + SEPARATOR_HEIGHT
+            + ROW_HEIGHT
+            + f32::from(LIST_MARGIN_Y) * 2.0
+            + SEPARATOR_HEIGHT
+            + FOOTER_HEIGHT;
+        assert!((contents_height(vec![row("conta1")]) - expected).abs() < 0.01);
     }
 }
