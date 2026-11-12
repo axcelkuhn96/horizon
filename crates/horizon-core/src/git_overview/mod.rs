@@ -10,7 +10,7 @@ pub use compute::compute_repo_overview;
 pub use model::{GitOverviewError, RepoOverview, WorktreeInfo};
 pub use poller::{DEFAULT_INTERVAL, OverviewPoller};
 pub use worktree_ops::{
-    Blocker, BranchInfo, CleanupCandidate, CleanupReason, CreateRequest, Created, RemoveOutcome, RemoveStatus,
-    WorktreeError, classify_cleanup, create_worktree, list_branches, plan_worktree_path, remove_worktrees,
-    validate_branch_name,
+    Blocker, BranchInfo, CleanupCandidate, CleanupReason, CreateRequest, Created, IgnoredFiles, RemoveOutcome,
+    RemoveStatus, WorktreeError, classify_cleanup, create_worktree, list_branches, plan_worktree_path,
+    remove_worktrees, validate_branch_name,
 };

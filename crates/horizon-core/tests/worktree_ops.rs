@@ -59,6 +59,12 @@ impl Fixture {
         path
     }
 
+    /// Moves `main` ahead so every worktree branch made so far is plainly merged
+    /// (a branch exactly at the default tip is "no commits yet", not merged).
+    fn advance_main(&self) {
+        commit_file(&self.repo, "later.txt", "later\n");
+    }
+
     fn classify(&self) -> Vec<CleanupCandidate> {
         classify_cleanup(&self.root, &[]).expect("classify")
     }
@@ -92,7 +98,7 @@ fn commit_file(repo: &Repository, name: &str, content: &str) -> Oid {
 
 fn remove(fixture: &Fixture, items: &[&Path], delete_branches: bool) -> Vec<RemoveStatus> {
     let items: Vec<PathBuf> = items.iter().map(|path| path.to_path_buf()).collect();
-    remove_worktrees(&fixture.root, &items, delete_branches, &[])
+    remove_worktrees(&fixture.root, &items, delete_branches, &[], &[])
         .into_iter()
         .map(|outcome| outcome.status)
         .collect()
@@ -291,12 +297,14 @@ fn create_failure_rolls_back_created_branch() {
 fn classify_marks_merged_branch() {
     let fixture = Fixture::new();
     let path = fixture.worktree("done");
+    fixture.advance_main();
 
     let candidate = fixture.candidate(&path);
 
     assert_eq!(candidate.reason, CleanupReason::Merged);
     assert_eq!(candidate.branch.as_deref(), Some("done"));
     assert!(candidate.safe(), "blockers: {:?}", candidate.blockers);
+    assert!(candidate.preselect());
 }
 
 #[test]
@@ -474,6 +482,7 @@ fn remove_never_deletes_locked_or_in_use() {
         &[locked.clone(), in_use.clone()],
         true,
         &[in_use.clone()],
+        &[],
     );
 
     assert_eq!(outcomes[0].status, RemoveStatus::Kept(vec![Blocker::Locked]));
@@ -531,6 +540,7 @@ fn remove_deletes_merged_branch_only_when_flag() {
     let fixture = Fixture::new();
     let keep = fixture.worktree("keep-branch");
     let drop = fixture.worktree("drop-branch");
+    fixture.advance_main();
 
     let first = remove(&fixture, &[&keep], false);
     let second = remove(&fixture, &[&drop], true);
@@ -567,4 +577,213 @@ fn remove_prunes_metadata_of_missing_directory() {
 
     assert_eq!(statuses, [RemoveStatus::Removed { branch_deleted: false }]);
     assert_eq!(fixture.repo.worktrees().expect("worktrees").len(), 0);
+}
+
+// --- data safety --------------------------------------------------------------------
+
+/// Commits a `.gitignore` on `main` so worktrees made afterwards ignore `.env` and `node_modules/`.
+fn ignore_secrets(fixture: &Fixture) {
+    commit_file(&fixture.repo, ".gitignore", ".env\nnode_modules/\n");
+}
+
+fn write_ignored(path: &Path) {
+    std::fs::write(path.join(".env"), "SECRET=1\n").expect("write env");
+    std::fs::create_dir_all(path.join("node_modules").join("pkg")).expect("node_modules");
+    std::fs::write(path.join("node_modules").join("pkg").join("index.js"), "x").expect("write js");
+}
+
+#[test]
+fn classify_reports_ignored_files_and_never_preselects_them() {
+    let fixture = Fixture::new();
+    ignore_secrets(&fixture);
+    let with_ignored = fixture.worktree("with-ignored");
+    let plain = fixture.worktree("plain");
+    fixture.advance_main();
+    write_ignored(&with_ignored);
+
+    let candidate = fixture.candidate(&with_ignored);
+
+    assert!(
+        candidate.safe(),
+        "ignored files are not 'dirty': {:?}",
+        candidate.blockers
+    );
+    assert_eq!(candidate.reason, CleanupReason::Merged);
+    assert_eq!(candidate.ignored.count, 2, "{:?}", candidate.ignored);
+    assert!(candidate.ignored.examples.iter().any(|name| name == ".env"));
+    assert!(candidate.ignored.any());
+    assert!(
+        !candidate.preselect(),
+        "a worktree holding ignored files is never pre-ticked"
+    );
+    let clean = fixture.candidate(&plain);
+    assert!(!clean.ignored.any());
+    assert!(clean.preselect());
+}
+
+#[test]
+fn remove_keeps_ignored_files_unless_confirmed() {
+    let fixture = Fixture::new();
+    ignore_secrets(&fixture);
+    let path = fixture.worktree("secrets");
+    fixture.advance_main();
+    write_ignored(&path);
+
+    let statuses = remove(&fixture, &[&path], false);
+
+    assert!(matches!(statuses[0], RemoveStatus::IgnoredNotConfirmed(ref found) if found.count == 2));
+    assert!(path.join(".env").is_file(), "nothing was deleted");
+
+    let confirmed = remove_worktrees(&fixture.root, &[path.clone()], false, &[], &[path.clone()]);
+
+    assert_eq!(confirmed[0].status, RemoveStatus::Removed { branch_deleted: false });
+    assert!(!path.exists());
+}
+
+#[test]
+fn classify_fresh_branch_is_not_merged_and_keeps_its_branch() {
+    let fixture = Fixture::new();
+    // Created at the very tip of `main`: no commits of its own yet.
+    let path = fixture.worktree("just-created");
+
+    let candidate = fixture.candidate(&path);
+
+    assert_eq!(candidate.reason, CleanupReason::Fresh);
+    assert_eq!(candidate.reason.label(), "no commits yet");
+    assert!(candidate.safe());
+    assert!(!candidate.preselect(), "a brand-new branch is never pre-ticked");
+
+    let statuses = remove(&fixture, &[&path], true);
+
+    assert_eq!(statuses, [RemoveStatus::Removed { branch_deleted: false }]);
+    assert!(fixture.branch_exists("just-created"), "its branch is kept");
+}
+
+#[test]
+fn classify_prunable_is_never_preselected() {
+    let fixture = Fixture::new();
+    let path = fixture.worktree("gone");
+    std::fs::remove_dir_all(&path).expect("remove dir");
+
+    let candidate = fixture.candidate(&path);
+
+    assert_eq!(candidate.reason, CleanupReason::Prunable);
+    assert!(candidate.safe());
+    assert!(!candidate.preselect());
+}
+
+#[test]
+fn prunable_with_missing_or_empty_parent_is_blocked() {
+    let fixture = Fixture::new();
+    let mount = fixture.tmp.path().join("mnt");
+    std::fs::create_dir(&mount).expect("mount point");
+    let path = mount.join("repo-offsite");
+    create_worktree(
+        &fixture.root,
+        &CreateRequest {
+            branch: "offsite".to_owned(),
+            base: None,
+            path: path.clone(),
+        },
+    )
+    .expect("create");
+
+    // Directory gone, mount point empty: looks like an unmounted drive.
+    std::fs::remove_dir_all(&path).expect("remove dir");
+    assert_eq!(fixture.candidate(&path).blockers, [Blocker::ParentMissing]);
+
+    // The whole mount point gone.
+    std::fs::remove_dir(&mount).expect("remove mount");
+    assert_eq!(fixture.candidate(&path).blockers, [Blocker::ParentMissing]);
+
+    let statuses = remove(&fixture, &[&path], false);
+    assert_eq!(statuses, [RemoveStatus::Kept(vec![Blocker::ParentMissing])]);
+    assert_eq!(
+        fixture.repo.worktrees().expect("worktrees").len(),
+        1,
+        "metadata is kept"
+    );
+}
+
+#[test]
+fn invalid_worktree_whose_directory_still_exists_keeps_its_metadata() {
+    let fixture = Fixture::new();
+    let path = fixture.worktree("broken");
+    let name = fixture
+        .repo
+        .worktrees()
+        .expect("worktrees")
+        .get(0)
+        .expect("name")
+        .to_owned();
+    // Git finds the metadata's common dir missing (a moved repository), yet the
+    // directory and its files are still there.
+    std::fs::write(
+        fixture
+            .root
+            .join(".git")
+            .join("worktrees")
+            .join(&name)
+            .join("commondir"),
+        "/nonexistent/horizon-test-commondir\n",
+    )
+    .expect("break commondir");
+    std::fs::write(path.join("precious.txt"), "keep").expect("write");
+
+    let candidate = fixture.candidate(&path);
+
+    assert_eq!(candidate.reason, CleanupReason::Prunable);
+    assert_eq!(candidate.blockers, [Blocker::StillOnDisk]);
+    let statuses = remove(&fixture, &[&path], false);
+    assert_eq!(statuses, [RemoveStatus::Kept(vec![Blocker::StillOnDisk])]);
+    assert!(path.join("precious.txt").is_file());
+    assert!(fixture.root.join(".git").join("worktrees").join(&name).is_dir());
+}
+
+#[test]
+fn worktree_with_initialized_submodules_is_blocked() {
+    let fixture = Fixture::new();
+    let path = fixture.worktree("with-sub");
+    fixture.advance_main();
+    let name = fixture
+        .repo
+        .worktrees()
+        .expect("worktrees")
+        .get(0)
+        .expect("name")
+        .to_owned();
+    let modules = fixture.root.join(".git").join("worktrees").join(&name).join("modules");
+    // An empty `modules` folder is not a submodule.
+    std::fs::create_dir(&modules).expect("modules");
+    assert!(fixture.candidate(&path).safe());
+
+    std::fs::create_dir_all(modules.join("vendor-lib")).expect("submodule clone");
+    std::fs::write(modules.join("vendor-lib").join("HEAD"), "ref: refs/heads/main\n").expect("write");
+
+    assert_eq!(fixture.candidate(&path).blockers, [Blocker::Submodules]);
+    let statuses = remove(&fixture, &[&path], true);
+    assert_eq!(statuses, [RemoveStatus::Kept(vec![Blocker::Submodules])]);
+    assert!(path.exists());
+    assert!(modules.join("vendor-lib").is_dir());
+}
+
+#[test]
+fn create_rejects_parent_dir_components() {
+    let fixture = Fixture::new();
+    let path = fixture.tmp.path().join("repo-x").join("..").join("repo-y");
+
+    let result = create_worktree(
+        &fixture.root,
+        &CreateRequest {
+            branch: "y".to_owned(),
+            base: None,
+            path,
+        },
+    );
+
+    assert!(
+        matches!(result, Err(WorktreeError::InvalidDestination(_))),
+        "{result:?}"
+    );
+    assert!(!fixture.branch_exists("y"));
 }

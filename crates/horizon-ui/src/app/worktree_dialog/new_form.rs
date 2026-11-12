@@ -2,7 +2,8 @@
 //! account and "also open as a workspace", with inline validation. Hub modals
 //! render above egui popups, so every selector here is an inline chip.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use egui::{Align, Align2, Context, FontId, Id, Key, Layout, Margin, RichText, Sense, Ui, Vec2};
 use horizon_core::git_overview::{BranchInfo, CreateRequest, plan_worktree_path, validate_branch_name};
@@ -17,6 +18,9 @@ const MAX_BRANCH_CHIPS: usize = 6;
 const LABEL_WIDTH: f32 = 56.0;
 const FIELD_HEIGHT: f32 = 28.0;
 const ERROR_LINE_HEIGHT: f32 = 16.0;
+/// Quiet time after the last keystroke before the path is planned and checked
+/// (both stat the filesystem, so not on every key).
+const SETTLE_DELAY: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Phase {
@@ -58,6 +62,9 @@ pub(super) fn validate_form(input: &FormInput<'_>, exists: &dyn Fn(&Path) -> boo
     if !path.is_absolute() {
         return Err("The path must be absolute".to_owned());
     }
+    if path.components().any(|part| matches!(part, Component::ParentDir)) {
+        return Err("The path cannot contain '..'".to_owned());
+    }
     if path.starts_with(input.repo_root.join(".git")) {
         return Err("The path cannot be inside .git".to_owned());
     }
@@ -93,6 +100,8 @@ pub(super) struct NewWorktreeDialog {
     also_workspace: bool,
     also_touched: bool,
     check: Result<(), String>,
+    /// Set by every edit; the path is planned and checked once it is quiet.
+    settle_at: Option<Instant>,
     checked_for: Option<(String, String)>,
     pub(super) phase: Phase,
     pub(super) error: Option<String>,
@@ -129,6 +138,7 @@ impl NewWorktreeDialog {
             also_workspace: true,
             also_touched: false,
             check: Err("Enter a branch name".to_owned()),
+            settle_at: None,
             checked_for: None,
             phase: Phase::Editing,
             error: None,
@@ -153,9 +163,11 @@ impl NewWorktreeDialog {
         presets.get(account.preset).cloned()
     }
 
+    /// Sets the branch from a click or a hint (one event, so planned at once).
     pub(super) fn set_branch(&mut self, branch: String) {
         self.branch = branch;
         self.on_branch_changed();
+        self.settle_now();
     }
 
     pub(super) fn apply_branches(&mut self, info: BranchInfo) {
@@ -167,9 +179,33 @@ impl NewWorktreeDialog {
 
     fn on_branch_changed(&mut self) {
         self.error = None;
+        self.settle_at = Some(Instant::now());
+    }
+
+    /// Plans the path and validates once typing paused, without touching the
+    /// filesystem on every keystroke.
+    fn settle(&mut self, ctx: &Context) {
+        let Some(since) = self.settle_at else {
+            return;
+        };
+        let remaining = SETTLE_DELAY.saturating_sub(since.elapsed());
+        if remaining.is_zero() {
+            self.settle_now();
+        } else {
+            ctx.request_repaint_after(remaining);
+        }
+    }
+
+    fn settle_now(&mut self) {
+        self.settle_at = None;
         if !self.path_custom {
             self.plan_path();
         }
+        self.refresh_check();
+    }
+
+    fn settling(&self) -> bool {
+        self.settle_at.is_some()
     }
 
     fn plan_path(&mut self) {
@@ -231,6 +267,9 @@ impl NewWorktreeDialog {
 
     /// The request for the worker; `None` while the form is invalid or busy.
     pub(super) fn take_request(&mut self) -> Option<CreateRequest> {
+        if self.settling() {
+            return None;
+        }
         self.refresh_check();
         if self.check.is_err() || matches!(self.phase, Phase::Working(_)) {
             return None;
@@ -277,7 +316,10 @@ impl NewWorktreeDialog {
 }
 
 pub(super) fn show(ctx: &Context, dialog: &mut NewWorktreeDialog) -> NewOutcome {
-    dialog.refresh_check();
+    dialog.settle(ctx);
+    if !dialog.settling() {
+        dialog.refresh_check();
+    }
     let branch_id = Id::new("new_worktree_branch");
     let path_id = Id::new("new_worktree_path");
     let mut submit = false;
@@ -359,7 +401,7 @@ fn contents(ui: &mut Ui, dialog: &mut NewWorktreeDialog, branch_id: Id, path_id:
 
     error_line(ui, dialog);
     submit |= footer(ui, dialog);
-    submit && dialog.check.is_ok() && !working
+    submit && dialog.check.is_ok() && !working && !dialog.settling()
 }
 
 fn branch_field(ui: &mut Ui, dialog: &mut NewWorktreeDialog, branch_id: Id) -> bool {
@@ -439,6 +481,7 @@ fn path_field(ui: &mut Ui, dialog: &mut NewWorktreeDialog, path_id: Id) {
             if response.changed() {
                 dialog.path_custom = true;
                 dialog.error = None;
+                dialog.settle_at = Some(Instant::now());
                 dialog.sync_also_workspace();
             }
             if response.lost_focus() {
@@ -503,7 +546,7 @@ const CHIP_ROW_HEIGHT: f32 = 26.0;
 /// Fixed-height line so showing or hiding an error never moves the footer.
 fn error_line(ui: &mut Ui, dialog: &NewWorktreeDialog) {
     let message = dialog.error.as_deref().or_else(|| {
-        if dialog.branch.trim().is_empty() {
+        if dialog.branch.trim().is_empty() || dialog.settling() {
             None
         } else {
             dialog.check.as_ref().err().map(String::as_str)
@@ -521,7 +564,7 @@ fn error_line(ui: &mut Ui, dialog: &NewWorktreeDialog) {
 /// Footer with the Esc hint and the primary button; `true` when it was clicked.
 fn footer(ui: &mut Ui, dialog: &NewWorktreeDialog) -> bool {
     let working = matches!(dialog.phase, Phase::Working(_));
-    let enabled = dialog.check.is_ok() && !working;
+    let enabled = dialog.check.is_ok() && !working && !dialog.settling();
     let mut clicked = false;
     ui.horizontal(|ui| {
         hub_ui::kbd_hint(ui, "Esc", if working { "wait" } else { "close" });
@@ -529,7 +572,7 @@ fn footer(ui: &mut Ui, dialog: &NewWorktreeDialog) -> bool {
             let button = hub_ui::primary_button(ui, dialog.create_label(), enabled);
             if enabled {
                 clicked = button.clicked();
-            } else if let Err(reason) = &dialog.check {
+            } else if let (false, Err(reason)) = (dialog.settling(), &dialog.check) {
                 button.on_hover_text(reason.as_str());
             }
         });
@@ -582,6 +625,10 @@ mod tests {
             Err("The path must be absolute".to_owned())
         );
         assert_eq!(
+            check("feat/x", "/work/../etc/x", work),
+            Err("The path cannot contain '..'".to_owned())
+        );
+        assert_eq!(
             check("feat/x", "/work/api/.git/wt", &["/work", "/work/api/.git"]),
             Err("The path cannot be inside .git".to_owned())
         );
@@ -619,6 +666,24 @@ mod tests {
         form.path_custom = true;
         form.set_branch("other".to_owned());
         assert_eq!(form.path_text, "/work/api-feat-new-thing", "an edited path is kept");
+    }
+
+    #[test]
+    fn typing_waits_for_a_pause_before_touching_the_filesystem() {
+        let mut form = dialog();
+        form.set_branch("feat/a".to_owned());
+        assert_eq!(form.path_text, "/work/api-feat-a");
+
+        // A keystroke only marks the form as settling: nothing is planned or checked yet.
+        form.branch = "feat/ab".to_owned();
+        form.on_branch_changed();
+        assert!(form.settling());
+        assert_eq!(form.path_text, "/work/api-feat-a", "the plan waits for the pause");
+        assert!(form.take_request().is_none(), "no request while settling");
+
+        form.settle_now();
+        assert!(!form.settling());
+        assert_eq!(form.path_text, "/work/api-feat-ab");
     }
 
     #[test]

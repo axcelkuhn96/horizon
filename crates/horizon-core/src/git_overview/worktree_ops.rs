@@ -8,14 +8,15 @@
 
 mod cleanup;
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use git2::{Branch, BranchType, Commit, ErrorCode, Reference, Repository, WorktreeAddOptions, WorktreePruneOptions};
 
 use super::compute::{head_branch, linked_branch};
 
 pub use cleanup::{
-    Blocker, CleanupCandidate, CleanupReason, RemoveOutcome, RemoveStatus, classify_cleanup, remove_worktrees,
+    Blocker, CleanupCandidate, CleanupReason, IgnoredFiles, RemoveOutcome, RemoveStatus, classify_cleanup,
+    remove_worktrees,
 };
 
 const MAX_BRANCH_CHARS: usize = 200;
@@ -217,6 +218,9 @@ fn check_destination(main: &Repository, path: &Path) -> Result<(), WorktreeError
     if !path.is_absolute() {
         return Err(WorktreeError::InvalidDestination("the path must be absolute"));
     }
+    if path.components().any(|part| matches!(part, Component::ParentDir)) {
+        return Err(WorktreeError::InvalidDestination("the path cannot contain '..'"));
+    }
     if path.starts_with(main.commondir()) {
         return Err(WorktreeError::InvalidDestination("inside the repository's .git folder"));
     }
@@ -321,13 +325,12 @@ fn unique_worktree_name(main: &Repository, path: &Path) -> String {
 }
 
 /// Undoes a failed `create_worktree`. `check_destination` guaranteed `path`
-/// was free, so anything there now was made by the failed attempt.
+/// was free just before the attempt; still, the directory is only deleted when
+/// it is provably what this call made: a `.git` link pointing at the metadata
+/// folder created under our unique `name` (or an empty folder). Anything else
+/// is left alone.
 fn rollback(main: &Repository, name: &str, path: &Path, created_branch: Option<&str>) {
-    if std::fs::symlink_metadata(path).is_ok()
-        && let Err(error) = std::fs::remove_dir_all(path)
-    {
-        tracing::warn!(path = %path.display(), "could not remove the partial worktree directory: {error}");
-    }
+    remove_partial_directory(main, name, path);
     if let Ok(worktree) = main.find_worktree(name)
         && let Err(error) = worktree.prune(Some(&mut WorktreePruneOptions::new()))
     {
@@ -338,5 +341,88 @@ fn rollback(main: &Repository, name: &str, path: &Path, created_branch: Option<&
         && let Err(error) = branch.delete()
     {
         tracing::warn!("could not delete the branch created for the failed worktree: {error}");
+    }
+}
+
+fn remove_partial_directory(main: &Repository, name: &str, path: &Path) {
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+        return;
+    };
+    if !metadata.is_dir() {
+        tracing::warn!(path = %path.display(), "left a non-directory in place after a failed worktree add");
+        return;
+    }
+    let gitdir = main.commondir().join("worktrees").join(name);
+    let result = if cleanup::owns_gitlink(path, &gitdir) {
+        std::fs::remove_dir_all(path)
+    } else if std::fs::read_dir(path).is_ok_and(|mut entries| entries.next().is_none()) {
+        std::fs::remove_dir(path)
+    } else {
+        tracing::warn!(
+            path = %path.display(),
+            "left the directory in place after a failed worktree add: it is not provably ours"
+        );
+        return;
+    };
+    if let Err(error) = result {
+        tracing::warn!(path = %path.display(), "could not remove the partial worktree directory: {error}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use git2::Repository;
+
+    use super::remove_partial_directory;
+
+    fn repo() -> (tempfile::TempDir, Repository) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("repo");
+        std::fs::create_dir(&root).expect("repo dir");
+        let repo = Repository::init(&root).expect("init");
+        (tmp, repo)
+    }
+
+    #[test]
+    fn rollback_never_deletes_a_directory_that_is_not_provably_ours() {
+        let (tmp, repo) = repo();
+        let foreign = tmp.path().join("foreign");
+        std::fs::create_dir(&foreign).expect("dir");
+        std::fs::write(foreign.join("keep.txt"), "keep").expect("write");
+
+        // No gitlink at all.
+        remove_partial_directory(&repo, "foreign", &foreign);
+        assert!(foreign.join("keep.txt").is_file());
+
+        // A gitlink to some other repository.
+        std::fs::write(foreign.join(".git"), "gitdir: /somewhere/else/.git/worktrees/x\n").expect("gitlink");
+        remove_partial_directory(&repo, "foreign", &foreign);
+        assert!(foreign.join("keep.txt").is_file());
+
+        // A gitlink to this repository's metadata, but for a different worktree name.
+        let other = repo.path().join("worktrees").join("other");
+        std::fs::create_dir_all(&other).expect("metadata");
+        std::fs::write(foreign.join(".git"), format!("gitdir: {}\n", other.display())).expect("gitlink");
+        remove_partial_directory(&repo, "foreign", &foreign);
+        assert!(foreign.join("keep.txt").is_file());
+    }
+
+    #[test]
+    fn rollback_removes_what_this_call_made() {
+        let (tmp, repo) = repo();
+        let metadata = repo.path().join("worktrees").join("mine");
+        std::fs::create_dir_all(&metadata).expect("metadata");
+        let made = tmp.path().join("mine");
+        std::fs::create_dir(&made).expect("dir");
+        std::fs::write(made.join("a.txt"), "partial checkout").expect("write");
+        std::fs::write(made.join(".git"), format!("gitdir: {}\n", metadata.display())).expect("gitlink");
+
+        remove_partial_directory(&repo, "mine", &made);
+        assert!(!made.exists(), "a directory linked to our metadata is removed");
+
+        let empty = tmp.path().join("empty");
+        std::fs::create_dir(&empty).expect("dir");
+        remove_partial_directory(&repo, "empty", &empty);
+        assert!(!empty.exists(), "an empty directory is removed");
     }
 }

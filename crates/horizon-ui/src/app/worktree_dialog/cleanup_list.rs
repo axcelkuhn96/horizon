@@ -2,6 +2,9 @@
 //! directories would be removed, why each is a candidate, and what blocks the
 //! rest. Rows that are not `safe()` can never be ticked; the destructive
 //! button only acts on ticked, safe rows and the worker re-checks every one.
+//! Only merged worktrees holding nothing ignored are ticked by default; a row
+//! with ignored files (`.env`, `node_modules/`...) needs a second, explicit
+//! click, and the worker refuses it unless that confirmation came along.
 
 use std::path::{Path, PathBuf};
 
@@ -42,6 +45,8 @@ struct CleanupRow {
     short_path: String,
     tooltip: String,
     checked: bool,
+    /// First click on a row with ignored files: the second one confirms.
+    armed: bool,
     /// Why the last removal attempt left this row in place.
     note: Option<String>,
 }
@@ -53,6 +58,7 @@ impl CleanupRow {
             short_path: short_display_path(repo_root, &candidate.path),
             tooltip: String::new(),
             checked: false,
+            armed: false,
             note: None,
             candidate,
         };
@@ -63,17 +69,50 @@ impl CleanupRow {
     /// Rebuilds the strings and the default tick after the candidate changed.
     fn refresh(&mut self) {
         let path = self.candidate.path.display();
-        self.tooltip = if self.candidate.safe() {
-            format!("{path}\nClean and unlocked: safe to remove.")
+        let mut tooltip = if self.candidate.safe() {
+            format!("{path}\nNo uncommitted changes and unlocked.")
         } else {
             let reasons: Vec<&str> = self.candidate.blockers.iter().map(|b| b.explanation()).collect();
             format!("{path}\nBlocked: {}", reasons.join(" "))
         };
-        self.checked = self.candidate.safe();
+        match self.candidate.reason {
+            CleanupReason::Fresh => tooltip.push_str(
+                "\nIts branch is at the default branch's tip: no commits of its own yet (or merged by fast-forward).",
+            ),
+            CleanupReason::Prunable => tooltip.push_str("\nThe folder is already gone: only git's record is removed."),
+            CleanupReason::Merged | CleanupReason::Orphan => {}
+        }
+        if self.candidate.ignored.any() {
+            tooltip.push_str(&format!(
+                "\nIgnored files are not changes, but removing the folder deletes them: {}.",
+                self.candidate.ignored.describe()
+            ));
+        }
+        self.tooltip = tooltip;
+        self.checked = self.candidate.preselect();
+        self.armed = false;
     }
 
+    /// Ticks or clears the row. A row holding ignored files cannot be ticked here.
     fn set_checked(&mut self, checked: bool) {
-        self.checked = checked && self.candidate.safe();
+        self.checked = checked && self.candidate.safe() && !self.candidate.ignored.any();
+        self.armed = false;
+    }
+
+    /// A click on the row: clear when ticked; tick when plain; for a row with
+    /// ignored files the first click only arms it and the second ticks it.
+    fn toggle(&mut self) {
+        if !self.candidate.safe() {
+            return;
+        }
+        if self.checked {
+            self.set_checked(false);
+        } else if self.candidate.ignored.any() && !self.armed {
+            self.armed = true;
+        } else {
+            self.checked = true;
+            self.armed = false;
+        }
     }
 }
 
@@ -84,7 +123,7 @@ fn build_rows(repo_root: &Path, candidates: Vec<CleanupCandidate>, only: Option<
         .filter(|candidate| only.is_none_or(|path| candidate.path == path))
         .map(|candidate| CleanupRow::new(repo_root, candidate))
         .collect();
-    rows.sort_by_key(|row| !row.candidate.safe());
+    rows.sort_by_key(|row| (!row.candidate.safe(), !row.candidate.preselect()));
     rows
 }
 
@@ -92,6 +131,14 @@ fn build_rows(repo_root: &Path, candidates: Vec<CleanupCandidate>, only: Option<
 fn selected(rows: &[CleanupRow]) -> Vec<PathBuf> {
     rows.iter()
         .filter(|row| row.checked && row.candidate.safe())
+        .map(|row| row.candidate.path.clone())
+        .collect()
+}
+
+/// Ticked rows whose ignored files the user agreed to delete.
+fn confirmed_ignored(rows: &[CleanupRow]) -> Vec<PathBuf> {
+    rows.iter()
+        .filter(|row| row.checked && row.candidate.safe() && row.candidate.ignored.any())
         .map(|row| row.candidate.path.clone())
         .collect()
 }
@@ -113,6 +160,9 @@ fn kept_phrase(blocker: Blocker) -> &'static str {
         Blocker::DefaultBranchUnknown => "default branch unknown",
         Blocker::Main => "is the main worktree",
         Blocker::NestedWorktree => "contains a worktree",
+        Blocker::Submodules => "has submodules",
+        Blocker::StillOnDisk => "still on disk",
+        Blocker::ParentMissing => "folder unavailable",
     }
 }
 
@@ -130,6 +180,12 @@ fn removal_summary(outcomes: &[RemoveOutcome]) -> String {
                     if !reasons.contains(&phrase) {
                         reasons.push(phrase);
                     }
+                }
+            }
+            RemoveStatus::IgnoredNotConfirmed(_) => {
+                kept += 1;
+                if !reasons.contains(&"has ignored files") {
+                    reasons.push("has ignored files");
                 }
             }
             RemoveStatus::NotCandidate | RemoveStatus::Refused => kept += 1,
@@ -173,7 +229,8 @@ impl CleanupDialog {
             error: None,
             summary: None,
             rows: Vec::new(),
-            delete_branches: true,
+            // Off: deleting a branch is a separate decision from removing its folder.
+            delete_branches: false,
         }
     }
 
@@ -183,6 +240,14 @@ impl CleanupDialog {
 
     pub(super) fn delete_branches(&self) -> bool {
         self.delete_branches
+    }
+
+    pub(super) fn confirmed_ignored_paths(&self) -> Vec<PathBuf> {
+        if self.phase == CleanupPhase::Ready {
+            confirmed_ignored(&self.rows)
+        } else {
+            Vec::new()
+        }
     }
 
     pub(super) fn selected_paths(&self) -> Vec<PathBuf> {
@@ -210,6 +275,12 @@ impl CleanupDialog {
             match &outcome.status {
                 RemoveStatus::Removed { .. } | RemoveStatus::NotCandidate | RemoveStatus::Refused => {
                     self.rows.remove(index);
+                }
+                RemoveStatus::IgnoredNotConfirmed(found) => {
+                    let row = &mut self.rows[index];
+                    row.candidate.ignored.clone_from(found);
+                    row.refresh();
+                    row.note = Some("Kept: it holds ignored files you did not confirm".to_owned());
                 }
                 RemoveStatus::Kept(blockers) => {
                     let row = &mut self.rows[index];
@@ -320,10 +391,16 @@ fn header(ui: &mut Ui, dialog: &CleanupDialog) {
             ui.label(RichText::new(scope).size(10.5).color(theme::FG_DIM()));
         });
     });
-    ui.label(
-        RichText::new("Only clean, unlocked worktrees can be removed.")
+    ui.add(
+        egui::Label::new(
+            RichText::new(
+                "Clean = no uncommitted changes. Ignored files (.env, node_modules...) are not changes: \
+                 they are listed and deleted with the folder, so those rows need a second click.",
+            )
             .size(10.5)
             .color(theme::FG_DIM()),
+        )
+        .wrap(),
     );
     ui.add_space(2.0);
 }
@@ -343,13 +420,13 @@ fn reason_color(reason: CleanupReason) -> Color32 {
     match reason {
         CleanupReason::Merged => theme::PALETTE_GREEN(),
         CleanupReason::Prunable => theme::FG_DIM(),
-        CleanupReason::Orphan => theme::PALETTE_YELLOW(),
+        CleanupReason::Orphan | CleanupReason::Fresh => theme::PALETTE_YELLOW(),
     }
 }
 
 fn blocker_color(blocker: Blocker) -> Color32 {
     match blocker {
-        Blocker::Dirty => theme::PALETTE_YELLOW(),
+        Blocker::Dirty | Blocker::Submodules => theme::PALETTE_YELLOW(),
         Blocker::UnreachableCommits => theme::PALETTE_RED(),
         Blocker::ProtectedByWorkspace => theme::ACCENT(),
         _ => theme::FG_DIM(),
@@ -363,7 +440,7 @@ fn paint_row(ui: &mut Ui, row: &mut CleanupRow, interactive: bool) {
     let enabled = safe && interactive;
     response.widget_info(|| WidgetInfo::selected(WidgetType::Checkbox, enabled, row.checked, &row.title));
     if enabled && response.clicked() {
-        row.set_checked(!row.checked);
+        row.toggle();
     }
     let response = response.on_hover_text(row.tooltip.as_str());
     if !ui.is_rect_visible(rect) {
@@ -380,12 +457,23 @@ fn paint_row(ui: &mut Ui, row: &mut CleanupRow, interactive: bool) {
 
     // Pills, right to left: blockers last in reading order, reason first.
     let mut right = rect.right() - 10.0;
-    let mut pills: Vec<(&str, Color32)> = vec![(row.candidate.reason.label(), reason_color(row.candidate.reason))];
+    let mut pills: Vec<(String, Color32)> = vec![(
+        row.candidate.reason.label().to_owned(),
+        reason_color(row.candidate.reason),
+    )];
+    if row.candidate.ignored.any() {
+        let text = if row.candidate.ignored.count == 0 {
+            "ignored files?".to_owned()
+        } else {
+            format!("{} ignored", row.candidate.ignored.count)
+        };
+        pills.push((text, theme::PALETTE_YELLOW()));
+    }
     pills.extend(
         row.candidate
             .blockers
             .iter()
-            .map(|blocker| (blocker.label(), blocker_color(*blocker))),
+            .map(|blocker| (blocker.label().to_owned(), blocker_color(*blocker))),
     );
     for (text, color) in pills.iter().rev() {
         let width = hub_ui::pill_width(painter, text);
@@ -398,8 +486,17 @@ fn paint_row(ui: &mut Ui, row: &mut CleanupRow, interactive: bool) {
     let max_width = (right - text_x - 6.0).max(40.0);
     let title = hub_ui::elided(painter, &row.title, FontId::proportional(12.0), max_width);
     painter.galley(Pos2::new(text_x, rect.top() + 5.0), title, fade(theme::FG()));
+    let warning;
     let (second, color) = match &row.note {
         Some(note) => (note.as_str(), theme::PALETTE_RED()),
+        None if row.armed => {
+            warning = format!("Click again to also delete {}", row.candidate.ignored.describe());
+            (warning.as_str(), theme::PALETTE_RED())
+        }
+        None if row.checked && row.candidate.ignored.any() => {
+            warning = format!("Will also delete {}", row.candidate.ignored.describe());
+            (warning.as_str(), theme::PALETTE_YELLOW())
+        }
         None => (row.short_path.as_str(), fade(theme::FG_DIM())),
     };
     let second = hub_ui::elided(painter, second, FontId::monospace(10.5), max_width);
@@ -473,9 +570,11 @@ fn danger_button(ui: &mut Ui, label: &str, enabled: bool) -> egui::Response {
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use horizon_core::git_overview::{Blocker, CleanupCandidate, CleanupReason, RemoveOutcome, RemoveStatus};
+    use horizon_core::git_overview::{
+        Blocker, CleanupCandidate, CleanupReason, IgnoredFiles, RemoveOutcome, RemoveStatus,
+    };
 
-    use super::{build_rows, confirm_label, removal_summary, selected};
+    use super::{CleanupDialog, build_rows, confirm_label, confirmed_ignored, removal_summary, selected};
 
     fn candidate(path: &str, reason: CleanupReason, blockers: &[Blocker]) -> CleanupCandidate {
         CleanupCandidate {
@@ -483,7 +582,18 @@ mod tests {
             branch: Some(path.rsplit('/').next().unwrap_or(path).to_owned()),
             reason,
             blockers: blockers.to_vec(),
+            ignored: IgnoredFiles::default(),
         }
+    }
+
+    fn with_ignored(mut candidate: CleanupCandidate) -> CleanupCandidate {
+        candidate.ignored = IgnoredFiles {
+            count: 2,
+            examples: vec![".env".to_owned(), "node_modules/".to_owned()],
+            capped: false,
+            unreadable: false,
+        };
+        candidate
     }
 
     fn rows() -> Vec<super::CleanupRow> {
@@ -502,11 +612,9 @@ mod tests {
     #[test]
     fn cleanup_selection_excludes_blocked_rows() {
         let mut rows = rows();
-        // Safe rows come first and are ticked by default; blocked ones are not.
-        assert_eq!(
-            selected(&rows),
-            [PathBuf::from("/work/api-fix"), PathBuf::from("/work/api-old")]
-        );
+        // Safe rows come first; only the merged one is ticked by default (a prunable
+        // record needs a deliberate tick); blocked ones are never ticked.
+        assert_eq!(selected(&rows), [PathBuf::from("/work/api-fix")]);
         // A blocked row can never be ticked, whatever the caller asks.
         for row in &mut rows {
             row.set_checked(true);
@@ -516,6 +624,72 @@ mod tests {
         // Even a forced tick on a blocked row is ignored when selecting.
         rows[3].checked = true;
         assert_eq!(selected(&rows).len(), 2);
+    }
+
+    #[test]
+    fn rows_with_ignored_files_or_no_commits_are_not_preticked_and_need_two_clicks() {
+        let mut rows = build_rows(
+            Path::new("/work/api"),
+            vec![
+                with_ignored(candidate("/work/api-env", CleanupReason::Merged, &[])),
+                candidate("/work/api-new", CleanupReason::Fresh, &[]),
+                candidate("/work/api-done", CleanupReason::Merged, &[]),
+            ],
+            None,
+        );
+        assert_eq!(selected(&rows), [PathBuf::from("/work/api-done")]);
+        assert!(confirmed_ignored(&rows).is_empty());
+
+        let env = rows
+            .iter_mut()
+            .find(|row| row.candidate.path == Path::new("/work/api-env"))
+            .expect("row");
+        env.set_checked(true);
+        assert!(
+            !env.checked,
+            "ignored data cannot be ticked without the confirmation click"
+        );
+        env.toggle();
+        assert!(env.armed && !env.checked, "first click only arms the row");
+        env.toggle();
+        assert!(env.checked && !env.armed, "second click confirms");
+        assert_eq!(confirmed_ignored(&rows), [PathBuf::from("/work/api-env")]);
+
+        let fresh = rows
+            .iter_mut()
+            .find(|row| row.candidate.path == Path::new("/work/api-new"))
+            .expect("row");
+        fresh.toggle();
+        assert!(fresh.checked, "a plain row ticks with one click");
+        fresh.toggle();
+        assert!(!fresh.checked);
+    }
+
+    #[test]
+    fn deleting_merged_branches_is_off_by_default() {
+        let dialog = CleanupDialog::new(String::new(), PathBuf::from("/work/api"), None);
+        assert!(!dialog.delete_branches());
+    }
+
+    #[test]
+    fn unconfirmed_ignored_outcome_unticks_the_row() {
+        let mut dialog = CleanupDialog::new(String::new(), PathBuf::from("/work/api"), None);
+        dialog.apply_classification(Ok(vec![candidate("/work/api-a", CleanupReason::Merged, &[])]));
+        assert_eq!(dialog.selected_paths(), [PathBuf::from("/work/api-a")]);
+
+        let found = IgnoredFiles {
+            count: 1,
+            examples: vec![".env".to_owned()],
+            capped: false,
+            unreadable: false,
+        };
+        let summary = dialog.apply_removal(&[RemoveOutcome {
+            path: PathBuf::from("/work/api-a"),
+            status: RemoveStatus::IgnoredNotConfirmed(found),
+        }]);
+
+        assert_eq!(summary, "Removed 0, kept 1 (has ignored files)");
+        assert!(dialog.selected_paths().is_empty());
     }
 
     #[test]

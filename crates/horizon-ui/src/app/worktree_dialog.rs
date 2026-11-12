@@ -53,6 +53,11 @@ enum WorktreeEvent {
         job: u64,
         outcomes: Vec<RemoveOutcome>,
     },
+    /// The worker panicked; whatever it was doing did not finish.
+    Failed {
+        job: u64,
+        message: String,
+    },
 }
 
 struct Notice {
@@ -83,8 +88,16 @@ impl WorktreeUi {
         let spawned = std::thread::Builder::new()
             .name("horizon-worktree".to_owned())
             .spawn(move || {
+                // A panic still answers, so a dialog never waits for a result that cannot come.
+                let event =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(job))).unwrap_or_else(|payload| {
+                        WorktreeEvent::Failed {
+                            job,
+                            message: panic_message(payload.as_ref()),
+                        }
+                    });
                 // A closed channel means the app is shutting down.
-                let _ = sender.send(work(job));
+                let _ = sender.send(event);
                 ctx.request_repaint();
             });
         match spawned {
@@ -96,12 +109,34 @@ impl WorktreeUi {
         }
     }
 
+    /// A job whose result a dialog is waiting for is in flight.
+    fn busy(&self) -> bool {
+        self.new
+            .as_ref()
+            .is_some_and(|dialog| matches!(dialog.phase, Phase::Working(_)))
+            || self
+                .cleanup
+                .as_ref()
+                .is_some_and(|dialog| matches!(dialog.phase, CleanupPhase::Removing(_)))
+    }
+
     fn set_notice(&mut self, text: String, error: bool) {
         self.notice = Some(Notice {
             text,
             error,
             until: Instant::now() + NOTICE_TTL,
         });
+    }
+}
+
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    let detail = payload
+        .downcast_ref::<&str>()
+        .map(|text| (*text).to_owned())
+        .or_else(|| payload.downcast_ref::<String>().cloned());
+    match detail {
+        Some(detail) => format!("The background task crashed: {detail}"),
+        None => "The background task crashed.".to_owned(),
     }
 }
 
@@ -200,6 +235,12 @@ impl HorizonApp {
         workspace: WorkspaceId,
         branch_hint: Option<String>,
     ) {
+        if self.hub.worktree_ui.busy() {
+            self.hub
+                .worktree_ui
+                .set_notice("Wait for the current worktree operation to finish.".to_owned(), true);
+            return;
+        }
         let Some(overview) = self.hub.git.overview_for(workspace) else {
             return;
         };
@@ -252,6 +293,12 @@ impl HorizonApp {
         workspace: WorkspaceId,
         only: Option<PathBuf>,
     ) {
+        if self.hub.worktree_ui.busy() {
+            self.hub
+                .worktree_ui
+                .set_notice("Wait for the current worktree operation to finish.".to_owned(), true);
+            return;
+        }
         let Some(overview) = self.hub.git.overview_for(workspace) else {
             return;
         };
@@ -310,6 +357,52 @@ impl HorizonApp {
                 }
             }
             WorktreeEvent::Removed { job, outcomes } => self.finish_removal(job, &outcomes),
+            WorktreeEvent::Failed { job, message } => self.fail_job(ctx, job, &message),
+        }
+    }
+
+    /// A worker panicked: put the dialog waiting for `job` back in a usable state.
+    fn fail_job(&mut self, ctx: &Context, job: u64, message: &str) {
+        let ui = &mut self.hub.worktree_ui;
+        if let Some(dialog) = ui.new.as_mut()
+            && dialog.phase == Phase::Working(job)
+        {
+            // The worktree may or may not exist: a refresh shows the truth.
+            dialog.phase = Phase::Editing;
+            dialog.error = Some(message.to_owned());
+            self.hub.git.refresh_now();
+            return;
+        }
+        let mut reload = None;
+        if let Some(dialog) = ui.cleanup.as_mut() {
+            match dialog.phase {
+                CleanupPhase::Loading(waiting) if waiting == job => {
+                    dialog.phase = CleanupPhase::Ready;
+                    dialog.error = Some(message.to_owned());
+                }
+                CleanupPhase::Removing(waiting) if waiting == job => {
+                    // Some worktrees may already be gone: scan again.
+                    dialog.error = Some(format!("{message} Check the list below."));
+                    reload = Some(dialog.repo_root().to_path_buf());
+                }
+                _ => {}
+            }
+        }
+        if let Some(repo_root) = reload {
+            self.reload_cleanup(ctx, repo_root);
+        }
+        self.hub.git.refresh_now();
+    }
+
+    fn reload_cleanup(&mut self, ctx: &Context, repo_root: PathBuf) {
+        let protected = self.worktree_protected_paths();
+        let ui = &mut self.hub.worktree_ui;
+        let job = ui.spawn_job(ctx, move |job| WorktreeEvent::Classified {
+            job,
+            result: classify_cleanup(&repo_root, &protected).map_err(|error| error.to_string()),
+        });
+        if let Some(dialog) = ui.cleanup.as_mut() {
+            dialog.phase = job.map_or(CleanupPhase::Ready, CleanupPhase::Loading);
         }
     }
 
@@ -356,17 +449,26 @@ impl HorizonApp {
                     return;
                 };
                 self.hub.git.refresh_now();
-                let message = self.open_claude_in_new_worktree(ctx, &dialog, &created);
-                self.hub.worktree_ui.set_notice(message, false);
+                let (message, failed) = self.open_claude_in_new_worktree(ctx, &dialog, &created);
+                self.hub.worktree_ui.set_notice(message, failed);
             }
         }
     }
 
     /// Opens the Claude session of the account picked in `dialog` in the new
-    /// worktree, in a new workspace when asked. Returns the notice text.
-    fn open_claude_in_new_worktree(&mut self, ctx: &Context, dialog: &NewWorktreeDialog, created: &Created) -> String {
+    /// worktree, in a new workspace when asked. Returns the notice text and
+    /// whether it reports a problem.
+    fn open_claude_in_new_worktree(
+        &mut self,
+        ctx: &Context,
+        dialog: &NewWorktreeDialog,
+        created: &Created,
+    ) -> (String, bool) {
         let Some(preset) = dialog.chosen_preset(&self.presets) else {
-            return format!("Created worktree {} (no Claude preset configured)", created.branch);
+            return (
+                format!("Created worktree {} (no Claude preset configured)", created.branch),
+                false,
+            );
         };
         let mut options = preset.to_panel_options();
         options.cwd = Some(created.path.clone());
@@ -382,17 +484,23 @@ impl HorizonApp {
             self.board.active_workspace
         };
         let Some(workspace) = workspace else {
-            return format!("Created worktree {}", created.branch);
+            return (format!("Created worktree {}", created.branch), false);
         };
-        self.open_panel_in_worktree(workspace, options);
+        let opened = self.open_panel_in_worktree(workspace, options);
         if dialog.also_workspace() {
             self.board.focus_workspace(workspace);
             self.fit_workspace_visible(ctx, workspace);
         }
+        if !opened {
+            return (
+                format!("Created worktree {}, but Claude could not be started", created.branch),
+                true,
+            );
+        }
         if let Some(alias) = &preset.alias {
             self.hub.last_launched_profile = Some(alias.clone());
         }
-        format!("Created worktree {} and opened Claude", created.branch)
+        (format!("Created worktree {} and opened Claude", created.branch), false)
     }
 
     fn submit_cleanup(&mut self, ctx: &Context) {
@@ -406,10 +514,11 @@ impl HorizonApp {
         }
         let repo_root = dialog.repo_root().to_path_buf();
         let delete_branches = dialog.delete_branches();
+        let confirmed_ignored = dialog.confirmed_ignored_paths();
         let ui = &mut self.hub.worktree_ui;
         let job = ui.spawn_job(ctx, move |job| WorktreeEvent::Removed {
             job,
-            outcomes: remove_worktrees(&repo_root, &items, delete_branches, &protected),
+            outcomes: remove_worktrees(&repo_root, &items, delete_branches, &protected, &confirmed_ignored),
         });
         if let Some(dialog) = ui.cleanup.as_mut() {
             match job {

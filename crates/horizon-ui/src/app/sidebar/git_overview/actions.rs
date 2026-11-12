@@ -82,13 +82,18 @@ impl HorizonApp {
     }
 
     /// Creates the panel (its explicit cwd wins over the workspace cwd) and focuses it.
-    pub(in crate::app) fn open_panel_in_worktree(&mut self, workspace: WorkspaceId, options: PanelOptions) {
+    /// `true` when the panel was created.
+    pub(in crate::app) fn open_panel_in_worktree(&mut self, workspace: WorkspaceId, options: PanelOptions) -> bool {
         match self.create_panel_with_options(options, workspace) {
             Ok(panel_id) => {
                 self.board.focus(panel_id);
                 self.mark_runtime_dirty();
+                true
             }
-            Err(error) => tracing::error!("failed to open panel in worktree: {error}"),
+            Err(error) => {
+                tracing::error!("failed to open panel in worktree: {error}");
+                false
+            }
         }
     }
 
