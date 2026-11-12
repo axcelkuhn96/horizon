@@ -6,6 +6,7 @@ mod claude_profiles;
 mod input;
 mod workspace_template;
 
+pub use claude_profiles::{ClaudeProfile, discover_claude_profiles, expand_config_dir, validate_claude_profiles};
 pub use input::{InputConfig, scroll_should_pan_canvas};
 
 use crate::config_migration::{self, CURRENT_CONFIG_VERSION};
@@ -36,6 +37,8 @@ pub struct Config {
     pub presets: Vec<PresetConfig>,
     #[serde(default)]
     pub workspaces: Vec<WorkspaceConfig>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub claude_profiles: Vec<ClaudeProfile>,
 }
 
 /// Existing config files without a `version` field are treated as v1
@@ -57,6 +60,7 @@ impl Default for Config {
             input: InputConfig::default(),
             presets: default_presets(),
             workspaces: Vec::new(),
+            claude_profiles: Vec::new(),
         }
     }
 }
@@ -673,6 +677,7 @@ impl Config {
         self.input.resolve_pan_modifier()?;
         crate::speech_config::validate_speech(&self.features.speech, &shortcuts)?;
         validate_ssh_connections(&self.presets, &self.workspaces)?;
+        validate_claude_profiles(&self.claude_profiles)?;
         Ok(())
     }
 
