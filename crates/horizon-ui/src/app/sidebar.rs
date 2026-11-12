@@ -2,6 +2,7 @@ mod auto_hide;
 mod menu;
 mod routing;
 mod toolbar;
+mod workspace_menu;
 
 use routing::{
     should_focus_workspace_on_row_click, sidebar_workspace_drop_should_dock, sidebar_workspace_insert_dock_side,
@@ -23,17 +24,12 @@ use super::root_chrome::effective_sidebar_width;
 use super::util;
 use super::{HorizonApp, TOOLBAR_HEIGHT, WS_BG_PAD, WS_TITLE_HEIGHT};
 
+pub(super) use auto_hide::SidebarAutoHideState;
 use auto_hide::{
     SIDEBAR_AUTO_HIDE_DELAY, SIDEBAR_STRIP_HOVER_WIDTH, SIDEBAR_STRIP_WIDTH, SidebarReveal, reserved_sidebar_width,
     sidebar_reveal_state,
 };
-
-/// Auto-hide bookkeeping: last pointer hover and whether the sidebar was fully revealed.
-#[derive(Default)]
-pub(super) struct SidebarAutoHideState {
-    last_hover: Option<Instant>,
-    revealed: bool,
-}
+use workspace_menu::{WorkspaceMenuAction, WorkspaceMenuEnv};
 
 struct WorkspaceSidebarEntry {
     id: WorkspaceId,
@@ -70,6 +66,7 @@ struct SidebarActions {
     clear_layout: Option<WorkspaceId>,
     arrange_layout: Option<(WorkspaceId, WorkspaceLayout)>,
     toggle_sidebar_collapse: Option<WorkspaceId>,
+    workspace_menu: Option<WorkspaceMenuAction>,
 }
 
 #[derive(Clone, Copy)]
@@ -116,6 +113,7 @@ impl HorizonApp {
     }
 
     pub(super) fn render_sidebar(&mut self, ctx: &Context) {
+        self.render_workspace_menu_overlays(ctx);
         if !self.sidebar_visible {
             return;
         }
@@ -450,7 +448,12 @@ impl HorizonApp {
                 actions.pan_to_workspace = Some(workspace.id);
             }
         }
-        Self::show_workspace_context_menu(&row_response, workspace, actions);
+        let menu_env = WorkspaceMenuEnv {
+            presets: &self.presets,
+            template_target: self.workspace_template_target(workspace.id),
+            can_delete: self.board.workspaces.len() > 1,
+        };
+        Self::show_workspace_context_menu(&row_response, workspace, &menu_env, actions);
 
         if !workspace.sidebar_collapsed {
             ui.add_space(2.0);
@@ -507,10 +510,20 @@ impl HorizonApp {
     fn show_workspace_context_menu(
         response: &egui::Response,
         workspace: &WorkspaceSidebarEntry,
+        menu_env: &WorkspaceMenuEnv<'_>,
         actions: &mut SidebarActions,
     ) {
         menu::context_menu_above_sidebar(response, |ui| {
             ui.set_min_width(160.0);
+            if let Some(action) = workspace_menu::show_items(ui, workspace.id, menu_env) {
+                if matches!(action, WorkspaceMenuAction::Rename(_)) {
+                    // The inline title editor lives on the canvas label: bring it into view.
+                    actions.pan_to_workspace = Some(workspace.id);
+                }
+                actions.workspace_menu = Some(action);
+                ui.close();
+            }
+            ui.separator();
             ui.label(egui::RichText::new("Arrange Panels").size(11.0).color(theme::FG_DIM()));
             if ui.add(sidebar_menu_item("Default", theme::FG_SOFT())).clicked() {
                 actions.clear_layout = Some(workspace.id);
@@ -822,6 +835,9 @@ impl HorizonApp {
         {
             workspace.sidebar_collapsed = !workspace.sidebar_collapsed;
             self.mark_runtime_dirty();
+        }
+        if let Some(action) = actions.workspace_menu {
+            self.apply_workspace_menu_action(ctx, action);
         }
     }
 }
