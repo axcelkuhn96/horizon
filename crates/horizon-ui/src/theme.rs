@@ -29,6 +29,9 @@ struct ThemePalette {
     palette_red: Color32,
     palette_yellow: Color32,
     palette_cyan: Color32,
+    profile_pink: Color32,
+    profile_blue: Color32,
+    profile_violet: Color32,
     terminal_palette: [Color32; 16],
 }
 
@@ -58,6 +61,9 @@ const DARK_THEME: ThemePalette = ThemePalette {
     palette_red: Color32::from_rgb(255, 107, 90),
     palette_yellow: Color32::from_rgb(245, 200, 92),
     palette_cyan: Color32::from_rgb(122, 200, 192), // muted warm teal
+    profile_pink: Color32::from_rgb(214, 145, 196),
+    profile_blue: Color32::from_rgb(122, 162, 222), // periwinkle
+    profile_violet: Color32::from_rgb(178, 150, 226),
     terminal_palette: [
         Color32::from_rgb(58, 52, 46),    // black (warm graphite)
         Color32::from_rgb(255, 107, 90),  // red (coral)
@@ -103,6 +109,9 @@ const LIGHT_THEME: ThemePalette = ThemePalette {
     palette_red: Color32::from_rgb(196, 53, 33),
     palette_yellow: Color32::from_rgb(176, 116, 18),
     palette_cyan: Color32::from_rgb(24, 132, 124),
+    profile_pink: Color32::from_rgb(150, 64, 132),
+    profile_blue: Color32::from_rgb(52, 98, 176),
+    profile_violet: Color32::from_rgb(106, 76, 170),
     terminal_palette: [
         Color32::from_rgb(74, 64, 56),
         Color32::from_rgb(196, 53, 33),
@@ -296,6 +305,47 @@ pub fn PALETTE_YELLOW() -> Color32 {
 #[must_use]
 pub fn PALETTE_CYAN() -> Color32 {
     active_palette().palette_cyan
+}
+
+/// Claude-hub per-profile accents, in assignment order: amber, teal, pink,
+/// sage, blue, violet.
+#[must_use]
+pub fn PROFILE_ACCENTS() -> [Color32; 6] {
+    let palette = active_palette();
+    [
+        palette.accent,
+        palette.palette_cyan,
+        palette.profile_pink,
+        palette.palette_green,
+        palette.profile_blue,
+        palette.profile_violet,
+    ]
+}
+
+/// Track behind usage bars.
+#[must_use]
+pub fn usage_track() -> Color32 {
+    let track_alpha = match current_theme() {
+        ResolvedTheme::Dark => 110,
+        ResolvedTheme::Light => 140,
+    };
+    alpha(BORDER_STRONG(), track_alpha)
+}
+
+/// Neutral fill for usage bars below the warning threshold.
+#[must_use]
+pub fn bar_normal() -> Color32 {
+    blend(BORDER_STRONG(), FG_SOFT(), 0.55)
+}
+
+/// Backdrop behind modals.
+#[must_use]
+pub fn scrim() -> Color32 {
+    let scrim_alpha = match current_theme() {
+        ResolvedTheme::Dark => 120,
+        ResolvedTheme::Light => 60,
+    };
+    Color32::from_black_alpha(scrim_alpha)
 }
 
 #[must_use]
