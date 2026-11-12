@@ -63,6 +63,38 @@ fn link_socket_roundtrip_list() {
 }
 
 #[test]
+fn link_socket_list_reports_the_renamed_panel() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let server = LinkServer::start(dir.path().join("run").join("1.sock")).expect("start");
+    let mut board = Board::new();
+    let workspace = board.ensure_workspace();
+    let id = board
+        .create_panel(
+            PanelOptions {
+                name: Some("worker".to_owned()),
+                kind: PanelKind::Command,
+                command: Some("sh".to_owned()),
+                args: vec!["-c".to_owned(), "exec cat".to_owned()],
+                ..PanelOptions::default()
+            },
+            workspace,
+        )
+        .expect("panel");
+    assert!(board.rename_panel(id, "reviewer"));
+
+    let client = request(server.path().to_path_buf(), "{\"v\":2,\"op\":\"list\"}\n");
+    serve_until_done(&server, &mut board, &client);
+    let response = client.join().expect("client thread");
+
+    let LinkResponse::Ok(LinkOk::Panels(panels)) = response else {
+        panic!("expected panels, got {response:?}");
+    };
+    assert_eq!(panels.len(), 1);
+    assert_eq!(panels[0].name, "reviewer");
+    board.shutdown_terminal_panels();
+}
+
+#[test]
 fn link_socket_replies_bad_request_to_garbage() {
     let dir = tempfile::tempdir().expect("tempdir");
     let server = LinkServer::start(dir.path().join("2.sock")).expect("start");

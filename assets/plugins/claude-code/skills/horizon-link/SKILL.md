@@ -19,6 +19,13 @@ through `HORIZON_BIN`:
 shown by `list` when a name is ambiguous). `list` prints id, name, workspace, kind, the Claude
 session name (`-` when there is none) and whether the panel is an agent.
 
+Panel names can change: the user may rename a panel at any time. `list` always
+shows the current name, and `<target>` resolves against it, so a name you read
+earlier may be stale. `$HORIZON_PANEL_ID` is stable for the life of the panel
+and `$HORIZON_PANEL_NAME` is only the name the panel had when your session
+started (a running process's environment does not change on rename): when you
+need your current name, find your own id in `list`.
+
 How to use it:
 
 - Run `list` first and pick the target from its output; do not guess names.

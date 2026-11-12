@@ -74,6 +74,18 @@ impl WorkspaceLayout {
     }
 }
 
+/// What committing the inline panel-name editor did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RenameOutcome {
+    /// The panel now carries the typed name.
+    Renamed,
+    /// The editor was committed unchanged on a panel still titled by its fallback; nothing to
+    /// store, so the panel stays on its smart label.
+    Unchanged,
+    /// Blank, overlong or carrying a control character; the panel keeps its name.
+    Rejected,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WorkspaceDockSide {
     Left,

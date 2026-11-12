@@ -869,6 +869,10 @@ impl HorizonApp {
                 }
                 ui.separator();
             }
+            if ui.button("Rename\u{2026}").clicked() {
+                outcome.command = Some(PanelCommand::StartRename);
+                ui.close();
+            }
             if ui.button("New Workspace").clicked() {
                 outcome.command = Some(PanelCommand::CreateWorkspace);
                 ui.close();
@@ -908,21 +912,13 @@ impl HorizonApp {
         }
 
         if matches!(outcome.command, Some(PanelCommand::StartRename)) {
-            self.clear_workspace_rename();
-            self.renaming_panel = Some(panel_id);
-            if let Some(panel) = self.board.panel(panel_id) {
-                self.panel_rename_buffer.clone_from(&panel.title);
-            }
+            self.start_panel_rename(panel_id);
         }
 
         match outcome.rename_action {
             RenameEditAction::Commit => {
                 if self.renaming_panel == Some(panel_id) {
-                    let name = self.panel_rename_buffer.trim().to_string();
-                    if !name.is_empty() && self.board.rename_panel(panel_id, &name) {
-                        self.mark_runtime_dirty();
-                    }
-                    self.clear_panel_rename();
+                    self.commit_panel_rename(panel_id);
                 }
             }
             RenameEditAction::Cancel => {

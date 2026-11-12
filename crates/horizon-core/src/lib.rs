@@ -51,8 +51,8 @@ pub use alacritty_terminal::index::Side as TerminalSide;
 pub use alacritty_terminal::selection::SelectionType;
 pub use attention::{AttentionId, AttentionItem, AttentionSeverity, AttentionState};
 pub use board::{
-    Board, Direction, PanelRect, STATUS_ATTENTION_SOURCE, ShutdownProgress, StatusNotice, WorkspaceDockSide,
-    WorkspaceLayout, nearest_in_direction,
+    Board, Direction, PanelRect, RenameOutcome, STATUS_ATTENTION_SOURCE, ShutdownProgress, StatusNotice,
+    WorkspaceDockSide, WorkspaceLayout, nearest_in_direction,
 };
 pub use config::{
     AppearanceConfig, AppearanceTheme, CLAUDE_BASE_PRESET_NAME, ClaudeProfile, Config, EffectivePrompt, FeaturesConfig,
@@ -71,7 +71,9 @@ pub use git_status::{DiffHunk, DiffLine, DiffLineKind, FileChange, FileDiff, Fil
 pub use git_watcher::GitWatcher;
 pub use horizon_home::HorizonHome;
 pub use managed_install::ManagedInstall;
-pub use panel::{DEFAULT_PANEL_SIZE, Panel, PanelId, PanelKind, PanelLayout, PanelOptions, PanelResume};
+pub use panel::{
+    DEFAULT_PANEL_SIZE, MAX_PANEL_NAME_CHARS, Panel, PanelId, PanelKind, PanelLayout, PanelOptions, PanelResume,
+};
 pub use remote_hosts::{
     RemoteHost, RemoteHostCatalog, RemoteHostConnectionHistoryEntry, RemoteHostConnectionSummary, RemoteHostSources,
     RemoteHostStatus, discover_remote_hosts, summarize_remote_host_connections,

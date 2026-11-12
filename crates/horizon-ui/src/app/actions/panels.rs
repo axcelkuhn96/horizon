@@ -1,6 +1,9 @@
 use crate::app::HorizonApp;
+use crate::app::hub_toast::{Toast, ToastKind};
 use crate::dir_picker::{DirPicker, DirPickerPurpose};
-use horizon_core::{PanelId, PanelOptions, PanelResume, PanelTranscript, PresetConfig, WorkspaceId};
+use horizon_core::{
+    MAX_PANEL_NAME_CHARS, PanelId, PanelOptions, PanelResume, PanelTranscript, PresetConfig, RenameOutcome, WorkspaceId,
+};
 
 use super::{add_panel_position, inherit_workspace_cwd, workspace_cwd};
 
@@ -103,6 +106,35 @@ impl HorizonApp {
         self.rename_buffer.clear();
     }
 
+    /// Opens the inline titlebar editor of `panel_id`, seeded with its current name. Every
+    /// entry point (titlebar double-click, panel and sidebar menus, sidebar double-click)
+    /// goes through here so they share `panel_rename_buffer` and `Board::rename_panel`.
+    pub(in crate::app) fn start_panel_rename(&mut self, panel_id: PanelId) -> bool {
+        let Some(title) = self.board.panel(panel_id).map(|panel| panel.title.clone()) else {
+            return false;
+        };
+        self.clear_workspace_rename();
+        self.panel_rename_buffer = title;
+        self.renaming_panel = Some(panel_id);
+        true
+    }
+
+    /// Applies the inline editor's buffer to `panel_id` and closes the editor. A rejected name
+    /// keeps the old one and says so, instead of vanishing silently.
+    pub(in crate::app) fn commit_panel_rename(&mut self, panel_id: PanelId) {
+        let input = std::mem::take(&mut self.panel_rename_buffer);
+        match self.board.commit_panel_rename(panel_id, &input) {
+            RenameOutcome::Renamed => self.mark_runtime_dirty(),
+            RenameOutcome::Unchanged => {}
+            RenameOutcome::Rejected => self.hub.toasts.push(Toast {
+                kind: ToastKind::Warn,
+                text: format!("Name not changed\nUse 1 to {MAX_PANEL_NAME_CHARS} characters, without line breaks"),
+                panel: Some(panel_id),
+            }),
+        }
+        self.clear_panel_rename();
+    }
+
     pub(in crate::app) fn clear_panel_rename(&mut self) {
         self.renaming_panel = None;
         self.panel_rename_buffer.clear();
@@ -149,6 +181,28 @@ mod tests {
     use horizon_core::{PanelKind, PanelOptions, PanelResume};
 
     use super::normalize_new_panel_resume;
+    use crate::app::test_support::{command_options, test_app};
+
+    #[test]
+    fn sidebar_double_click_starts_rename_state() {
+        let mut app = test_app();
+        let workspace = app.board.ensure_workspace();
+        let panel_id = app
+            .create_panel_with_options(command_options("build", "exec cat"), workspace)
+            .expect("panel should spawn");
+        app.renaming_workspace = Some(workspace);
+
+        assert!(app.start_panel_rename(panel_id));
+
+        assert_eq!(app.renaming_panel, Some(panel_id));
+        assert_eq!(app.panel_rename_buffer, "build");
+        assert_eq!(app.renaming_workspace, None, "one inline editor at a time");
+
+        app.clear_panel_rename();
+        assert!(!app.start_panel_rename(horizon_core::PanelId(9_999)));
+        assert_eq!(app.renaming_panel, None);
+        app.board.shutdown_terminal_panels();
+    }
 
     #[test]
     fn new_agent_panels_always_start_fresh_sessions() {

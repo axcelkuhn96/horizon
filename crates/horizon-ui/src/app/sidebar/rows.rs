@@ -331,6 +331,43 @@ fn paint_close_button(painter: &Painter, rect: Rect, hovered: bool) {
     );
 }
 
+/// Asks for the inline rename of a panel and brings the panel (and its titlebar editor)
+/// into view, as the sidebar workspace Rename entry does for the workspace label.
+pub(super) fn request_panel_rename(actions: &mut SidebarActions, panel_id: PanelId) {
+    actions.rename_panel = Some(panel_id);
+    actions.focus_panel = Some(panel_id);
+    actions.pan_to_panel = Some(panel_id);
+}
+
+/// Hover-only status tooltip, added after the row so it sits on top without taking its clicks.
+fn add_status_hover(ui: &egui::Ui, rect: Rect, panel_id: PanelId, status: AgentStatus) {
+    let response = ui.interact(
+        rect,
+        ui.make_persistent_id(("sidebar_panel_status", panel_id.0)),
+        Sense::hover(),
+    );
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, status_label(status)));
+    response.on_hover_text(status_label(status));
+}
+
+/// Close wins over the row; a click focuses and pans, a double click also starts a rename.
+fn record_row_click(
+    actions: &mut SidebarActions,
+    panel_id: PanelId,
+    row_response: &egui::Response,
+    close_clicked: bool,
+) {
+    if close_clicked {
+        actions.close_panel = Some(panel_id);
+    } else if row_response.clicked() {
+        actions.focus_panel = Some(panel_id);
+        actions.pan_to_panel = Some(panel_id);
+        if row_response.double_clicked() {
+            request_panel_rename(actions, panel_id);
+        }
+    }
+}
+
 impl HorizonApp {
     pub(super) fn render_sidebar_panel(
         &mut self,
@@ -398,14 +435,7 @@ impl HorizonApp {
             status_seen,
         );
         if status != AgentStatus::Unknown && status_width > 0.0 {
-            // Hover-only, added after the row so it sits on top without taking its clicks.
-            let status_response = ui.interact(
-                layout.status,
-                ui.make_persistent_id(("sidebar_panel_status", panel.id.0)),
-                Sense::hover(),
-            );
-            status_response.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, status_label(status)));
-            status_response.on_hover_text(status_label(status));
+            add_status_hover(ui, layout.status, panel.id, status);
         }
         if show_close {
             paint_close_button(&painter, layout.close, close_hovered);
@@ -434,12 +464,7 @@ impl HorizonApp {
         }
 
         let close_clicked = close_response.as_ref().is_some_and(egui::Response::clicked);
-        if close_clicked {
-            actions.close_panel = Some(panel.id);
-        } else if row_response.clicked() {
-            actions.focus_panel = Some(panel.id);
-            actions.pan_to_panel = Some(panel.id);
-        }
+        record_row_click(actions, panel.id, &row_response, close_clicked);
 
         let row_response = if label_truncated && !close_hovered {
             row_response.on_hover_text(&*panel.label.label)
@@ -529,6 +554,18 @@ mod tests {
         assert!((with.hint_right - with.status.min.x).abs() < f32::EPSILON);
         assert!((without.label_width - with.label_width - SIDEBAR_STATUS_COLUMN).abs() < 0.01);
         assert!((with.status.center().y - 113.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn rename_request_focuses_and_pans_to_the_panel_so_the_editor_is_visible() {
+        let mut actions = SidebarActions::default();
+
+        request_panel_rename(&mut actions, PanelId(7));
+
+        assert_eq!(actions.rename_panel, Some(PanelId(7)));
+        assert_eq!(actions.focus_panel, Some(PanelId(7)));
+        assert_eq!(actions.pan_to_panel, Some(PanelId(7)));
+        assert_eq!(actions.close_panel, None);
     }
 
     #[test]
