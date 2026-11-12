@@ -1552,6 +1552,7 @@ dependencies = [
  "horizon-cursor",
  "png",
  "profiling",
+ "serde_json",
  "serde_yaml",
  "surge-core",
  "tempfile",
