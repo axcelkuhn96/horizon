@@ -21,6 +21,20 @@ back into large multi-purpose modules.
   session discovery and external-store parsing belong in `runtime_state/`
   helper modules.
 - Shared domain helpers belong here when both core and UI need them.
+- Claude hub domain code lives in dedicated modules instead of growing
+  `config.rs`, `panel.rs` or `board.rs`:
+  - `claude_usage/`: credential reading (read-only, never persisted),
+    usage API client, on-disk cache (no tokens), model, and the background
+    poller that wakes the UI once per result
+  - `link/`: panel-link protocol, target resolution, text sanitising, and the
+    unix-socket server that backs `horizon link ...`
+  - `git_overview/`: per-workspace git summary and worktree listing, computed
+    off the UI thread (`compute`) and fed by a throttled poller
+  - `config/claude_profiles.rs` and `config/workspace_template.rs`: config
+    schema, validation, and migration for Claude profiles and workspace
+    templates
+  - `panel/env.rs`: the single place that builds the `HORIZON_*` /
+    `CLAUDE_CONFIG_DIR` environment for panel children
 - If a UI feature needs to reconstruct runtime state, sync template-backed
   workspace metadata, or format panel/workspace domain labels, prefer adding a
   core API instead of rebuilding that logic in `horizon-ui`.
@@ -34,6 +48,11 @@ back into large multi-purpose modules.
   - `actions/`: overlay/layout math, panel lifecycle helpers, palette/shortcut
     dispatch, picker flows, and canvas interaction helpers
   - `canvas`: canvas rendering and HUD
+  - `hub_state`: transient state shared by the claude-hub UI (launcher,
+    usage chips cache, link badges, template editor selection); caches are
+    rebuilt only when their inputs change
+  - `hub_ui`: shared paint primitives (pills, mini bars, swatches, key badges,
+    modal frame) used by chips, launcher, settings tabs and sidebar menus
   - `lifecycle`: frame orchestration, shutdown flow, and repaint pacing
   - `panel_chrome`: panel titlebar chrome, badges, context menus, and rename UI
   - `panels`: panel-area orchestration and body rendering
