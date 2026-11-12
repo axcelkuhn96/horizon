@@ -4,6 +4,7 @@
 //! by `HORIZON_SOCKET`: one JSON request line out, one JSON response line back.
 
 use std::ffi::OsString;
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -129,6 +130,15 @@ fn terminal_safe(text: &str) -> String {
     strip_escapes(text).chars().filter(|ch| !ch.is_control()).collect()
 }
 
+/// Cleans text from another panel or the server before it reaches this terminal: escape
+/// sequences and control characters (except `\n` and `\t`) are dropped.
+fn output_safe(text: &str) -> String {
+    strip_escapes(text)
+        .chars()
+        .filter(|ch| matches!(ch, '\n' | '\t') || !ch.is_control())
+        .collect()
+}
+
 fn format_panels(panels: &[PanelInfo]) -> String {
     let rows: Vec<[String; 5]> = panels
         .iter()
@@ -175,14 +185,14 @@ fn render(response: LinkResponse) -> Result<String, String> {
     match response {
         LinkResponse::Ok(LinkOk::Panels(panels)) => Ok(format_panels(&panels)),
         LinkResponse::Ok(LinkOk::Sent) => Ok(String::new()),
-        LinkResponse::Ok(LinkOk::Text(text)) => Ok(text),
-        LinkResponse::Err { message, .. } => Err(message),
+        LinkResponse::Ok(LinkOk::Text(text)) => Ok(output_safe(&text)),
+        LinkResponse::Err { message, .. } => Err(output_safe(&message)),
     }
 }
 
 #[cfg(unix)]
 fn exchange(socket: &std::path::Path, line: &str) -> Result<LinkResponse, String> {
-    use std::io::{BufRead, BufReader, Read, Write};
+    use std::io::{BufRead, BufReader, Read};
     use std::os::unix::net::UnixStream;
     use std::time::Duration;
 
@@ -238,11 +248,15 @@ fn execute(args: &[String]) -> Result<String, String> {
 pub(crate) fn run(args: &[String]) -> ExitCode {
     match execute(args) {
         Ok(output) => {
-            if !output.is_empty() {
-                let newline = if output.ends_with('\n') { "" } else { "\n" };
-                print!("{output}{newline}");
+            if output.is_empty() {
+                return ExitCode::SUCCESS;
             }
-            ExitCode::SUCCESS
+            let newline = if output.ends_with('\n') { "" } else { "\n" };
+            let mut stdout = std::io::stdout().lock();
+            match write!(stdout, "{output}{newline}").and_then(|()| stdout.flush()) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(_) => ExitCode::FAILURE,
+            }
         }
         Err(message) => {
             eprintln!("horizon link: {message}");
@@ -306,6 +320,35 @@ mod tests {
                 enter: true,
             })
         );
+    }
+
+    #[test]
+    fn parse_send_double_dash_right_after_target() {
+        assert_eq!(
+            parse_link_args(&args(&["send", "a", "--", "--fix the bug"])),
+            Ok(LinkCommand::Send {
+                target: "a".to_owned(),
+                text: "--fix the bug".to_owned(),
+                enter: true,
+            })
+        );
+        assert!(parse_link_args(&args(&["send", "a", "--fix"])).is_err());
+    }
+
+    #[test]
+    fn render_strips_escapes_from_text_and_errors() {
+        assert_eq!(
+            super::render(LinkResponse::Ok(LinkOk::Text(
+                "ok\u{1b}]0;pwned\u{7}\n\tline\u{1b}[2J\rx\u{8}y".to_owned()
+            ))),
+            Ok("ok\n\tlinexy".to_owned())
+        );
+        let error = super::render(LinkResponse::Err {
+            code: horizon_core::link::LinkErrorCode::NotFound,
+            message: "bad \u{1b}[31mred\u{1b}[0m\u{9b}2J".to_owned(),
+        })
+        .expect_err("err");
+        assert_eq!(error, "bad red");
     }
 
     #[test]
