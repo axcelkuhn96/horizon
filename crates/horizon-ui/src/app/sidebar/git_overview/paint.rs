@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use egui::{
     Align, Align2, Color32, CornerRadius, CursorIcon, FontId, Frame, Id, Label, Layout, Margin, Painter, Pos2, Rect,
-    RichText, Sense, Shape, Stroke, TextWrapMode, Ui, UiBuilder, Vec2,
+    RichText, Sense, Shape, Stroke, TextWrapMode, Ui, UiBuilder, Vec2, WidgetInfo, WidgetType,
 };
 use horizon_core::git_overview::OverviewPoller;
 use horizon_core::{PresetConfig, WorkspaceId};
@@ -37,7 +37,7 @@ pub(super) struct RowEnv<'a> {
     pub(super) presets: &'a [PresetConfig],
     pub(super) poller: Option<&'a OverviewPoller<WorkspaceId>>,
     pub(super) copied: Option<Copied>,
-    pub(super) updated_at: Instant,
+    pub(super) changed_at: Instant,
 }
 
 /// Dirty dot on a collapsed workspace header (the git line is hidden then).
@@ -119,7 +119,7 @@ pub(in crate::app::sidebar) fn render_git_section(
         presets,
         poller: poller.as_ref(),
         copied: copied.filter(|copied| copied.workspace == workspace),
-        updated_at: cache.updated_at,
+        changed_at: cache.changed_at,
     };
     if let Some(copied) = env.copied {
         ui.ctx()
@@ -270,7 +270,7 @@ fn paint_git_line(ui: &mut Ui, cache: &GitLineCache, workspace: WorkspaceId) {
         },
     );
     let response = ui.interact(rect, ui.make_persistent_id(("git_line", workspace.0)), Sense::hover());
-    response.on_hover_ui_at_pointer(|ui| show_tooltip(ui, &cache.tooltip, cache.updated_at));
+    response.on_hover_ui_at_pointer(|ui| show_tooltip(ui, &cache.tooltip, cache.changed_at));
 }
 
 // ---------------------------------------------------------------------------
@@ -288,6 +288,7 @@ fn inset_rect(rect: Rect, left: f32) -> Rect {
 fn toggle_row(ui: &mut Ui, id: Id, indent: f32, label: &str, count: &str, open: bool) -> bool {
     let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), GIT_LINE_HEIGHT), Sense::hover());
     let response = ui.interact(rect, id, Sense::click());
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::CollapsingHeader, true, label));
     let hovered = response.hovered();
     let painter = ui.painter();
     let bg = inset_rect(rect, indent - 6.0);
@@ -342,6 +343,8 @@ fn show_all_row(ui: &mut Ui, workspace: WorkspaceId, group: &str, all: bool, lab
     let id = ui.make_persistent_id(("git_wt_show_all", workspace.0, group));
     let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), GIT_LINE_HEIGHT), Sense::hover());
     let response = ui.interact(rect, id, Sense::click());
+    let text = if all { "Show less" } else { label };
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, text));
     let hovered = response.hovered();
     let painter = ui.painter();
     let bg = inset_rect(rect, ROW_FILL_INDENT);
@@ -355,7 +358,7 @@ fn show_all_row(ui: &mut Ui, workspace: WorkspaceId, group: &str, all: bool, lab
     painter.text(
         Pos2::new(rect.min.x + ROW_INDENT, rect.center().y),
         Align2::LEFT_CENTER,
-        if all { "Show less" } else { label },
+        text,
         FontId::proportional(10.0),
         if hovered { theme::FG_SOFT() } else { theme::FG_DIM() },
     );
@@ -392,8 +395,13 @@ fn paint_lock(painter: &Painter, right: f32, cy: f32, color: Color32) {
 fn paint_worktree_row(ui: &mut Ui, env: &RowEnv<'_>, rows: &[WorktreeRow], index: usize) -> Option<GitAction> {
     let row = rows.get(index)?;
     let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), ROW_HEIGHT), Sense::hover());
-    let id = ui.make_persistent_id(("git_wt_row", env.workspace.0, index));
+    // Rows scrolled out of the sidebar are not painted or interacted with.
+    if !ui.is_rect_visible(rect) {
+        return None;
+    }
+    let id = ui.make_persistent_id(("git_wt_row", env.workspace.0, row.key));
     let response = ui.interact(rect, id, Sense::click());
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, !row.prunable, &row.label));
     let hovered = response.hovered();
     let clickable = !row.prunable;
     let bg = inset_rect(rect, ROW_FILL_INDENT);
@@ -444,7 +452,7 @@ fn paint_worktree_row(ui: &mut Ui, env: &RowEnv<'_>, rows: &[WorktreeRow], index
     );
     let path_x = label.right() + 8.0;
     if path_x < right {
-        if env.copied.is_some_and(|copied| copied.row == index) {
+        if env.copied.is_some_and(|copied| copied.key == row.key) {
             clipped.text(
                 Pos2::new(path_x, cy),
                 Align2::LEFT_CENTER,
@@ -471,16 +479,16 @@ fn paint_worktree_row(ui: &mut Ui, env: &RowEnv<'_>, rows: &[WorktreeRow], index
     if response.clicked() && clickable {
         action = Some(GitAction {
             workspace: env.workspace,
-            row: index,
+            path: row.path.clone(),
             kind: GitActionKind::OpenTerminal,
         });
     }
-    if let Some(picked) = row_menu::show(&response, env, index, row) {
+    if let Some(picked) = row_menu::show(&response, env, row) {
         action = Some(picked);
     }
     response
         .clone()
-        .on_hover_ui_at_pointer(|ui| show_tooltip(ui, &row.tooltip, env.updated_at));
+        .on_hover_ui_at_pointer(|ui| show_tooltip(ui, &row.tooltip, env.changed_at));
     action
 }
 
@@ -488,14 +496,15 @@ fn paint_worktree_row(ui: &mut Ui, env: &RowEnv<'_>, rows: &[WorktreeRow], index
 // Tooltip
 // ---------------------------------------------------------------------------
 
-/// "Updated 12 s ago" style text for the hover card.
-fn updated_text(elapsed: Duration) -> String {
+/// "Changed 12 s ago" style text for the hover card. The poller only delivers
+/// snapshots that differ from the last one, so this is the time of the last change.
+fn changed_text(elapsed: Duration) -> String {
     let secs = elapsed.as_secs();
     match secs {
-        0..=1 => "Updated just now".to_string(),
-        2..=59 => format!("Updated {secs} s ago"),
-        60..=3599 => format!("Updated {} min ago", secs / 60),
-        _ => format!("Updated {} h ago", secs / 3600),
+        0..=1 => "Changed just now".to_string(),
+        2..=59 => format!("Changed {secs} s ago"),
+        60..=3599 => format!("Changed {} min ago", secs / 60),
+        _ => format!("Changed {} h ago", secs / 3600),
     }
 }
 
@@ -514,7 +523,7 @@ fn badge_pill(ui: &mut Ui, text: &str) {
     hub_ui::pill(ui.painter(), rect, text, badge_color(text));
 }
 
-fn show_tooltip(ui: &mut Ui, tip: &TooltipData, updated_at: Instant) {
+fn show_tooltip(ui: &mut Ui, tip: &TooltipData, changed_at: Instant) {
     Frame::new().inner_margin(Margin::same(TOOLTIP_MARGIN)).show(ui, |ui| {
         ui.set_width(TOOLTIP_WIDTH - f32::from(TOOLTIP_MARGIN) * 2.0);
         ui.horizontal(|ui| {
@@ -533,7 +542,7 @@ fn show_tooltip(ui: &mut Ui, tip: &TooltipData, updated_at: Instant) {
         }
         ui.add_space(4.0);
         ui.label(
-            RichText::new(updated_text(updated_at.elapsed()))
+            RichText::new(changed_text(changed_at.elapsed()))
                 .size(10.5)
                 .color(theme::FG_DIM()),
         );
@@ -549,13 +558,13 @@ fn show_tooltip(ui: &mut Ui, tip: &TooltipData, updated_at: Instant) {
 mod tests {
     use std::time::Duration;
 
-    use super::updated_text;
+    use super::changed_text;
 
     #[test]
-    fn updated_text_scales_units() {
-        assert_eq!(updated_text(Duration::from_secs(0)), "Updated just now");
-        assert_eq!(updated_text(Duration::from_secs(12)), "Updated 12 s ago");
-        assert_eq!(updated_text(Duration::from_secs(180)), "Updated 3 min ago");
-        assert_eq!(updated_text(Duration::from_secs(7300)), "Updated 2 h ago");
+    fn changed_text_scales_units() {
+        assert_eq!(changed_text(Duration::from_secs(0)), "Changed just now");
+        assert_eq!(changed_text(Duration::from_secs(12)), "Changed 12 s ago");
+        assert_eq!(changed_text(Duration::from_secs(180)), "Changed 3 min ago");
+        assert_eq!(changed_text(Duration::from_secs(7300)), "Changed 2 h ago");
     }
 }

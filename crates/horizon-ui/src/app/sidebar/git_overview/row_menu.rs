@@ -77,38 +77,42 @@ enum Lead {
     Dot(Color32),
 }
 
-fn claude_open_id(env: &RowEnv<'_>, index: usize) -> Id {
-    Id::new(("git_wt_menu_claude_open", env.workspace.0, index))
+/// Keyed by worktree path hash so the open state follows the worktree when
+/// rows reorder under an open menu.
+fn claude_open_id(env: &RowEnv<'_>, row: &WorktreeRow) -> Id {
+    Id::new(("git_wt_menu_claude_open", env.workspace.0, row.key))
 }
 
 /// Attaches the menu to `response`. Opening it (right-click) refreshes the
 /// overview so dirty marks are current.
-pub(super) fn show(response: &Response, env: &RowEnv<'_>, index: usize, row: &WorktreeRow) -> Option<GitAction> {
+pub(super) fn show(response: &Response, env: &RowEnv<'_>, row: &WorktreeRow) -> Option<GitAction> {
     if response.secondary_clicked() {
         if let Some(poller) = env.poller {
             poller.refresh_now();
         }
         response
             .ctx
-            .data_mut(|data| data.insert_temp(claude_open_id(env, index), false));
+            .data_mut(|data| data.insert_temp(claude_open_id(env, row), false));
     }
     let mut picked = None;
     context_menu_above_sidebar_explicit_close(response, |ui| {
-        picked = menu_items(ui, env, index, row);
+        picked = menu_items(ui, env, row);
     });
     picked
 }
 
-fn menu_items(ui: &mut Ui, env: &RowEnv<'_>, index: usize, row: &WorktreeRow) -> Option<GitAction> {
+fn menu_items(ui: &mut Ui, env: &RowEnv<'_>, row: &WorktreeRow) -> Option<GitAction> {
     ui.set_min_width(MENU_MIN_WIDTH);
     ui.spacing_mut().item_spacing.y = 0.0;
     let action = |kind| GitAction {
         workspace: env.workspace,
-        row: index,
+        path: row.path.clone(),
         kind,
     };
     let enabled = !row.prunable;
     let mut picked = None;
+
+    worktree_header(ui, row);
 
     let terminal = menu_item(ui, "Open terminal here", enabled, Lead::None, Arrow::None);
     if terminal.clicked() {
@@ -117,7 +121,7 @@ fn menu_items(ui: &mut Ui, env: &RowEnv<'_>, index: usize, row: &WorktreeRow) ->
 
     let targets = claude_targets(env.presets);
     let claude_enabled = enabled && !targets.is_empty();
-    let open_id = claude_open_id(env, index);
+    let open_id = claude_open_id(env, row);
     let open = claude_enabled && ui.data(|data| data.get_temp::<bool>(open_id)).unwrap_or(false);
     let claude = menu_item(
         ui,
@@ -157,6 +161,27 @@ fn menu_items(ui: &mut Ui, env: &RowEnv<'_>, index: usize, row: &WorktreeRow) ->
         ui.close();
     }
     picked
+}
+
+/// Which worktree the menu acts on: branch label and short path.
+fn worktree_header(ui: &mut Ui, row: &WorktreeRow) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), HEADER_HEIGHT), Sense::hover());
+    let painter = ui.painter().with_clip_rect(rect);
+    let label = painter.text(
+        Pos2::new(rect.left() + ITEM_PADDING_X, rect.center().y),
+        Align2::LEFT_CENTER,
+        &row.label,
+        FontId::proportional(11.0),
+        theme::FG(),
+    );
+    painter.text(
+        Pos2::new(label.right() + 8.0, rect.center().y),
+        Align2::LEFT_CENTER,
+        &row.short_path,
+        FontId::monospace(10.0),
+        theme::FG_DIM(),
+    );
+    ui.separator();
 }
 
 fn section_header(ui: &mut Ui, text: &str) {

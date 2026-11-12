@@ -11,10 +11,14 @@ use super::{Copied, GitAction, GitActionKind};
 use crate::app::HorizonApp;
 
 impl HorizonApp {
-    pub(in crate::app) fn apply_git_action(&mut self, ctx: &Context, action: GitAction) {
-        let Some(row) = self.hub.git.row_path(action.workspace, action.row) else {
+    /// Applies `action` if its worktree is still listed for the workspace; the
+    /// overview may have changed (worktree removed, rows reordered) since it
+    /// was picked.
+    pub(in crate::app) fn apply_git_action(&mut self, ctx: &Context, action: &GitAction) {
+        let Some(row) = self.hub.git.row_for_path(action.workspace, &action.path) else {
             return;
         };
+        let key = row.key;
         let path = row.path.clone();
         let workspace_name = row.workspace_name.clone();
         let prunable = row.prunable;
@@ -23,7 +27,7 @@ impl HorizonApp {
                 ctx.copy_text(path.to_string_lossy().into_owned());
                 self.hub.git.copied = Some(Copied {
                     workspace: action.workspace,
-                    row: action.row,
+                    key,
                     at: Instant::now(),
                 });
                 ctx.request_repaint();

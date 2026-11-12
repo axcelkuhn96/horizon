@@ -54,7 +54,7 @@ struct SidebarPanelEntry {
     attention: Option<AttentionItem>,
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 struct SidebarActions {
     create_workspace: bool,
     fit_active_workspace: bool,
@@ -866,7 +866,7 @@ impl HorizonApp {
         if let Some(action) = actions.workspace_menu {
             self.apply_workspace_menu_action(ctx, action);
         }
-        if let Some(action) = actions.git_action {
+        if let Some(action) = &actions.git_action {
             self.apply_git_action(ctx, action);
         }
     }

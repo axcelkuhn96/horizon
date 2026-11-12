@@ -13,6 +13,7 @@ mod paint;
 mod row_menu;
 
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -35,6 +36,7 @@ const WAKE_INTERVAL: Duration = Duration::from_secs(4);
 /// How long the "Copied" feedback replaces the path on a row.
 const COPIED_FEEDBACK: Duration = Duration::from_millis(1500);
 const DETACHED_FALLBACK: &str = "HEAD (detached)";
+const NO_COMMITS: &str = "(no commits)";
 
 type OverviewResult = Result<Option<RepoOverview>, GitOverviewError>;
 
@@ -55,6 +57,8 @@ struct TooltipData {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct WorktreeRow {
     path: PathBuf,
+    /// Hash of `path`: stable widget/menu identity that survives reordering.
+    key: u64,
     /// Branch label, middle-cut for the row.
     label: String,
     /// Name for a workspace created from this worktree (full branch or dir name).
@@ -85,7 +89,7 @@ pub(in crate::app) struct GitLineCache {
     behind_label: String,
     dirty_label: String,
     tooltip: TooltipData,
-    updated_at: Instant,
+    changed_at: Instant,
     /// Primary rows first (`..primary_count`), then the agent subgroup.
     worktree_rows: Vec<WorktreeRow>,
     primary_count: usize,
@@ -120,10 +124,21 @@ fn middle_ellipsis(text: &str, max: usize) -> String {
     out
 }
 
-/// Full (uncut) branch text: the name, or `HEAD @ <sha>` when detached.
+/// Stable identity of a worktree row: a hash of its path.
+fn path_key(path: &Path) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    path.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Full (uncut) branch text: the name (`<name> (no commits)` on an unborn
+/// branch), or `HEAD @ <sha>` when detached.
 fn branch_text(branch: Option<&str>, detached: bool, head_short: Option<&str>) -> String {
     match branch {
-        Some(name) if !detached => name.to_string(),
+        Some(name) if !detached => match head_short {
+            Some(_) => name.to_string(),
+            None => format!("{name} {NO_COMMITS}"),
+        },
         _ => match head_short {
             Some(sha) => format!("HEAD @ {}", sha.chars().take(7).collect::<String>()),
             None => DETACHED_FALLBACK.to_string(),
@@ -190,7 +205,8 @@ fn counter_label(count: usize) -> String {
 
 fn build_row(overview: &RepoOverview, wt: &WorktreeInfo) -> WorktreeRow {
     let detached = wt.branch.is_none();
-    let title = branch_text(wt.branch.as_deref(), detached, None);
+    let head_short = wt.head_short.as_deref();
+    let title = branch_text(wt.branch.as_deref(), detached, head_short);
     let dir_name = wt.path.file_name().map_or_else(
         || wt.path.display().to_string(),
         |name| name.to_string_lossy().into_owned(),
@@ -215,7 +231,7 @@ fn build_row(overview: &RepoOverview, wt: &WorktreeInfo) -> WorktreeRow {
         (None, wt.dirty_count)
     };
     WorktreeRow {
-        label: branch_label(wt.branch.as_deref(), detached, None),
+        label: branch_label(wt.branch.as_deref(), detached, head_short),
         workspace_name: wt.branch.clone().unwrap_or(dir_name),
         short_path: short_worktree_path(&overview.repo_root, &wt.path),
         tooltip: TooltipData {
@@ -225,6 +241,7 @@ fn build_row(overview: &RepoOverview, wt: &WorktreeInfo) -> WorktreeRow {
             upstream,
             changes: changes_text(dirty),
         },
+        key: path_key(&wt.path),
         path: wt.path.clone(),
         is_current: wt.is_current,
         is_main: wt.is_main,
@@ -260,7 +277,11 @@ fn build_cache(overview: &RepoOverview) -> GitLineCache {
         .find(|row| row.is_current)
         .map(|row| row.tooltip.clone())
         .unwrap_or_else(|| TooltipData {
-            title: branch_text(overview.branch.as_deref(), overview.detached, None),
+            title: branch_text(
+                overview.branch.as_deref(),
+                overview.detached,
+                overview.head_short.as_deref(),
+            ),
             badges: Vec::new(),
             path: overview.repo_root.display().to_string(),
             upstream: upstream_text(overview),
@@ -269,14 +290,18 @@ fn build_cache(overview: &RepoOverview) -> GitLineCache {
     GitLineCache {
         source: Some(overview.clone()),
         error: None,
-        branch_label: branch_label(overview.branch.as_deref(), overview.detached, None),
+        branch_label: branch_label(
+            overview.branch.as_deref(),
+            overview.detached,
+            overview.head_short.as_deref(),
+        ),
         detached: overview.detached || overview.branch.is_none(),
         dirty_count: overview.dirty_count,
         ahead_label: counter_label(overview.ahead),
         behind_label: counter_label(overview.behind),
         dirty_label: counter_label(overview.dirty_count),
         tooltip,
-        updated_at: Instant::now(),
+        changed_at: Instant::now(),
         worktrees_count_label: worktree_rows.len().to_string(),
         agents_label: format!("agent worktrees ({agent_count})"),
         primary_show_all_label: format!("Show all ({primary_count})"),
@@ -303,7 +328,7 @@ fn error_cache(message: String) -> GitLineCache {
         ahead_label: String::new(),
         behind_label: String::new(),
         dirty_label: String::new(),
-        updated_at: Instant::now(),
+        changed_at: Instant::now(),
         worktree_rows: Vec::new(),
         primary_count: 0,
         worktrees_count_label: String::new(),
@@ -345,16 +370,19 @@ fn sync_poller_cwds(workspaces: &[(WorkspaceId, PathBuf)], poller: &OverviewPoll
 #[derive(Clone, Copy)]
 struct Copied {
     workspace: WorkspaceId,
-    row: usize,
+    /// `WorktreeRow::key` of the copied row.
+    key: u64,
     at: Instant,
 }
 
-/// What a row or its menu asked for; applied by the app after the sidebar frame.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// What a row or its menu asked for; applied by the app after the sidebar
+/// frame. Rows are identified by worktree path, not position, so a reorder
+/// between the click and its application cannot retarget the action.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::app) struct GitAction {
     workspace: WorkspaceId,
-    /// Index into the workspace's sorted `worktree_rows`.
-    row: usize,
+    /// Worktree the action was picked on; re-checked against the current overview.
+    path: PathBuf,
     kind: GitActionKind,
 }
 
@@ -381,7 +409,8 @@ pub(in crate::app) struct GitSidebarState {
     watch_sent: Vec<PathBuf>,
     /// Expansion or rows changed: recompute the dirty watch set.
     watch_stale: bool,
-    window_focused: bool,
+    /// `None` until the first frame, so startup does not count as a focus gain.
+    window_focused: Option<bool>,
     copied: Option<Copied>,
 }
 
@@ -429,12 +458,10 @@ impl GitSidebarState {
     }
 
     /// Points the poller at a new `(workspace, cwd)` set and drops caches of
-    /// workspaces that are gone. Returns whether a cache was dropped.
-    fn apply_cwds(&mut self, cwds: Vec<(WorkspaceId, PathBuf)>) -> bool {
-        let before = self.caches.len();
+    /// workspaces that are gone.
+    fn apply_cwds(&mut self, cwds: Vec<(WorkspaceId, PathBuf)>) {
         self.caches.retain(|id, _| cwds.iter().any(|(key, _)| key == id));
         self.expanded.retain(|id| cwds.iter().any(|(key, _)| key == id));
-        let dropped = self.caches.len() != before;
         match &self.poller {
             Some(poller) => sync_poller_cwds(&cwds, poller),
             None if !cwds.is_empty() => {
@@ -444,7 +471,6 @@ impl GitSidebarState {
         }
         self.synced_cwds = cwds;
         self.watch_stale = true;
-        dropped
     }
 
     /// Paths of the worktrees whose dirty count is visible right now.
@@ -474,8 +500,13 @@ impl GitSidebarState {
         paths
     }
 
-    fn row_path(&self, workspace: WorkspaceId, row: usize) -> Option<&WorktreeRow> {
-        self.caches.get(&workspace)?.worktree_rows.get(row)
+    /// The row for worktree `path` in the workspace's current overview.
+    fn row_for_path(&self, workspace: WorkspaceId, path: &Path) -> Option<&WorktreeRow> {
+        self.caches
+            .get(&workspace)?
+            .worktree_rows
+            .iter()
+            .find(|row| row.path == path)
     }
 }
 
@@ -490,7 +521,6 @@ impl HorizonApp {
             .workspaces
             .iter()
             .filter_map(|workspace| workspace.cwd.as_ref().map(|cwd| (workspace.id, cwd)));
-        let mut changed = false;
         if !cwds_unchanged(&git.synced_cwds, current) {
             let cwds: Vec<(WorkspaceId, PathBuf)> = self
                 .board
@@ -498,28 +528,25 @@ impl HorizonApp {
                 .iter()
                 .filter_map(|workspace| workspace.cwd.clone().map(|cwd| (workspace.id, cwd)))
                 .collect();
-            changed |= git.apply_cwds(cwds);
+            git.apply_cwds(cwds);
         }
         // Taken out while draining so `git` stays freely borrowable; put back below.
         let Some(poller) = git.poller.take() else {
-            if changed {
-                ctx.request_repaint();
-            }
             return;
         };
 
         let focused = ctx.input(|input| input.viewport().focused).unwrap_or(true);
-        if focused && !git.window_focused {
+        if focused && git.window_focused == Some(false) {
             poller.refresh_now();
         }
-        git.window_focused = focused;
+        git.window_focused = Some(focused);
 
         let results: Vec<(WorkspaceId, OverviewResult)> = std::iter::from_fn(|| poller.try_recv())
             .take(MAX_RESULTS_PER_FRAME)
             .collect();
         let drained_cap = results.len() == MAX_RESULTS_PER_FRAME;
         for (key, result) in results {
-            changed |= git.apply_result(key, result);
+            git.apply_result(key, result);
         }
 
         if git.watch_stale {
@@ -532,7 +559,9 @@ impl HorizonApp {
         }
 
         git.poller = Some(poller);
-        if changed || drained_cap {
+        // This runs before the sidebar paints, so a change is drawn this frame;
+        // only a capped drain needs another frame to pick up the rest.
+        if drained_cap {
             ctx.request_repaint();
         }
         ctx.request_repaint_after(WAKE_INTERVAL);
@@ -547,13 +576,15 @@ mod tests {
     use horizon_core::git_overview::{GitOverviewError, RepoOverview, WorktreeInfo};
 
     use super::{
-        GitSidebarState, branch_label, build_cache, cwds_unchanged, middle_ellipsis, short_path_with_home, visible_rows,
+        GitSidebarState, branch_label, build_cache, cwds_unchanged, middle_ellipsis, path_key, short_path_with_home,
+        visible_rows,
     };
 
     fn worktree(path: &str, branch: Option<&str>) -> WorktreeInfo {
         WorktreeInfo {
             path: PathBuf::from(path),
             branch: branch.map(str::to_string),
+            head_short: Some("abc1234".to_string()),
             is_main: false,
             is_current: false,
             locked: false,
@@ -568,6 +599,7 @@ mod tests {
             repo_root: PathBuf::from("/work/api"),
             branch: Some("main".to_string()),
             detached: false,
+            head_short: Some("abc1234".to_string()),
             dirty_count: 0,
             upstream: None,
             ahead: 0,
@@ -583,10 +615,42 @@ mod tests {
     }
 
     #[test]
+    fn branch_label_unborn_branch_shows_no_commits() {
+        assert_eq!(branch_label(Some("main"), false, None), "main (no commits)");
+        assert_eq!(branch_label(Some("main"), false, Some("abc1234")), "main");
+    }
+
+    #[test]
+    fn detached_overview_shows_head_sha_on_line_and_row() {
+        let mut detached = worktree("/work/api-det", None);
+        detached.head_short = Some("0123456789".to_string());
+        let mut ov = overview(vec![detached]);
+        ov.branch = None;
+        ov.detached = true;
+        ov.head_short = Some("0123456".to_string());
+        let cache = build_cache(&ov);
+        assert_eq!(cache.branch_label, "HEAD @ 0123456");
+        assert_eq!(cache.worktree_rows[0].label, "HEAD @ 0123456");
+        assert!(cache.worktree_rows[0].detached);
+    }
+
+    #[test]
+    fn unborn_overview_shows_no_commits() {
+        let mut unborn = worktree("/work/api", Some("main"));
+        unborn.head_short = None;
+        let mut ov = overview(vec![unborn]);
+        ov.head_short = None;
+        let cache = build_cache(&ov);
+        assert_eq!(cache.branch_label, "main (no commits)");
+        assert_eq!(cache.worktree_rows[0].label, "main (no commits)");
+        assert_eq!(cache.worktree_rows[0].workspace_name, "main");
+    }
+
+    #[test]
     fn branch_label_middle_ellipsis_over_22() {
-        assert_eq!(branch_label(Some("feat/short"), false, None), "feat/short");
+        assert_eq!(branch_label(Some("feat/short"), false, Some("abc1234")), "feat/short");
         let long = "feature/very-long-branch-name-here";
-        let label = branch_label(Some(long), false, None);
+        let label = branch_label(Some(long), false, Some("abc1234"));
         assert_eq!(label.chars().count(), 22);
         assert!(label.starts_with("feature/ve"));
         assert!(label.ends_with("e-here"));
@@ -648,6 +712,45 @@ mod tests {
         assert_eq!(cache.primary_count, 3);
         assert_eq!(cache.agent_count(), 1);
         assert_eq!(cache.agents_label, "agent worktrees (1)");
+    }
+
+    #[test]
+    fn rows_are_found_by_path_after_a_reorder() {
+        let mut state = GitSidebarState::default();
+        let key = WorkspaceId(1);
+        let alpha = worktree("/work/api-alpha", Some("alpha"));
+        let beta = worktree("/work/api-beta", Some("beta"));
+        state.apply_result(key, Ok(Some(overview(vec![alpha.clone(), beta.clone()]))));
+        let before = state.row_for_path(key, &beta.path).expect("beta").key;
+        // A new branch sorts before beta: beta's index moves, its identity must not.
+        let aaa = worktree("/work/api-aaa", Some("aaa"));
+        state.apply_result(key, Ok(Some(overview(vec![alpha, beta.clone(), aaa]))));
+        let row = state.row_for_path(key, &beta.path).expect("beta");
+        assert_eq!(row.key, before);
+        assert_eq!(row.workspace_name, "beta");
+        assert_eq!(state.caches[&key].worktree_rows[2].path, beta.path);
+    }
+
+    #[test]
+    fn action_on_a_removed_worktree_finds_no_row() {
+        let mut state = GitSidebarState::default();
+        let key = WorkspaceId(1);
+        let alpha = worktree("/work/api-alpha", Some("alpha"));
+        let beta = worktree("/work/api-beta", Some("beta"));
+        state.apply_result(key, Ok(Some(overview(vec![alpha.clone(), beta.clone()]))));
+        state.apply_result(key, Ok(Some(overview(vec![alpha]))));
+        assert!(state.row_for_path(key, &beta.path).is_none());
+        assert!(
+            state
+                .row_for_path(WorkspaceId(2), Path::new("/work/api-alpha"))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn row_keys_differ_per_path() {
+        assert_ne!(path_key(Path::new("/a")), path_key(Path::new("/b")));
+        assert_eq!(path_key(Path::new("/a")), path_key(Path::new("/a")));
     }
 
     #[test]
