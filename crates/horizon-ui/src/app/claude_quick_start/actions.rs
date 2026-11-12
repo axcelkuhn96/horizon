@@ -273,6 +273,13 @@ impl HorizonApp {
             .unwrap_or_default();
         let command = quick_start_command(&preset, mode, &home, ShellSyntax::NATIVE).ok_or(StartFailure::Unquotable)?;
         let target = panel.local_id.clone();
+        // The shell is idle but its prompt may hold half-typed text, which would prefix the command.
+        let clear = ShellSyntax::NATIVE.line_clear();
+        if !clear.is_empty()
+            && let Some(panel) = self.board.panel_mut(panel_id)
+        {
+            panel.write_input(clear);
+        }
         let response = self.board.handle_link_request(LinkRequest::Send {
             target: SendTarget::panel(target),
             text: command,

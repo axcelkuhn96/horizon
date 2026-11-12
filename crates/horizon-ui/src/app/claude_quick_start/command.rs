@@ -43,6 +43,17 @@ impl ShellSyntax {
             }
     }
 
+    /// Keystrokes that empty a half-typed prompt line before the command is typed: Ctrl-E (end
+    /// of line) then Ctrl-U (kill to the start), so leftover text cannot prefix the command.
+    /// POSIX shells only (readline, zsh and fish emacs mode; best effort under vi mode).
+    /// PowerShell gets nothing: its PSReadLine binds Ctrl-U to a different edit.
+    pub(super) const fn line_clear(self) -> &'static [u8] {
+        match self {
+            Self::Posix => b"\x05\x15",
+            Self::PowerShell => b"",
+        }
+    }
+
     /// `text` as one single-quoted word, identical in bash, zsh, fish and nushell (and PowerShell);
     /// `None` when it holds a character that [`Self::unsafe_char`] refuses.
     fn quote(self, text: &str) -> Option<String> {
@@ -118,6 +129,12 @@ mod tests {
     use super::*;
 
     const HOME: &str = "/home/u";
+
+    #[test]
+    fn only_posix_shells_clear_a_half_typed_line() {
+        assert_eq!(ShellSyntax::Posix.line_clear(), b"\x05\x15");
+        assert!(ShellSyntax::PowerShell.line_clear().is_empty());
+    }
 
     fn preset(dir: Option<&str>, command: Option<&str>, args: &[&str]) -> PresetConfig {
         PresetConfig {
