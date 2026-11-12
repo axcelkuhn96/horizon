@@ -49,9 +49,10 @@ pub use board::{
 };
 pub use config::{
     AppearanceConfig, AppearanceTheme, CLAUDE_BASE_PRESET_NAME, ClaudeProfile, Config, FeaturesConfig, InputConfig,
-    OverlaysConfig, PresetConfig, ShortcutsConfig, SpeechBackend, SpeechConfig, SpeechHotkeyMode, SpeechProfile,
-    SpeechTask, TerminalConfig, WindowConfig, WorkspaceConfig, claude_profile_preset, discover_claude_profiles,
-    expand_config_dir, scroll_should_pan_canvas, validate_claude_profiles,
+    OverlaysConfig, PanelSnapshotForTemplate, PresetConfig, ShortcutsConfig, SpeechBackend, SpeechConfig,
+    SpeechHotkeyMode, SpeechProfile, SpeechTask, TerminalConfig, WindowConfig, WorkspaceConfig, claude_profile_preset,
+    discover_claude_profiles, expand_config_dir, grid_position, move_item, scroll_should_pan_canvas,
+    template_from_workspace, terminal_from_preset, upsert_template, validate_claude_profiles,
 };
 pub use editor::{MarkdownEditor, PanelContent, PreviewMode};
 pub use error::{Error, Result};
