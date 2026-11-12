@@ -6,6 +6,7 @@ use horizon_core::WorkspaceId;
 
 use super::claude_launcher::ClaudeLauncherState;
 use super::hub_ui;
+use super::sidebar::GitSidebarState;
 use super::usage_chips::ClaudeUsageState;
 
 /// Accent slots for the visible profile list, recomputed only when the list changes.
@@ -31,6 +32,8 @@ pub(super) struct HubState {
     pub(super) rows_version: u64,
     /// Claude usage snapshot, poller and chip layout cache.
     pub(super) usage: ClaudeUsageState,
+    /// Git line and worktrees list state of the sidebar.
+    pub(super) git: GitSidebarState,
 }
 
 impl HubState {

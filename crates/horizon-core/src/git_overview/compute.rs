@@ -74,6 +74,7 @@ pub(super) fn compute_cached(
     };
 
     let (branch, detached) = head_branch(&current);
+    let head_short = head_short_id(&current);
     let (upstream, ahead, behind) = upstream_state(&current, branch.as_deref());
     let cwd_canonical = cwd.canonicalize()?;
 
@@ -149,6 +150,7 @@ pub(super) fn compute_cached(
         repo_root,
         branch,
         detached,
+        head_short,
         upstream,
         ahead,
         behind,
@@ -186,6 +188,26 @@ fn head_branch(repo: &Repository) -> (Option<String>, bool) {
             false,
         ),
         _ => (None, true),
+    }
+}
+
+/// First 7 hex chars of the commit `HEAD` resolves to; `None` for an unborn branch.
+fn head_short_id(repo: &Repository) -> Option<String> {
+    short_id(repo.refname_to_id("HEAD").ok()?)
+}
+
+fn short_id(oid: git2::Oid) -> Option<String> {
+    oid.to_string().get(..7).map(str::to_string)
+}
+
+/// Short HEAD id of a linked worktree from its `HEAD` file: a direct id when
+/// detached, otherwise the id of the branch it names (refs are shared).
+fn linked_head_short(main: &Repository, commondir: &Path, name: &str) -> Option<String> {
+    let head = std::fs::read_to_string(commondir.join("worktrees").join(name).join("HEAD")).ok()?;
+    let head = head.trim();
+    match head.strip_prefix("ref:") {
+        Some(target) => short_id(main.refname_to_id(target.trim()).ok()?),
+        None => short_id(git2::Oid::from_str(head).ok()?),
     }
 }
 
@@ -268,7 +290,7 @@ fn build_listing(main: &Repository, repo_root: &Path, stop: &AtomicBool) -> List
                 break;
             }
             if let Ok(worktree) = main.find_worktree(name) {
-                linked.push(linked_info(&worktree, main.commondir(), name));
+                linked.push(linked_info(&worktree, main, name));
             }
         }
     }
@@ -278,6 +300,7 @@ fn build_listing(main: &Repository, repo_root: &Path, stop: &AtomicBool) -> List
     infos.push(WorktreeInfo {
         path: repo_root.to_path_buf(),
         branch: main_branch,
+        head_short: head_short_id(main),
         is_main: true,
         is_current: false,
         locked: false,
@@ -290,11 +313,13 @@ fn build_listing(main: &Repository, repo_root: &Path, stop: &AtomicBool) -> List
     Listing { infos, canonical }
 }
 
-fn linked_info(worktree: &Worktree, commondir: &Path, name: &str) -> WorktreeInfo {
+fn linked_info(worktree: &Worktree, main: &Repository, name: &str) -> WorktreeInfo {
+    let commondir = main.commondir();
     let locked = matches!(worktree.is_locked(), Ok(WorktreeLockStatus::Locked(_)));
     let path = worktree.path().to_path_buf();
     WorktreeInfo {
         branch: linked_branch(commondir, name),
+        head_short: linked_head_short(main, commondir, name),
         is_main: false,
         is_current: false,
         locked,

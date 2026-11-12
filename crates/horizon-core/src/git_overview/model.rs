@@ -6,6 +6,9 @@ pub struct WorktreeInfo {
     pub path: PathBuf,
     /// `None` means detached HEAD (or an unreadable worktree).
     pub branch: Option<String>,
+    /// 7-char id of the commit `HEAD` points to; `None` for an unborn branch
+    /// or when it cannot be resolved.
+    pub head_short: Option<String>,
     pub is_main: bool,
     /// The queried `cwd` lives inside this worktree.
     pub is_current: bool,
@@ -28,6 +31,8 @@ pub struct RepoOverview {
     pub repo_root: PathBuf,
     pub branch: Option<String>,
     pub detached: bool,
+    /// 7-char id of the commit `HEAD` points to; `None` for an unborn branch.
+    pub head_short: Option<String>,
     pub dirty_count: usize,
     pub upstream: Option<String>,
     pub ahead: usize,

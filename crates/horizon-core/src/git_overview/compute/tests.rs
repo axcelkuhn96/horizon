@@ -69,6 +69,40 @@ fn detached_head_sets_detached_and_no_branch() {
     assert_eq!(o.branch, None);
     assert_eq!(o.upstream, None);
     assert_eq!(o.worktrees[0].branch, None);
+    assert_eq!(o.head_short.as_deref(), Some(&oid.to_string()[..7]));
+    assert_eq!(o.worktrees[0].head_short, o.head_short);
+}
+
+#[test]
+fn head_short_is_seven_chars_on_a_branch_and_none_when_unborn() {
+    let fx = Fixture::unborn();
+    let unborn = overview(&fx.root());
+    assert_eq!(unborn.head_short, None);
+    assert_eq!(unborn.worktrees[0].head_short, None);
+    let oid = fx.commit_file("a.txt", "one\n");
+    let o = overview(&fx.root());
+    assert_eq!(o.head_short.as_deref(), Some(&oid.to_string()[..7]));
+    assert_eq!(o.worktrees[0].head_short, o.head_short);
+}
+
+#[test]
+fn linked_worktree_head_short_for_branch_and_detached() {
+    let fx = Fixture::with_commit();
+    let oid = fx.repo.head().expect("head").target().expect("oid");
+    let expected = oid.to_string()[..7].to_string();
+    add_worktree(&fx, "feature");
+    let detached = add_worktree(&fx, "z");
+    Repository::open(&detached)
+        .expect("open")
+        .set_head_detached(oid)
+        .expect("detach");
+    let o = overview(&fx.root());
+    assert_eq!(o.worktrees.len(), 3);
+    assert!(
+        o.worktrees
+            .iter()
+            .all(|w| w.head_short.as_deref() == Some(expected.as_str()))
+    );
 }
 
 #[test]

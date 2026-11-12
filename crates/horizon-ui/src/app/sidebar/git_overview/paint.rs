@@ -1,0 +1,570 @@
+//! Painting of the sidebar git line, the worktrees toggle and the worktree
+//! rows (spec section 7). Everything reads strings prepared by `build_cache`.
+
+use std::time::{Duration, Instant};
+
+use egui::{
+    Align, Align2, Color32, CornerRadius, CursorIcon, FontId, Frame, Id, Label, Layout, Margin, Painter, Pos2, Rect,
+    RichText, Sense, Shape, Stroke, TextWrapMode, Ui, UiBuilder, Vec2, WidgetInfo, WidgetType,
+};
+use horizon_core::git_overview::OverviewPoller;
+use horizon_core::{PresetConfig, WorkspaceId};
+
+use super::{
+    COPIED_FEEDBACK, Copied, GitAction, GitActionKind, GitLineCache, GitSidebarState, TooltipData, VISIBLE_ROWS,
+    WorktreeRow, row_menu, visible_rows,
+};
+use crate::app::hub_ui;
+use crate::theme;
+
+const GIT_LINE_HEIGHT: f32 = 20.0;
+const ROW_HEIGHT: f32 = 22.0;
+/// Left indent of the git line and the section toggles.
+const LINE_INDENT: f32 = 28.0;
+/// Left indent of the text of a worktree row.
+const ROW_INDENT: f32 = 40.0;
+/// Left edge of a row's highlight, inside the indent so rows read as nested.
+const ROW_FILL_INDENT: f32 = 30.0;
+const ROW_RIGHT_INSET: f32 = 6.0;
+const ROW_RADIUS: u8 = 6;
+const TOOLTIP_WIDTH: f32 = 300.0;
+const TOOLTIP_MARGIN: i8 = 12;
+const AGENT_TOGGLE_EXTRA_INDENT: f32 = 12.0;
+
+/// Everything a worktree row (and its menu) needs besides the row itself.
+pub(super) struct RowEnv<'a> {
+    pub(super) workspace: WorkspaceId,
+    pub(super) presets: &'a [PresetConfig],
+    pub(super) poller: Option<&'a OverviewPoller<WorkspaceId>>,
+    pub(super) copied: Option<Copied>,
+    pub(super) changed_at: Instant,
+}
+
+/// Dirty dot on a collapsed workspace header (the git line is hidden then).
+pub(in crate::app::sidebar) fn paint_collapsed_dirty_dot(
+    ui: &Ui,
+    state: &GitSidebarState,
+    workspace: WorkspaceId,
+    row_rect: Rect,
+) {
+    if state
+        .caches
+        .get(&workspace)
+        .is_some_and(|cache| cache.error.is_none() && cache.dirty_count > 0)
+    {
+        ui.painter().circle_filled(
+            Pos2::new(row_rect.max.x - 18.0, row_rect.center().y),
+            3.0,
+            theme::PALETTE_YELLOW(),
+        );
+    }
+}
+
+/// Git line plus the expandable worktrees list of one workspace. Draws nothing
+/// (zero height) for workspaces without a repository. Returns the action the
+/// user picked, if any.
+pub(in crate::app::sidebar) fn render_git_section(
+    ui: &mut Ui,
+    state: &mut GitSidebarState,
+    presets: &[PresetConfig],
+    workspace: WorkspaceId,
+) -> Option<GitAction> {
+    let GitSidebarState {
+        caches,
+        poller,
+        expanded,
+        agents_open,
+        show_all,
+        watch_stale,
+        copied,
+        ..
+    } = state;
+    let cache = caches.get(&workspace)?;
+    if cache.error.is_some() {
+        paint_error_line(ui, cache, workspace);
+        return None;
+    }
+    paint_git_line(ui, cache, workspace);
+    if cache.worktree_rows.len() < 2 {
+        return None;
+    }
+
+    let open = expanded.contains(&workspace);
+    let toggle_id = ui.make_persistent_id(("git_wt_toggle", workspace.0));
+    if toggle_row(
+        ui,
+        toggle_id,
+        LINE_INDENT,
+        "worktrees",
+        &cache.worktrees_count_label,
+        open,
+    ) {
+        if open {
+            expanded.remove(&workspace);
+        } else {
+            expanded.insert(workspace);
+        }
+        *watch_stale = true;
+        return None;
+    }
+    if !open {
+        return None;
+    }
+
+    if copied.is_some_and(|copied| copied.at.elapsed() >= COPIED_FEEDBACK) {
+        *copied = None;
+    }
+    let env = RowEnv {
+        workspace,
+        presets,
+        poller: poller.as_ref(),
+        copied: copied.filter(|copied| copied.workspace == workspace),
+        changed_at: cache.changed_at,
+    };
+    if let Some(copied) = env.copied {
+        ui.ctx()
+            .request_repaint_after(COPIED_FEEDBACK.saturating_sub(copied.at.elapsed()));
+    }
+
+    let all = show_all.contains(&workspace);
+    let mut action = None;
+    let mut toggled_all = false;
+    let mut toggled_agents = false;
+
+    let primary = visible_rows(cache.primary_count, all);
+    for index in 0..primary {
+        action = action.or(paint_worktree_row(ui, &env, &cache.worktree_rows, index));
+    }
+    if cache.primary_count > VISIBLE_ROWS {
+        toggled_all |= show_all_row(ui, workspace, "primary", all, &cache.primary_show_all_label);
+    }
+
+    if cache.agent_count() > 0 {
+        let agents_id = ui.make_persistent_id(("git_wt_agents", workspace.0));
+        let agents_open_now = agents_open.contains(&workspace);
+        toggled_agents = toggle_row(
+            ui,
+            agents_id,
+            LINE_INDENT + AGENT_TOGGLE_EXTRA_INDENT,
+            &cache.agents_label,
+            "",
+            agents_open_now,
+        );
+        if agents_open_now {
+            let shown = visible_rows(cache.agent_count(), all);
+            for index in cache.primary_count..cache.primary_count + shown {
+                action = action.or(paint_worktree_row(ui, &env, &cache.worktree_rows, index));
+            }
+            if cache.agent_count() > VISIBLE_ROWS {
+                toggled_all |= show_all_row(ui, workspace, "agents", all, &cache.agents_show_all_label);
+            }
+        }
+    }
+
+    if toggled_all {
+        if all {
+            show_all.remove(&workspace);
+        } else {
+            show_all.insert(workspace);
+        }
+        *watch_stale = true;
+    }
+    if toggled_agents {
+        if agents_open.contains(&workspace) {
+            agents_open.remove(&workspace);
+        } else {
+            agents_open.insert(workspace);
+        }
+        *watch_stale = true;
+    }
+    action
+}
+
+// ---------------------------------------------------------------------------
+// Git line
+// ---------------------------------------------------------------------------
+
+fn paint_error_line(ui: &mut Ui, cache: &GitLineCache, workspace: WorkspaceId) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), GIT_LINE_HEIGHT), Sense::hover());
+    ui.painter().text(
+        Pos2::new(rect.min.x + LINE_INDENT, rect.center().y),
+        Align2::LEFT_CENTER,
+        "git?",
+        FontId::proportional(10.5),
+        theme::FG_DIM(),
+    );
+    let response = ui.interact(rect, ui.make_persistent_id(("git_line", workspace.0)), Sense::hover());
+    response.on_hover_text(&cache.tooltip.path);
+}
+
+/// Branch glyph: a stem, a side branch and a node (1.2 px strokes).
+fn paint_branch_glyph(painter: &Painter, area: Rect, color: Color32) {
+    let stroke = Stroke::new(1.2_f32, color);
+    let at = |x: f32, y: f32| Pos2::new(area.min.x + x, area.min.y + y);
+    painter.line_segment([at(3.0, 1.5), at(3.0, 10.5)], stroke);
+    painter.line_segment([at(3.0, 8.0), at(8.5, 5.5)], stroke);
+    painter.circle_stroke(at(9.0, 4.0), 2.0, stroke);
+}
+
+/// Small filled triangle (5 wide, 7 tall) pointing up or down.
+fn paint_arrow(ui: &mut Ui, up: bool, color: Color32) {
+    let (area, _) = ui.allocate_exact_size(Vec2::new(5.0, 7.0), Sense::hover());
+    let points = if up {
+        vec![
+            Pos2::new(area.center().x, area.min.y),
+            Pos2::new(area.min.x, area.max.y),
+            Pos2::new(area.max.x, area.max.y),
+        ]
+    } else {
+        vec![
+            Pos2::new(area.center().x, area.max.y),
+            Pos2::new(area.min.x, area.min.y),
+            Pos2::new(area.max.x, area.min.y),
+        ]
+    };
+    ui.painter().add(Shape::convex_polygon(points, color, Stroke::NONE));
+}
+
+fn mono_label(ui: &mut Ui, text: &str, color: Color32) {
+    ui.add(
+        Label::new(RichText::new(text).monospace().size(10.0).color(color))
+            .selectable(false)
+            .wrap_mode(TextWrapMode::Extend),
+    );
+}
+
+fn paint_git_line(ui: &mut Ui, cache: &GitLineCache, workspace: WorkspaceId) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), GIT_LINE_HEIGHT), Sense::hover());
+    ui.scope_builder(
+        UiBuilder::new()
+            .max_rect(rect)
+            .layout(Layout::left_to_right(Align::Center)),
+        |ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            ui.add_space(LINE_INDENT);
+            let (glyph, _) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
+            paint_branch_glyph(ui.painter(), glyph, theme::FG_DIM());
+            let mut text = RichText::new(&cache.branch_label).size(10.5);
+            text = if cache.detached {
+                text.italics().color(theme::FG_DIM())
+            } else {
+                text.color(theme::FG_SOFT())
+            };
+            ui.add(Label::new(text).selectable(false).wrap_mode(TextWrapMode::Extend));
+            if !cache.ahead_label.is_empty() {
+                ui.add_space(4.0);
+                paint_arrow(ui, true, theme::PALETTE_GREEN());
+                mono_label(ui, &cache.ahead_label, theme::PALETTE_GREEN());
+            }
+            if !cache.behind_label.is_empty() {
+                ui.add_space(4.0);
+                paint_arrow(ui, false, theme::PALETTE_YELLOW());
+                mono_label(ui, &cache.behind_label, theme::PALETTE_YELLOW());
+            }
+            if !cache.dirty_label.is_empty() {
+                ui.add_space(4.0);
+                let (dot, _) = ui.allocate_exact_size(Vec2::splat(6.0), Sense::hover());
+                ui.painter().circle_filled(dot.center(), 3.0, theme::PALETTE_YELLOW());
+                mono_label(ui, &cache.dirty_label, theme::FG_SOFT());
+            }
+        },
+    );
+    let response = ui.interact(rect, ui.make_persistent_id(("git_line", workspace.0)), Sense::hover());
+    response.on_hover_ui_at_pointer(|ui| show_tooltip(ui, &cache.tooltip, cache.changed_at));
+}
+
+// ---------------------------------------------------------------------------
+// Toggles and show-all rows
+// ---------------------------------------------------------------------------
+
+fn inset_rect(rect: Rect, left: f32) -> Rect {
+    Rect::from_min_max(
+        Pos2::new(rect.min.x + left, rect.min.y),
+        Pos2::new(rect.max.x - ROW_RIGHT_INSET, rect.max.y),
+    )
+}
+
+/// Expand/collapse row (`▸`/`▾` painted as a triangle). Returns true on click.
+fn toggle_row(ui: &mut Ui, id: Id, indent: f32, label: &str, count: &str, open: bool) -> bool {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), GIT_LINE_HEIGHT), Sense::hover());
+    let response = ui.interact(rect, id, Sense::click());
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::CollapsingHeader, true, label));
+    let hovered = response.hovered();
+    let painter = ui.painter();
+    let bg = inset_rect(rect, indent - 6.0);
+    if hovered {
+        painter.rect_filled(
+            bg,
+            CornerRadius::same(ROW_RADIUS),
+            theme::alpha(theme::PANEL_BG_ALT(), 160),
+        );
+    }
+    let color = if hovered { theme::FG_SOFT() } else { theme::FG_DIM() };
+    let (x, cy) = (rect.min.x + indent, rect.center().y);
+    let points = if open {
+        vec![
+            Pos2::new(x, cy - 2.0),
+            Pos2::new(x + 7.0, cy - 2.0),
+            Pos2::new(x + 3.5, cy + 2.5),
+        ]
+    } else {
+        vec![
+            Pos2::new(x + 1.5, cy - 3.5),
+            Pos2::new(x + 1.5, cy + 3.5),
+            Pos2::new(x + 6.0, cy),
+        ]
+    };
+    painter.add(Shape::convex_polygon(points, color, Stroke::NONE));
+    let text = painter.text(
+        Pos2::new(x + 14.0, cy),
+        Align2::LEFT_CENTER,
+        label,
+        FontId::proportional(10.5),
+        color,
+    );
+    if !count.is_empty() {
+        painter.text(
+            Pos2::new(text.right() + 6.0, cy),
+            Align2::LEFT_CENTER,
+            count,
+            FontId::monospace(10.0),
+            theme::FG_DIM(),
+        );
+    }
+    hub_ui::paint_focus_ring(painter, &response, bg, ROW_RADIUS);
+    if hovered {
+        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+    }
+    response.clicked()
+}
+
+/// "Show all (N)" / "Show less" row ending a truncated group.
+fn show_all_row(ui: &mut Ui, workspace: WorkspaceId, group: &str, all: bool, label: &str) -> bool {
+    let id = ui.make_persistent_id(("git_wt_show_all", workspace.0, group));
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), GIT_LINE_HEIGHT), Sense::hover());
+    let response = ui.interact(rect, id, Sense::click());
+    let text = if all { "Show less" } else { label };
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, text));
+    let hovered = response.hovered();
+    let painter = ui.painter();
+    let bg = inset_rect(rect, ROW_FILL_INDENT);
+    if hovered {
+        painter.rect_filled(
+            bg,
+            CornerRadius::same(ROW_RADIUS),
+            theme::alpha(theme::PANEL_BG_ALT(), 160),
+        );
+    }
+    painter.text(
+        Pos2::new(rect.min.x + ROW_INDENT, rect.center().y),
+        Align2::LEFT_CENTER,
+        text,
+        FontId::proportional(10.0),
+        if hovered { theme::FG_SOFT() } else { theme::FG_DIM() },
+    );
+    hub_ui::paint_focus_ring(painter, &response, bg, ROW_RADIUS);
+    if hovered {
+        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+    }
+    response.clicked()
+}
+
+// ---------------------------------------------------------------------------
+// Worktree rows
+// ---------------------------------------------------------------------------
+
+/// Padlock: filled body with a polyline shackle. `right` is its right edge.
+fn paint_lock(painter: &Painter, right: f32, cy: f32, color: Color32) {
+    let left = right - 7.0;
+    painter.rect_filled(
+        Rect::from_min_max(Pos2::new(left, cy - 0.5), Pos2::new(right, cy + 4.5)),
+        CornerRadius::same(1),
+        color,
+    );
+    painter.add(Shape::line(
+        vec![
+            Pos2::new(left + 1.5, cy - 0.5),
+            Pos2::new(left + 1.5, cy - 3.0),
+            Pos2::new(right - 1.5, cy - 3.0),
+            Pos2::new(right - 1.5, cy - 0.5),
+        ],
+        Stroke::new(1.2_f32, color),
+    ));
+}
+
+fn paint_worktree_row(ui: &mut Ui, env: &RowEnv<'_>, rows: &[WorktreeRow], index: usize) -> Option<GitAction> {
+    let row = rows.get(index)?;
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), ROW_HEIGHT), Sense::hover());
+    // Rows scrolled out of the sidebar are not painted or interacted with.
+    if !ui.is_rect_visible(rect) {
+        return None;
+    }
+    let id = ui.make_persistent_id(("git_wt_row", env.workspace.0, row.key));
+    let response = ui.interact(rect, id, Sense::click());
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, !row.prunable, &row.label));
+    let hovered = response.hovered();
+    let clickable = !row.prunable;
+    let bg = inset_rect(rect, ROW_FILL_INDENT);
+    let cy = rect.center().y;
+    let fade = |color: Color32| if row.prunable { theme::alpha(color, 140) } else { color };
+
+    let painter = ui.painter();
+    let fill = match (row.is_current, hovered) {
+        (true, true) => Some(theme::blend(theme::PANEL_BG_ALT(), theme::ACCENT(), 0.22)),
+        (true, false) => Some(theme::blend(theme::PANEL_BG_ALT(), theme::ACCENT(), 0.14)),
+        (false, true) => Some(theme::PANEL_BG_ALT()),
+        (false, false) => None,
+    };
+    if let Some(fill) = fill {
+        painter.rect_filled(bg, CornerRadius::same(ROW_RADIUS), fill);
+    }
+    if row.is_current {
+        let bar = Rect::from_min_size(Pos2::new(bg.min.x, bg.min.y + 3.0), Vec2::new(3.0, bg.height() - 6.0));
+        painter.rect_filled(bar, CornerRadius::same(2), theme::ACCENT());
+    }
+
+    // Right-aligned markers: dirty dot, lock, prunable pill.
+    let mut right = bg.max.x - 8.0;
+    if row.dirty {
+        painter.circle_filled(Pos2::new(right - 3.0, cy), 3.0, fade(theme::PALETTE_YELLOW()));
+        right -= 12.0;
+    }
+    if row.locked {
+        paint_lock(painter, right, cy, fade(theme::FG_DIM()));
+        right -= 14.0;
+    }
+    if row.prunable {
+        let width = hub_ui::pill_width(painter, "prunable");
+        let pill = hub_ui::pill_rect(Pos2::new(right - width, cy - 9.0), width);
+        hub_ui::pill(painter, pill, "prunable", theme::FG_DIM());
+        right = pill.min.x - 6.0;
+    }
+
+    let clip = Rect::from_min_max(bg.min, Pos2::new(right, rect.max.y));
+    let clipped = painter.with_clip_rect(clip);
+    let label_color = if row.detached { theme::FG_DIM() } else { theme::FG() };
+    let label = clipped.text(
+        Pos2::new(rect.min.x + ROW_INDENT, cy),
+        Align2::LEFT_CENTER,
+        &row.label,
+        FontId::proportional(10.5),
+        fade(label_color),
+    );
+    let path_x = label.right() + 8.0;
+    if path_x < right {
+        if env.copied.is_some_and(|copied| copied.key == row.key) {
+            clipped.text(
+                Pos2::new(path_x, cy),
+                Align2::LEFT_CENTER,
+                "Copied",
+                FontId::monospace(10.0),
+                theme::PALETTE_GREEN(),
+            );
+        } else {
+            clipped.text(
+                Pos2::new(path_x, cy),
+                Align2::LEFT_CENTER,
+                &row.short_path,
+                FontId::monospace(10.0),
+                fade(theme::FG_DIM()),
+            );
+        }
+    }
+    hub_ui::paint_focus_ring(painter, &response, bg, ROW_RADIUS);
+    if hovered && clickable {
+        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+    }
+
+    let mut action = None;
+    if response.clicked() && clickable {
+        action = Some(GitAction {
+            workspace: env.workspace,
+            path: row.path.clone(),
+            kind: GitActionKind::OpenTerminal,
+        });
+    }
+    if let Some(picked) = row_menu::show(&response, env, row) {
+        action = Some(picked);
+    }
+    response
+        .clone()
+        .on_hover_ui_at_pointer(|ui| show_tooltip(ui, &row.tooltip, env.changed_at));
+    action
+}
+
+// ---------------------------------------------------------------------------
+// Tooltip
+// ---------------------------------------------------------------------------
+
+/// "Changed 12 s ago" style text for the hover card. The poller only delivers
+/// snapshots that differ from the last one, so this is the time of the last change.
+fn changed_text(elapsed: Duration) -> String {
+    let secs = elapsed.as_secs();
+    match secs {
+        0..=1 => "Changed just now".to_string(),
+        2..=59 => format!("Changed {secs} s ago"),
+        60..=3599 => format!("Changed {} min ago", secs / 60),
+        _ => format!("Changed {} h ago", secs / 3600),
+    }
+}
+
+fn badge_color(badge: &str) -> Color32 {
+    match badge {
+        "current" => theme::ACCENT(),
+        "locked" => theme::PALETTE_YELLOW(),
+        "prunable" => theme::FG_DIM(),
+        _ => theme::FG_SOFT(),
+    }
+}
+
+fn badge_pill(ui: &mut Ui, text: &str) {
+    let width = hub_ui::pill_width(ui.painter(), text);
+    let (rect, _) = ui.allocate_exact_size(hub_ui::pill_rect(Pos2::ZERO, width).size(), Sense::hover());
+    hub_ui::pill(ui.painter(), rect, text, badge_color(text));
+}
+
+fn show_tooltip(ui: &mut Ui, tip: &TooltipData, changed_at: Instant) {
+    Frame::new().inner_margin(Margin::same(TOOLTIP_MARGIN)).show(ui, |ui| {
+        ui.set_width(TOOLTIP_WIDTH - f32::from(TOOLTIP_MARGIN) * 2.0);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(&tip.title).size(13.0).strong().color(theme::FG()));
+            for badge in &tip.badges {
+                badge_pill(ui, badge);
+            }
+        });
+        ui.add_space(4.0);
+        ui.label(RichText::new(&tip.path).monospace().size(10.5).color(theme::FG_DIM()));
+        if tip.upstream.is_some() || tip.changes.is_some() {
+            ui.add_space(4.0);
+        }
+        for line in [&tip.upstream, &tip.changes].into_iter().flatten() {
+            ui.label(RichText::new(line).size(11.0).color(theme::FG_SOFT()));
+        }
+        ui.add_space(4.0);
+        ui.label(
+            RichText::new(changed_text(changed_at.elapsed()))
+                .size(10.5)
+                .color(theme::FG_DIM()),
+        );
+        ui.label(
+            RichText::new("Click: open terminal \u{b7} Right-click: more")
+                .size(10.0)
+                .color(theme::FG_DIM()),
+        );
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::changed_text;
+
+    #[test]
+    fn changed_text_scales_units() {
+        assert_eq!(changed_text(Duration::from_secs(0)), "Changed just now");
+        assert_eq!(changed_text(Duration::from_secs(12)), "Changed 12 s ago");
+        assert_eq!(changed_text(Duration::from_secs(180)), "Changed 3 min ago");
+        assert_eq!(changed_text(Duration::from_secs(7300)), "Changed 2 h ago");
+    }
+}
