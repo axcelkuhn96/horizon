@@ -2,6 +2,7 @@ mod actions;
 mod attention_feed;
 mod canvas;
 mod claude_launcher;
+mod claude_quick_start;
 mod detached_viewports;
 mod file_drop;
 mod file_drop_highlight;

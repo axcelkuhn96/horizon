@@ -4,6 +4,7 @@ use horizon_core::{AttentionSeverity, PanelId, PanelKind, SshConnectionStatus, a
 use crate::theme;
 
 use super::RenameEditAction;
+use super::claude_quick_start::titlebar::{self as quick_start, STRIP_GAP};
 use super::link::{LinkBadgeView, paint_link_badge};
 use super::speech::MicState;
 use super::util::{format_compact_count, usize_to_f32};
@@ -32,6 +33,21 @@ pub(super) struct PanelChrome<'a> {
     pub link_badge: Option<&'a LinkBadgeView>,
     /// Speech mic control; `None` when speech input is not enabled.
     pub mic: Option<MicControl>,
+    /// Claude quick-start strip on local shell panels.
+    pub quick_start: Option<QuickStartControl>,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct QuickStartControl {
+    /// The strip's rect in the titlebar; it is painted by the panel code after the chrome.
+    pub rect: Rect,
+}
+
+impl QuickStartControl {
+    /// Titlebar width the strip takes, gap included.
+    pub(super) fn slot(self) -> f32 {
+        self.rect.width() + STRIP_GAP
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -45,6 +61,13 @@ impl PanelChrome<'_> {
     /// Leftmost titlebar control: badges and the title stop left of this.
     fn controls_anchor(&self) -> Rect {
         self.mic.map_or(self.close_rect, |mic| mic.rect)
+    }
+
+    /// Where the badges stack from: the controls anchor, moved left of the quick-start strip.
+    fn badge_anchor(&self) -> Rect {
+        let anchor = self.controls_anchor();
+        self.quick_start
+            .map_or(anchor, |strip| anchor.translate(Vec2::new(-strip.slot(), 0.0)))
     }
 }
 
@@ -231,7 +254,7 @@ pub(super) fn paint_panel_chrome(ui: &mut egui::Ui, chrome: PanelChrome<'_>) {
             paint_attention_badge(
                 &painter,
                 chrome.titlebar_rect,
-                chrome.controls_anchor(),
+                chrome.badge_anchor(),
                 *severity,
                 summary,
             );
@@ -240,7 +263,7 @@ pub(super) fn paint_panel_chrome(ui: &mut egui::Ui, chrome: PanelChrome<'_>) {
             paint_ssh_status_badge(
                 &painter,
                 chrome.titlebar_rect,
-                chrome.controls_anchor(),
+                chrome.badge_anchor(),
                 chrome.scrollback_limit > 0,
                 status,
             );
@@ -249,7 +272,7 @@ pub(super) fn paint_panel_chrome(ui: &mut egui::Ui, chrome: PanelChrome<'_>) {
             paint_process_exited_badge(
                 &painter,
                 chrome.titlebar_rect,
-                chrome.controls_anchor(),
+                chrome.badge_anchor(),
                 chrome.scrollback_limit > 0,
                 label,
             );
@@ -450,6 +473,10 @@ fn title_right_boundary(chrome: &PanelChrome<'_>) -> f32 {
         // Link badge sits left of the status badges; reserve ~120px.
         right -= 120.0;
     }
+    if let Some(strip) = chrome.quick_start {
+        // The quick-start strip sits left of the history meter and the badges stack left of it.
+        right -= strip.slot();
+    }
     right
 }
 
@@ -458,7 +485,7 @@ const BADGE_STACK_GAP: f32 = 6.0;
 
 /// Link badge in the SSH/exit/attention badge slot, stacked to their left when present.
 fn paint_link_badge_stacked(painter: &egui::Painter, chrome: &PanelChrome<'_>, view: &LinkBadgeView) {
-    let anchor = chrome.controls_anchor();
+    let anchor = chrome.badge_anchor();
     let right_edge = if chrome.scrollback_limit > 0 {
         panel_history_badge_rect(chrome.titlebar_rect, anchor).min.x - 6.0
     } else {
@@ -765,6 +792,21 @@ fn panel_history_badge_rect(titlebar_rect: Rect, close_rect: Rect) -> Rect {
     )
 }
 
+/// X where the quick-start strip ends for a panel whose controls start at `controls` (mic or
+/// close). Without a history meter the strip stops left of the collapse caret too.
+pub(super) fn quick_start_strip_right(
+    titlebar_rect: Rect,
+    controls: Rect,
+    collapse: Rect,
+    has_history_meter: bool,
+) -> f32 {
+    quick_start::strip_right(
+        panel_history_badge_rect(titlebar_rect, controls),
+        has_history_meter,
+        controls.min.x.min(collapse.min.x),
+    )
+}
+
 pub(super) fn panel_title_content_rect(titlebar_rect: Rect, close_rect: Rect, has_workspace_accent: bool) -> Rect {
     let left = if has_workspace_accent {
         titlebar_rect.min.x + 26.0
@@ -821,7 +863,7 @@ mod tests {
 
     use super::{
         BADGE_STACK_GAP, badge_stack_offset, focus_ring_stroke, panel_border_stroke, panel_fill, panel_title_color,
-        panel_titlebar_fill, title_focus_indicator_rect,
+        panel_titlebar_fill, quick_start_strip_right, title_focus_indicator_rect,
     };
 
     #[test]
@@ -854,5 +896,20 @@ mod tests {
         assert!(titlebar_rect.contains(indicator.max - indicator.size() * 0.01));
         assert!(indicator.width() > 0.0);
         assert!(indicator.height() > 0.0);
+    }
+
+    #[test]
+    fn quick_start_strip_without_a_history_meter_stops_left_of_the_collapse_caret() {
+        let titlebar = Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(600.0, 34.0));
+        let close = Rect::from_center_size(Pos2::new(582.0, 17.0), egui::Vec2::splat(16.0));
+        let collapse = Rect::from_center_size(Pos2::new(560.0, 17.0), egui::Vec2::splat(16.0));
+        let mic = Rect::from_center_size(Pos2::new(538.0, 17.0), egui::Vec2::splat(16.0));
+
+        let without_mic = quick_start_strip_right(titlebar, close, collapse, false);
+        let with_mic = quick_start_strip_right(titlebar, mic, collapse, false);
+
+        assert!(without_mic <= collapse.min.x - 8.0 + f32::EPSILON);
+        assert!(with_mic <= mic.min.x - 8.0 + f32::EPSILON);
+        assert!(quick_start_strip_right(titlebar, close, collapse, true) < close.min.x);
     }
 }

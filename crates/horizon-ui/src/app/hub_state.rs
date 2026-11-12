@@ -6,6 +6,7 @@ use std::time::Instant;
 use horizon_core::WorkspaceId;
 
 use super::claude_launcher::ClaudeLauncherState;
+use super::claude_quick_start::QuickStartUi;
 use super::hub_ui;
 use super::link::LinkUiState;
 use super::minimap::MinimapAutoHide;
@@ -43,6 +44,8 @@ pub(super) struct HubState {
     pub(super) link: LinkUiState,
     /// Reveal state of each auto-hiding minimap overlay (root canvas and detached viewports).
     pub(super) minimap_auto_hide: HashMap<egui::Id, MinimapAutoHide>,
+    /// Titlebar "Claude" quick-start strip and the busy probes behind its button.
+    pub(super) quick_start: QuickStartUi,
 }
 
 impl HubState {

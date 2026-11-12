@@ -47,11 +47,17 @@ pub(crate) fn agent_resume_command(agent: &RunningAgent, session_id: &str, home:
     if agent.binary == "claude2" || is_default {
         return Some(command);
     }
-    let dir = agent.config_dir.to_str()?;
-    if dir.chars().any(char::is_control) {
+    let dir = shell_single_quote(agent.config_dir.to_str()?)?;
+    Some(format!("CLAUDE_CONFIG_DIR={dir} {command}"))
+}
+
+/// `text` in single quotes, safe to paste into a POSIX shell; `None` when it holds a control
+/// character (a newline would end the command line early).
+pub(crate) fn shell_single_quote(text: &str) -> Option<String> {
+    if text.chars().any(char::is_control) {
         return None;
     }
-    Some(format!("CLAUDE_CONFIG_DIR='{}' {command}", dir.replace('\'', "'\\''")))
+    Some(format!("'{}'", text.replace('\'', "'\\''")))
 }
 
 /// Every Claude config dir a startup bootstrap must check for live sessions:

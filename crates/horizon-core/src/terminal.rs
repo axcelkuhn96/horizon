@@ -32,6 +32,8 @@ use self::resize::{queue_debounced_pty_resize, should_debounce_pty_resize};
 #[cfg(test)]
 use self::support::default_terminal_rgb;
 pub use self::support::open_url;
+#[cfg(target_os = "linux")]
+pub use self::support::shell_pid_behind_wrapper;
 use self::support::{
     ColorLookup, current_cwd_for_pid, find_file_path_at_column, find_url_at_column, replay_terminal_bytes,
 };

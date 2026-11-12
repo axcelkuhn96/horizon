@@ -14,9 +14,11 @@ use super::super::terminal_widget::{
 };
 use super::super::theme;
 use super::super::usage_widget::UsageDashboardView;
+use super::claude_quick_start::{StripArgs, paint_strip};
 use super::link::LinkBadgeView;
 pub(super) use super::panel_chrome::{
-    MicControl, PanelChrome, paint_panel_chrome, panel_kind_icon, panel_title_content_rect, show_inline_rename_editor,
+    MicControl, PanelChrome, QuickStartControl, paint_panel_chrome, panel_kind_icon, panel_title_content_rect,
+    quick_start_strip_right, show_inline_rename_editor,
 };
 use super::shortcut_inventory::ssh_reconnect_shortcut_conflicts;
 use super::speech::MicState;
@@ -359,6 +361,10 @@ impl HorizonApp {
         self.panel_render_order
             .sort_by_key(|(panel_id, _)| Some(*panel_id) == focused);
 
+        self.hub
+            .quick_start
+            .drop_closed(self.board.panels.len(), |panel_id| self.board.panel(panel_id).is_some());
+
         let canvas_rect = self.canvas_rect(ctx);
         let mut panels_to_close = Vec::new();
 
@@ -530,6 +536,26 @@ impl HorizonApp {
                         enabled,
                     }
                 });
+                let quick_start = self.quick_start_strip(
+                    ui,
+                    &StripArgs {
+                        panel_id,
+                        panel_width: snapshot.canvas_size.x,
+                        hidden: snapshot.collapsed || snapshot.is_renaming,
+                        titlebar: rects.titlebar,
+                        right: quick_start_strip_right(
+                            rects.titlebar,
+                            if mic_eligible { rects.mic } else { rects.close },
+                            rects.collapse,
+                            snapshot.scrollback_limit > 0,
+                        ),
+                        interactive,
+                        hovered: ui.rect_contains_pointer(rects.titlebar),
+                    },
+                );
+                if quick_start.as_ref().is_some_and(|strip| strip.clicked) {
+                    outcome.focus_requested = true;
+                }
                 // A collapsed panel has no body, so its resize handle is hidden
                 // and inert — only sense interactions while expanded.
                 let resize_response = ui.interact(
@@ -600,8 +626,13 @@ impl HorizonApp {
                             hovered: mic.enabled && (mic.response.hovered() || mic.response.has_focus()),
                             state: mic.state,
                         }),
+                        quick_start: quick_start.as_ref().map(|strip| QuickStartControl { rect: strip.rect }),
                     },
                 );
+
+                if let Some(strip) = &quick_start {
+                    paint_strip(ui.painter(), strip);
+                }
 
                 // Release the shared board borrow before the mutable borrow below.
                 drop(display_title);

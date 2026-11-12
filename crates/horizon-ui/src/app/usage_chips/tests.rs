@@ -84,9 +84,10 @@ fn chip_label_without_email_omits_identifier() {
 fn chip_label_dash_for_null_window() {
     let u = usage("claude2", None, None, Some(12.0));
 
-    assert_eq!(chip_label(&u, false), "claude2  5h \u{2014}  7d 12%");
+    assert_eq!(chip_label(&u, false), "claude2  7d 12%");
     let both = usage("claude2", None, None, None);
     assert_eq!(chip_label(&both, true), "claude2  7d \u{2014}");
+    assert_eq!(chip_label(&both, false), "claude2  7d \u{2014}");
 }
 
 #[test]
@@ -132,8 +133,9 @@ fn widths_total_adds_gaps_and_compact_is_narrower() {
     assert!((widths.total(false, 1) - CHIP_FULL_ESTIMATE).abs() <= f32::EPSILON);
     assert!((widths.total(false, 3) - (3.0 * CHIP_FULL_ESTIMATE + 2.0 * CHIP_GAP)).abs() <= f32::EPSILON);
     assert!(widths.total(true, 3) < widths.total(false, 3));
-    assert!(full_chip_width(40.0, 40.0, None) <= 340.0);
-    assert!(compact_chip_width(40.0, 30.0, None) < full_chip_width(40.0, 40.0, None));
+    assert!(full_chip_width(40.0, 40.0, None, true) <= 340.0);
+    assert!(compact_chip_width(40.0, 30.0, None) < full_chip_width(40.0, 40.0, None, true));
+    assert!(full_chip_width(40.0, 40.0, None, false) < full_chip_width(40.0, 40.0, None, true));
 }
 
 #[test]
@@ -384,4 +386,14 @@ fn a_snapshot_invalidates_launcher_rows_without_asking_for_another_profile_sync(
         Some((Some(10.0), Some(20.0)))
     );
     assert!(!hub.receive_usage_snapshot(), "no poller in tests: nothing to receive");
+}
+
+#[test]
+fn five_hour_is_hidden_only_when_the_api_sent_no_such_window() {
+    let with_five = usage("claude2", None, Some(37.0), Some(12.0));
+    let null_five = usage("claude2", None, None, Some(12.0));
+
+    assert!(has_five_hour(Some(&with_five)));
+    assert!(!has_five_hour(Some(&null_five)));
+    assert!(has_five_hour(None), "unknown usage keeps its placeholder");
 }
