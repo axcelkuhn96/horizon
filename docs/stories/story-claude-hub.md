@@ -52,7 +52,7 @@ aliases, tabs and `/usage` by hand.
 3. A template with 1 shell + 1 `Claude · claude3` is created without touching the YAML tab, YAML is valid and hot-reloads.
 
 ### D — Terminal link (Unix only; no-op on Windows)
-1. Server in `horizon-core`: socket `$XDG_RUNTIME_DIR/horizon/<pid>.sock` (fallback `~/.horizon/run/<pid>.sock`), dir 0700, socket 0600, removed on shutdown; one JSON line per request with a version field; max 64 KiB; requests forwarded to the UI thread and answered after frame processing (Board never touched off-thread).
+1. Server in `horizon-core`: socket `$XDG_RUNTIME_DIR/horizon/<pid>.sock` (fallback `~/.horizon/run/<pid>.sock`), dir 0700, socket 0600, removed on a clean shutdown (a SIGTERM/kill leaves it behind; the next start sweeps sockets of dead pids); one JSON line per request with a version field; max 64 KiB; requests forwarded to the UI thread and answered after frame processing (Board never touched off-thread).
 2. Every panel gets `HORIZON_PANEL_ID` (local_id), `HORIZON_PANEL_NAME`, `HORIZON_SOCKET`; preset env cannot override them.
 3. `horizon link list | send <target> <text> [--no-enter] | read <target> [--lines N]` (default 50, max 500, plain text without escapes); target resolution: exact id, exact name, case-insensitive name; ambiguity → error listing candidates; missing `HORIZON_SOCKET` → clear error; non-zero exit on any error. `send` only writes to the target PTY (bracketed paste when the target enabled it).
 4. Skill `horizon-link` in the plugin dir injected via `--plugin-dir` (`HorizonHome::claude_plugin_dir()`).

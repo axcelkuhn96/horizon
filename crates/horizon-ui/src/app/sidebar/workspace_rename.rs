@@ -9,15 +9,38 @@ use std::time::{Duration, Instant};
 use egui::{Context, CornerRadius, FontId, Rect, Ui, Vec2};
 use horizon_core::WorkspaceId;
 
-use super::auto_hide::{RENAME_PIN_IDLE, RenamePin, rename_pin_step};
 use crate::app::panels::show_inline_rename_editor;
-use crate::app::util;
 use crate::app::{HorizonApp, RenameEditAction};
 use crate::theme;
 
 /// How long the canvas label may stay missing before the sidebar takes over
 /// (the pan started by "Rename" needs a moment to bring the label into view).
 const LABEL_WAIT: Duration = Duration::from_millis(400);
+
+/// Where the renamed workspace's canvas label stands this frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RenameLabel {
+    /// Drawn on the canvas (or edited in a detached window).
+    Visible,
+    /// Hidden only by the revealed auto-hide sidebar. It collapses by itself once the pointer
+    /// leaves, then the canvas editor shows, so this must not pin the sidebar open.
+    UnderSidebar,
+    /// Off-screen or covered by another overlay: the sidebar row has to host the editor.
+    Missing,
+}
+
+/// Classify the label from what the canvas pass knows about it. `visual` is `None` when the
+/// workspace was culled off-screen; otherwise `(hidden_by_any_overlay, hidden_besides_sidebar)`.
+fn classify_rename_label(detached: bool, visual: Option<(bool, bool)>) -> RenameLabel {
+    if detached {
+        return RenameLabel::Visible;
+    }
+    match visual {
+        None | Some((_, true)) => RenameLabel::Missing,
+        Some((true, false)) => RenameLabel::UnderSidebar,
+        Some((false, false)) => RenameLabel::Visible,
+    }
+}
 
 /// Next value of the "label missing since" marker.
 pub(in crate::app) fn update_label_missing_since(
@@ -38,19 +61,23 @@ pub(in crate::app) fn label_wait_elapsed(missing_since: Option<Instant>, now: In
 }
 
 impl HorizonApp {
-    /// Called once per frame by the main canvas pass. `label_visible` is
-    /// `None` when no workspace is being renamed.
-    pub(in crate::app) fn track_workspace_rename_label(&mut self, ctx: &Context, label_visible: Option<bool>) {
+    /// Called once per frame by the main canvas pass. `visual` is the renamed workspace's
+    /// `(label hidden by any overlay, hidden besides the sidebar)`, `None` when it was culled.
+    pub(in crate::app) fn track_workspace_rename_label(&mut self, ctx: &Context, visual: Option<(bool, bool)>) {
         let now = Instant::now();
-        let Some(visible) = label_visible else {
+        let label = self
+            .renaming_workspace
+            .map(|workspace| classify_rename_label(self.workspace_is_detached(workspace), visual));
+        let Some(label) = label else {
             self.hub.rename_label_missing_since = None;
-            self.sidebar_auto_hide.rename_pin_anchor = None;
+            self.sidebar_auto_hide.rename_label_under_sidebar = false;
             return;
         };
+        self.sidebar_auto_hide.rename_label_under_sidebar = label == RenameLabel::UnderSidebar;
+        let visible = label != RenameLabel::Missing;
         let missing = update_label_missing_since(self.hub.rename_label_missing_since, visible, now);
         self.hub.rename_label_missing_since = missing;
         let Some(since) = missing else {
-            self.sidebar_auto_hide.rename_pin_anchor = None;
             return;
         };
         if label_wait_elapsed(missing, now) {
@@ -59,38 +86,9 @@ impl HorizonApp {
             if !self.sidebar_visible {
                 self.clear_workspace_rename();
                 self.hub.rename_label_missing_since = None;
-            } else if self.template_config.overlays.sidebar_auto_hide {
-                // Without auto-hide the sidebar is always open: nothing to unpin.
-                self.limit_sidebar_rename_pin(ctx, now);
             }
         } else {
             ctx.request_repaint_after(LABEL_WAIT.saturating_sub(now.saturating_duration_since(since)));
-        }
-    }
-
-    /// The sidebar hosts the rename and keeps itself open for it; that pin ends with the rename
-    /// or, if nobody finishes it, after [`RENAME_PIN_IDLE`] without pointer or typing activity.
-    fn limit_sidebar_rename_pin(&mut self, ctx: &Context, now: Instant) {
-        let sidebar_edge = self.reserved_sidebar_width(util::viewport_local_rect(ctx).width());
-        let activity = ctx.input(|input| {
-            let pointer_on_sidebar = input.pointer.interact_pos().is_some_and(|pos| pos.x <= sidebar_edge);
-            let typing = input
-                .events
-                .iter()
-                .any(|event| matches!(event, egui::Event::Key { .. } | egui::Event::Text(_)));
-            pointer_on_sidebar || typing
-        });
-        match rename_pin_step(self.sidebar_auto_hide.rename_pin_anchor, activity, now) {
-            RenamePin::Hold(anchor) => {
-                self.sidebar_auto_hide.rename_pin_anchor = Some(anchor);
-                // No input arrives while idle: wake up when the limit would be reached.
-                ctx.request_repaint_after(RENAME_PIN_IDLE.saturating_sub(now.saturating_duration_since(anchor)));
-            }
-            RenamePin::Abandon => {
-                self.clear_workspace_rename();
-                self.sidebar_auto_hide.rename_pin_anchor = None;
-                self.hub.rename_label_missing_since = None;
-            }
         }
     }
 
@@ -98,13 +96,21 @@ impl HorizonApp {
     pub(super) fn workspace_rename_in_sidebar(&self, workspace: WorkspaceId) -> bool {
         self.sidebar_visible
             && self.renaming_workspace == Some(workspace)
-            && label_wait_elapsed(self.hub.rename_label_missing_since, Instant::now())
+            && (self.sidebar_auto_hide.rename_label_under_sidebar
+                || label_wait_elapsed(self.hub.rename_label_missing_since, Instant::now()))
     }
 
-    /// Keep the sidebar open while it hosts the rename editor.
+    /// Keep the sidebar open while it hosts the rename editor because the label is missing from
+    /// the canvas. A label merely covered by the sidebar itself does not pin it.
     pub(super) fn workspace_rename_needs_sidebar(&self) -> bool {
-        self.renaming_workspace
-            .is_some_and(|workspace| self.workspace_rename_in_sidebar(workspace))
+        self.renaming_workspace.is_some_and(|workspace| {
+            self.workspace_rename_in_sidebar(workspace) && !self.sidebar_auto_hide.rename_label_under_sidebar
+        })
+    }
+
+    /// Auto-hide is on and the sidebar is collapsed to its edge strip.
+    pub(in crate::app) fn sidebar_collapsed_to_strip(&self) -> bool {
+        self.template_config.overlays.sidebar_auto_hide && !self.sidebar_auto_hide.revealed
     }
 
     pub(super) fn render_sidebar_rename_editor(&mut self, ui: &mut Ui, row_rect: Rect) {
@@ -139,7 +145,27 @@ impl HorizonApp {
 mod tests {
     use std::time::{Duration, Instant};
 
-    use super::{label_wait_elapsed, update_label_missing_since};
+    use super::{RenameLabel, classify_rename_label, label_wait_elapsed, update_label_missing_since};
+
+    #[test]
+    fn rename_label_covered_only_by_the_sidebar_does_not_count_as_missing() {
+        assert_eq!(
+            classify_rename_label(false, Some((true, false))),
+            RenameLabel::UnderSidebar
+        );
+    }
+
+    #[test]
+    fn rename_label_off_screen_or_under_another_overlay_is_missing() {
+        assert_eq!(classify_rename_label(false, None), RenameLabel::Missing);
+        assert_eq!(classify_rename_label(false, Some((true, true))), RenameLabel::Missing);
+    }
+
+    #[test]
+    fn rename_label_drawn_or_detached_is_visible() {
+        assert_eq!(classify_rename_label(false, Some((false, false))), RenameLabel::Visible);
+        assert_eq!(classify_rename_label(true, None), RenameLabel::Visible);
+    }
 
     #[test]
     fn workspace_menu_rename_falls_back_to_sidebar_after_label_stays_missing() {

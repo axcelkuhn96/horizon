@@ -568,8 +568,13 @@ fn overflow_row(ui: &mut Ui, accent: Color32, head: &str, tail: &str) -> Respons
     let content = 8.0 + 8.0 + 8.0 + head_galley.size().x + 10.0 + tail_galley.size().x + 8.0;
     let width = content.max(OVERFLOW_ROW_MIN_WIDTH).max(ui.available_width());
     let (rect, response) = ui.allocate_exact_size(Vec2::new(width, OVERFLOW_ROW_HEIGHT), Sense::click());
-    response
-        .widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, format!("Open Claude session {head} {tail}")));
+    response.widget_info(|| {
+        WidgetInfo::labeled(
+            WidgetType::Button,
+            true,
+            format!("Open Claude session {head} {tail}").trim_end().to_owned(),
+        )
+    });
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
         if response.hovered() {

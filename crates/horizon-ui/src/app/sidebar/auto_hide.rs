@@ -13,43 +13,14 @@ pub(super) const SIDEBAR_STRIP_WIDTH: f32 = 6.0;
 /// Width of the pointer-reachable region used to re-reveal a collapsed sidebar.
 pub(super) const SIDEBAR_STRIP_HOVER_WIDTH: f32 = 10.0;
 
-/// How long a rename hosted by the sidebar keeps it open without any pointer on the sidebar or
-/// typing. A rename nobody finishes (label scrolled away, user walked off) must not pin the
-/// sidebar for good: past this the rename is abandoned and auto-hide resumes.
-pub(super) const RENAME_PIN_IDLE: Duration = Duration::from_secs(30);
-
 /// Auto-hide bookkeeping: last pointer hover and whether the sidebar was fully revealed.
 #[derive(Default)]
 pub(in crate::app) struct SidebarAutoHideState {
     pub(super) last_hover: Option<Instant>,
     pub(super) revealed: bool,
-    /// Last moment the sidebar-hosted rename saw activity (pointer on the sidebar or typing);
-    /// `None` while no rename is hosted there.
-    pub(super) rename_pin_anchor: Option<Instant>,
-}
-
-/// What to do with a sidebar-hosted rename this frame.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum RenamePin {
-    /// Keep the sidebar open; the new activity anchor.
-    Hold(Instant),
-    /// Idle for too long: cancel the rename so the sidebar can hide again.
-    Abandon,
-}
-
-/// Pure step of the rename pin: `activity` (pointer on the sidebar, typing) renews it, a first
-/// frame starts it, and [`RENAME_PIN_IDLE`] without activity abandons the rename.
-pub(super) fn rename_pin_step(anchor: Option<Instant>, activity: bool, now: Instant) -> RenamePin {
-    match anchor {
-        Some(at) if !activity => {
-            if now.saturating_duration_since(at) >= RENAME_PIN_IDLE {
-                RenamePin::Abandon
-            } else {
-                RenamePin::Hold(at)
-            }
-        }
-        _ => RenamePin::Hold(now),
-    }
+    /// The renamed workspace's canvas label is covered only by the revealed sidebar: the sidebar
+    /// row hosts the editor for now, without pinning the sidebar open.
+    pub(super) rename_label_under_sidebar: bool,
 }
 
 /// Visibility outcome for the auto-hiding sidebar. Pure, egui-free for testing.
@@ -112,47 +83,9 @@ pub(super) fn sidebar_reveal_state(
 mod tests {
     use std::time::Duration;
 
-    use std::time::Instant;
-
     use super::{
-        RENAME_PIN_IDLE, RenamePin, SIDEBAR_AUTO_HIDE_DELAY, SIDEBAR_STRIP_WIDTH, SidebarReveal, rename_pin_step,
-        reserved_sidebar_width, sidebar_reveal_state,
+        SIDEBAR_AUTO_HIDE_DELAY, SIDEBAR_STRIP_WIDTH, SidebarReveal, reserved_sidebar_width, sidebar_reveal_state,
     };
-
-    #[test]
-    fn rename_pin_starts_on_the_first_frame_and_holds_while_idle_is_short() {
-        let start = Instant::now();
-
-        assert_eq!(rename_pin_step(None, false, start), RenamePin::Hold(start));
-        let later = start + RENAME_PIN_IDLE / 2;
-        assert_eq!(rename_pin_step(Some(start), false, later), RenamePin::Hold(start));
-    }
-
-    #[test]
-    fn rename_pin_activity_renews_the_anchor() {
-        let start = Instant::now();
-        let later = start + RENAME_PIN_IDLE * 2;
-
-        assert_eq!(rename_pin_step(Some(start), true, later), RenamePin::Hold(later));
-    }
-
-    #[test]
-    fn rename_pin_is_abandoned_after_the_idle_limit_without_activity() {
-        let start = Instant::now();
-
-        assert_eq!(
-            rename_pin_step(
-                Some(start),
-                false,
-                start + RENAME_PIN_IDLE - std::time::Duration::from_millis(1)
-            ),
-            RenamePin::Hold(start)
-        );
-        assert_eq!(
-            rename_pin_step(Some(start), false, start + RENAME_PIN_IDLE),
-            RenamePin::Abandon
-        );
-    }
 
     #[test]
     fn reserved_width_zero_when_sidebar_hidden() {
