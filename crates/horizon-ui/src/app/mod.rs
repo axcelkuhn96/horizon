@@ -245,7 +245,6 @@ pub struct HorizonApp {
     minimap_visible: bool,
     hud_visible: bool,
     renaming_workspace: Option<WorkspaceId>,
-    #[expect(dead_code, reason = "wired in Task 12")]
     hub: hub_state::HubState,
     rename_buffer: String,
     renaming_panel: Option<PanelId>,

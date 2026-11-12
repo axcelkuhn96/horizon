@@ -215,6 +215,7 @@ impl HorizonApp {
             }
             CommandId::SearchFileContents => self.open_explorer_search(),
             CommandId::PasteIntoExplorer => self.paste_files_into_explorer(),
+            CommandId::OpenClaudeLauncher => self.toggle_claude_launcher(),
             CommandId::ToggleScrollPan => {
                 self.scroll_pans_over_panels = !self.scroll_pans_over_panels;
                 tracing::info!(
@@ -290,6 +291,7 @@ impl HorizonApp {
             (self.shortcuts.toggle_sessions, CommandId::ToggleSessions),
             (self.shortcuts.new_terminal, CommandId::NewPanel),
             (self.shortcuts.toggle_scroll_pan, CommandId::ToggleScrollPan),
+            (self.shortcuts.claude_launcher, CommandId::OpenClaudeLauncher),
         ];
 
         // The search shortcut (Ctrl+Shift+F) is handled separately so it can be

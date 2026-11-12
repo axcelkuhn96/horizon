@@ -2,8 +2,64 @@
 
 use horizon_core::WorkspaceId;
 
+use super::claude_launcher::ClaudeLauncherState;
+use super::hub_ui;
+
+/// Accent slots for the visible profile list, recomputed only when the list changes.
+#[derive(Default)]
+struct AccentCache {
+    names: Vec<String>,
+    slots: Vec<usize>,
+}
+
 #[derive(Default)]
 pub(super) struct HubState {
     #[expect(dead_code, reason = "wired in Task 12")]
     pub(super) pending_delete_workspace: Option<WorkspaceId>,
+    /// Open Claude launcher overlay, if any.
+    pub(super) claude_launcher: Option<ClaudeLauncherState>,
+    /// Profile launched last; the launcher preselects it on the next open.
+    pub(super) last_launched_profile: Option<String>,
+    accents: AccentCache,
+}
+
+impl HubState {
+    /// Accent slot per profile name (list order), cached by the name list.
+    pub(super) fn accent_slots(&mut self, names: &[String]) -> &[usize] {
+        if self.accents.names != names {
+            let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+            self.accents.slots = hub_ui::assign_accent_indices(&refs);
+            self.accents.names = names.to_vec();
+        }
+        &self.accents.slots
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accent_slots_follow_name_list_and_are_distinct() {
+        let mut hub = HubState::default();
+        let names = vec!["conta1".to_owned(), "conta2".to_owned(), "pessoal".to_owned()];
+
+        let slots = hub.accent_slots(&names).to_vec();
+
+        assert_eq!(slots.len(), 3);
+        assert_ne!(slots[0], slots[1]);
+        assert_ne!(slots[1], slots[2]);
+        assert_ne!(slots[0], slots[2]);
+    }
+
+    #[test]
+    fn accent_slots_recompute_when_the_list_changes() {
+        let mut hub = HubState::default();
+        let first = vec!["a".to_owned()];
+        let second = vec!["a".to_owned(), "b".to_owned()];
+
+        assert_eq!(hub.accent_slots(&first).len(), 1);
+        assert_eq!(hub.accent_slots(&second).len(), 2);
+        assert_eq!(hub.accents.names, second);
+    }
 }

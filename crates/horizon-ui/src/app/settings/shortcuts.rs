@@ -37,10 +37,11 @@ enum EditableShortcut {
     FocusPanelUp,
     FocusPanelDown,
     ToggleScrollPan,
+    ClaudeLauncher,
 }
 
 impl EditableShortcut {
-    const ALL: [Self; 24] = [
+    const ALL: [Self; 25] = [
         Self::CommandPalette,
         Self::NewTerminal,
         Self::FocusWorkspace,
@@ -65,6 +66,7 @@ impl EditableShortcut {
         Self::FocusPanelUp,
         Self::FocusPanelDown,
         Self::ToggleScrollPan,
+        Self::ClaudeLauncher,
     ];
 
     fn label(self) -> &'static str {
@@ -93,6 +95,7 @@ impl EditableShortcut {
             Self::FocusPanelUp => "Focus Panel Up",
             Self::FocusPanelDown => "Focus Panel Down",
             Self::ToggleScrollPan => "Toggle Scroll Pan",
+            Self::ClaudeLauncher => "Claude Launcher",
         }
     }
 
@@ -122,6 +125,7 @@ impl EditableShortcut {
             Self::FocusPanelUp => &mut shortcuts.focus_panel_up,
             Self::FocusPanelDown => &mut shortcuts.focus_panel_down,
             Self::ToggleScrollPan => &mut shortcuts.toggle_scroll_pan,
+            Self::ClaudeLauncher => &mut shortcuts.claude_launcher,
         }
     }
 }
@@ -333,6 +337,15 @@ mod tests {
         *EditableShortcut::ToggleScrollPan.value_mut(&mut shortcuts) = "Alt+P".to_string();
 
         assert_eq!(shortcuts.toggle_scroll_pan, "Alt+P");
+    }
+
+    #[test]
+    fn claude_launcher_row_is_editable_and_updates_the_expected_config_field() {
+        assert!(EditableShortcut::ALL.contains(&EditableShortcut::ClaudeLauncher));
+        let mut shortcuts = ShortcutsConfig::default();
+        *EditableShortcut::ClaudeLauncher.value_mut(&mut shortcuts) = "Alt+L".to_string();
+
+        assert_eq!(shortcuts.claude_launcher, "Alt+L");
     }
 
     #[test]
