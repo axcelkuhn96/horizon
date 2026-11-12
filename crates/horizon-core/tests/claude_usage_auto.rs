@@ -206,6 +206,7 @@ fn auto_ranks_stale_figures_below_fresh_ones_but_still_uses_them() {
     assert_eq!(picked(&[stale_best, also_stale]).as_deref(), Some("stale"));
 }
 
+#[allow(clippy::unnecessary_wraps)] // the tracker takes an optional reset time
 fn at(secs: u64) -> Option<SystemTime> {
     Some(UNIX_EPOCH + Duration::from_secs(secs))
 }

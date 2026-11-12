@@ -1089,7 +1089,7 @@ fn link_resolves_target_by_custom_name() {
     assert!(file_equals(&file, "hi\r"), "{:?}", std::fs::read(&file));
     match send(&mut board, "sink", "nope", true) {
         LinkResponse::Err { code, .. } => assert_eq!(code, LinkErrorCode::NotFound),
-        other => panic!("the spawn name must stop resolving after a rename, got {other:?}"),
+        other @ LinkResponse::Ok(_) => panic!("the spawn name must stop resolving after a rename, got {other:?}"),
     }
 }
 
@@ -1107,7 +1107,7 @@ fn link_ambiguous_custom_name_is_typed_error() {
             assert!(message.contains(&panel_local_id(&board, first)), "{message}");
             assert!(message.contains(&panel_local_id(&board, second)), "{message}");
         }
-        other => panic!("expected an ambiguity error, got {other:?}"),
+        other @ LinkResponse::Ok(_) => panic!("expected an ambiguity error, got {other:?}"),
     }
     board.shutdown_terminal_panels();
 }

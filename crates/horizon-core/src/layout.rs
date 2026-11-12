@@ -77,6 +77,7 @@ pub(crate) fn first_free_tile_slot(origin: [f32; 2], size: [f32; 2], occupied: &
 }
 
 #[cfg(test)]
+#[allow(clippy::float_cmp)] // tile slots are exact grid positions, not computed sums
 mod tests {
     use super::*;
 

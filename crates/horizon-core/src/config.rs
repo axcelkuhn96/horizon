@@ -510,6 +510,7 @@ impl ShortcutsConfig {
 }
 
 /// Serde predicate: keeps a default-off flag out of the serialized config.
+#[allow(clippy::trivially_copy_pass_by_ref)] // serde's `skip_serializing_if` hands over `&T`
 fn is_false(value: &bool) -> bool {
     !*value
 }

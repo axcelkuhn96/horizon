@@ -284,14 +284,20 @@ fn effective<'a>(inputs: &LabelInputs<'a>) -> LabelInputs<'a> {
     }
 }
 
+/// Owned copy of [`ProfileRef`].
+enum StoredProfile {
+    None,
+    Default,
+    Named(String),
+}
+
 /// Owned copy of the [`effective`] [`LabelInputs`] the cached label was built from.
 struct StoredInputs {
     title: String,
     terminal_title: String,
     custom_name: bool,
     kind: PanelKind,
-    /// `None` = not a profile panel, `Some(None)` = default, `Some(Some(name))` = named.
-    profile: Option<Option<String>>,
+    profile: StoredProfile,
     launch_command: Option<String>,
     display_title: String,
     session_name: Option<String>,
@@ -305,9 +311,9 @@ impl StoredInputs {
             custom_name: inputs.custom_name,
             kind: inputs.kind,
             profile: match inputs.profile {
-                ProfileRef::None => None,
-                ProfileRef::Default => Some(None),
-                ProfileRef::Named(name) => Some(Some(name.to_owned())),
+                ProfileRef::None => StoredProfile::None,
+                ProfileRef::Default => StoredProfile::Default,
+                ProfileRef::Named(name) => StoredProfile::Named(name.to_owned()),
             },
             launch_command: inputs.launch_command.map(str::to_owned),
             display_title: inputs.display_title.to_owned(),
@@ -318,8 +324,8 @@ impl StoredInputs {
     /// `inputs` must be [`effective`] inputs.
     fn same_as(&self, inputs: &LabelInputs<'_>) -> bool {
         let profile_same = match (&self.profile, inputs.profile) {
-            (None, ProfileRef::None) | (Some(None), ProfileRef::Default) => true,
-            (Some(Some(stored)), ProfileRef::Named(name)) => stored == name,
+            (StoredProfile::None, ProfileRef::None) | (StoredProfile::Default, ProfileRef::Default) => true,
+            (StoredProfile::Named(stored), ProfileRef::Named(name)) => stored == name,
             _ => false,
         };
         profile_same
@@ -443,10 +449,10 @@ impl PanelLabelCache {
         let entry = self.entries.get_mut(&id)?;
         let text = entry.usage.clone().or_else(|| entry.program.clone())?;
         let ppp_bits = ppp.to_bits();
-        if !entry
+        if entry
             .hint_galley
             .as_ref()
-            .is_some_and(|cached| cached.ppp_bits == ppp_bits)
+            .is_none_or(|cached| cached.ppp_bits != ppp_bits)
         {
             entry.hint_galley = Some(CachedGalley {
                 ppp_bits,

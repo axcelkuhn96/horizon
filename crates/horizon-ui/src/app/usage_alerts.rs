@@ -3,6 +3,7 @@
 //! that already takes the poller's snapshots; there is no extra poller or timer.
 //! Visual spec: `docs/design/claude-hub-ui.md` §12.
 
+use std::fmt::Write as _;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use horizon_core::claude_usage::{AlertLevel, ProfileUsage, ProfileUsageView, UsageState};
@@ -20,7 +21,7 @@ pub(super) fn alert_toast(level: AlertLevel, name: &str, pct: f32, resets_at: Op
     let shown = pct.clamp(0.0, 100.0);
     let mut text = format!("{name} at {shown:.0}% of the weekly limit");
     if let Some(clock) = resets_at {
-        text.push_str(&format!(" \u{2014} resets {clock}"));
+        let _ = write!(text, " \u{2014} resets {clock}");
     }
     Toast {
         kind: match level {

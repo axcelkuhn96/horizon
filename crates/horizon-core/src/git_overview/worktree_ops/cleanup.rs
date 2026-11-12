@@ -463,8 +463,8 @@ fn classify_valid(
 ) -> Option<(CleanupReason, IgnoredFiles)> {
     let canonical = entry.canonical.as_ref()?;
     let repo = Repository::open(&entry.path).ok()?;
-    let reason = match &entry.branch {
-        Some(name) => match ctx.main.find_branch(name, BranchType::Local) {
+    let reason = if let Some(name) = &entry.branch {
+        match ctx.main.find_branch(name, BranchType::Local) {
             Ok(branch) => {
                 let tip = branch.get().peel_to_commit().ok()?.id();
                 let upstream = branch
@@ -483,21 +483,20 @@ fn classify_valid(
             }
             Err(error) if error.code() == ErrorCode::NotFound => CleanupReason::Orphan,
             Err(_) => return None,
-        },
-        None => {
-            let head = repo.refname_to_id("HEAD").ok()?;
-            if ctx.is_merged(head, None) {
-                if ctx.at_default_tip(head) {
-                    CleanupReason::Fresh
-                } else {
-                    CleanupReason::Merged
-                }
-            } else if reachable_from_refs(ctx.main, head) {
-                return None;
+        }
+    } else {
+        let head = repo.refname_to_id("HEAD").ok()?;
+        if ctx.is_merged(head, None) {
+            if ctx.at_default_tip(head) {
+                CleanupReason::Fresh
             } else {
-                blockers.push(Blocker::UnreachableCommits);
-                CleanupReason::Orphan
+                CleanupReason::Merged
             }
+        } else if reachable_from_refs(ctx.main, head) {
+            return None;
+        } else {
+            blockers.push(Blocker::UnreachableCommits);
+            CleanupReason::Orphan
         }
     };
     let nested: Vec<PathBuf> = ctx

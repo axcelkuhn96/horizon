@@ -208,7 +208,7 @@ mod tests {
 
         assert!(state.observe(true, true, true, start));
         // A long frame gap while hovering must not eat into the grace period.
-        let left = start + Duration::from_millis(5000);
+        let left = start + Duration::from_secs(5);
         assert!(state.observe(true, true, false, left));
         assert!(state.observe(true, true, false, left + Duration::from_millis(599)));
         assert!(!state.observe(true, true, false, left + Duration::from_millis(600)));

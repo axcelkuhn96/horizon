@@ -6,6 +6,7 @@
 //! with ignored files (`.env`, `node_modules/`...) needs a second, explicit
 //! click, and the worker refuses it unless that confirmation came along.
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use egui::{
@@ -83,10 +84,11 @@ impl CleanupRow {
             CleanupReason::Merged | CleanupReason::Orphan => {}
         }
         if self.candidate.ignored.any() {
-            tooltip.push_str(&format!(
+            let _ = write!(
+                tooltip,
                 "\nIgnored files are not changes, but removing the folder deletes them: {}.",
                 self.candidate.ignored.describe()
-            ));
+            );
         }
         self.tooltip = tooltip;
         self.checked = self.candidate.preselect();
@@ -194,13 +196,13 @@ fn removal_summary(outcomes: &[RemoveOutcome]) -> String {
     }
     let mut text = format!("Removed {removed}");
     if kept > 0 {
-        text.push_str(&format!(", kept {kept}"));
+        let _ = write!(text, ", kept {kept}");
         if !reasons.is_empty() {
-            text.push_str(&format!(" ({})", reasons.join(", ")));
+            let _ = write!(text, " ({})", reasons.join(", "));
         }
     }
     if failed > 0 {
-        text.push_str(&format!(", {failed} failed"));
+        let _ = write!(text, ", {failed} failed");
     }
     text
 }

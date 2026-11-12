@@ -19,7 +19,7 @@ const TITLE_RESERVE: f32 = 64.0;
 /// The strip is laid out for at least this much room, even in a very narrow panel.
 const MIN_STRIP_ROOM: f32 = 150.0;
 /// How long a busy probe stays valid; /proc is not read per frame.
-const BUSY_TTL: Duration = Duration::from_millis(1000);
+const BUSY_TTL: Duration = Duration::from_secs(1);
 
 /// Tooltips of the collapsed button, by availability.
 pub(super) const BUSY_TOOLTIP: &str = "Busy \u{2014} finish the running command first";

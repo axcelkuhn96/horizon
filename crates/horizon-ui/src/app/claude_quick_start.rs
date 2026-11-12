@@ -223,9 +223,8 @@ impl Stage {
     #[must_use]
     pub(super) fn apply(self, event: StripEvent, profiles: usize) -> (Self, Option<StartRequest>) {
         match (self, event) {
-            (_, StripEvent::Dismiss) => (Self::Collapsed, None),
             (Self::Collapsed, StripEvent::Toggle) if profiles > 0 => (Self::Profiles, None),
-            (Self::Collapsed, _) | (_, StripEvent::Toggle) => (Self::Collapsed, None),
+            (_, StripEvent::Dismiss | StripEvent::Toggle) | (Self::Collapsed, _) => (Self::Collapsed, None),
             // The prompt pages only react to what `apply_prompts` handles.
             (stage @ (Self::Prompts | Self::PromptModes { .. }), _) => (stage, None),
             (stage, StripEvent::Pick(index)) => {
@@ -236,12 +235,13 @@ impl Stage {
                 }
             }
             (Self::Modes { .. }, StripEvent::Back) => (Self::Profiles, None),
-            (stage, StripEvent::Back) => (stage, None),
             (Self::Modes { profile }, StripEvent::Mode(mode)) => {
                 let request = (profile < profiles).then_some(StartRequest { profile, mode });
                 (Self::Collapsed, request)
             }
-            (stage, StripEvent::Mode(_) | StripEvent::OpenPrompts | StripEvent::Insert { .. }) => (stage, None),
+            (stage, StripEvent::Back | StripEvent::Mode(_) | StripEvent::OpenPrompts | StripEvent::Insert { .. }) => {
+                (stage, None)
+            }
         }
     }
 }
@@ -268,8 +268,8 @@ mod tests {
         assert!(!quick_start_enabled(PanelKind::Command, false, false));
     }
 
-    fn request(profile: usize, mode: QuickStartMode) -> Option<StartRequest> {
-        Some(StartRequest { profile, mode })
+    fn request(profile: usize, mode: QuickStartMode) -> StartRequest {
+        StartRequest { profile, mode }
     }
 
     #[test]
@@ -300,7 +300,7 @@ mod tests {
         for mode in QuickStartMode::ALL {
             assert_eq!(
                 stage.apply(StripEvent::Mode(mode), 3),
-                (Stage::Collapsed, request(1, mode))
+                (Stage::Collapsed, Some(request(1, mode)))
             );
         }
     }
@@ -341,8 +341,8 @@ mod tests {
         }
     }
 
-    fn insert(prompt: usize, send: bool) -> Option<PromptInsert> {
-        Some(PromptInsert { prompt, send })
+    fn insert(prompt: usize, send: bool) -> PromptInsert {
+        PromptInsert { prompt, send }
     }
 
     #[test]
@@ -380,11 +380,11 @@ mod tests {
 
         assert_eq!(
             stage.apply_prompts(StripEvent::Insert { send: false }, 2),
-            Some((Stage::Collapsed, insert(1, false)))
+            Some((Stage::Collapsed, Some(insert(1, false))))
         );
         assert_eq!(
             stage.apply_prompts(StripEvent::Insert { send: true }, 2),
-            Some((Stage::Collapsed, insert(1, true)))
+            Some((Stage::Collapsed, Some(insert(1, true))))
         );
         assert_eq!(
             stage.apply_prompts(StripEvent::Insert { send: true }, 1),

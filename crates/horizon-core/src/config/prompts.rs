@@ -43,11 +43,10 @@ impl PromptIssueKind {
     pub const fn message(self) -> &'static str {
         match self {
             Self::EmptyName => "Name is required",
-            Self::NameTooLong => "Too long",
+            Self::NameTooLong | Self::TextTooLong => "Too long",
             Self::NameHasControlChars => "Name can't contain control characters",
             Self::DuplicateName => "Name already used",
             Self::EmptyText => "Text is required",
-            Self::TextTooLong => "Too long",
             Self::TextHasControlChars => "Text can't contain control characters",
         }
     }

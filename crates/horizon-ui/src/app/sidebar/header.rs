@@ -48,6 +48,10 @@ impl Default for SidebarHeaderRowOutcome {
     }
 }
 
+fn text_width(ui: &egui::Ui, text: String, font: FontId) -> f32 {
+    ui.painter().layout_no_wrap(text, font, Color32::PLACEHOLDER).size().x
+}
+
 /// Render the inner content of a workspace header row: the collapse caret, the
 /// accent bar, the workspace name, the optional "NEW WINDOW" badge and, when
 /// collapsed, the panel count. Returns which affordances were interacted with
@@ -100,27 +104,10 @@ pub(super) fn render_sidebar_workspace_header_row(
         .sidebar_collapsed
         .then(|| collapsed_count_label(workspace.panels.len()));
     if let Some(count_label) = &count_label {
-        let count_width = ui
-            .painter()
-            .layout_no_wrap(
-                count_label.clone(),
-                FontId::monospace(COUNT_FONT_SIZE),
-                Color32::PLACEHOLDER,
-            )
-            .size()
-            .x;
-        reserved_right += count_width + NAME_COUNT_GAP;
+        reserved_right += text_width(ui, count_label.clone(), FontId::monospace(COUNT_FONT_SIZE)) + NAME_COUNT_GAP;
     }
     if workspace.detached {
-        let badge_width = ui
-            .painter()
-            .layout_no_wrap(
-                BADGE_TEXT.to_owned(),
-                FontId::proportional(BADGE_FONT_SIZE),
-                Color32::PLACEHOLDER,
-            )
-            .size()
-            .x;
+        let badge_width = text_width(ui, BADGE_TEXT.to_owned(), FontId::proportional(BADGE_FONT_SIZE));
         reserved_right += badge_width + BADGE_GAP + ui.spacing().item_spacing.x;
     }
     let name_width = name_max_width(row_rect.max.x, ui.next_widget_position().x, reserved_right);

@@ -38,15 +38,14 @@ pub(super) struct Row {
 
 impl Row {
     pub(super) fn new(name: String, accent: Color32, email: Option<&str>, usage: &RowUsage) -> Self {
-        let status = match usage.problem {
-            Some(problem) => problem.text().to_owned(),
-            None => {
-                let week = &usage.lines[1];
-                if week.text == NO_USAGE_TEXT {
-                    "no usage data yet".to_owned()
-                } else {
-                    format!("7d {}", week.text)
-                }
+        let status = if let Some(problem) = usage.problem {
+            problem.text().to_owned()
+        } else {
+            let week = &usage.lines[1];
+            if week.text == NO_USAGE_TEXT {
+                "no usage data yet".to_owned()
+            } else {
+                format!("7d {}", week.text)
             }
         };
         let email: String = email
@@ -391,7 +390,10 @@ mod tests {
 
         assert_eq!(
             ui.notice_for(PanelId(1), now + Duration::from_secs(1)),
-            Some((StartFailure::NoPreset, NOTICE_TTL - Duration::from_secs(1)))
+            Some((
+                StartFailure::NoPreset,
+                NOTICE_TTL.saturating_sub(Duration::from_secs(1))
+            ))
         );
         assert_eq!(ui.notice_for(PanelId(2), now), None);
         assert_eq!(ui.notice_for(PanelId(1), now + NOTICE_TTL), None);
