@@ -103,6 +103,19 @@ impl HorizonApp {
         self.rename_buffer.clear();
     }
 
+    /// Opens the inline titlebar editor of `panel_id`, seeded with its current name. Every
+    /// entry point (titlebar double-click, panel and sidebar menus, sidebar double-click)
+    /// goes through here so they share `panel_rename_buffer` and `Board::rename_panel`.
+    pub(in crate::app) fn start_panel_rename(&mut self, panel_id: PanelId) -> bool {
+        let Some(title) = self.board.panel(panel_id).map(|panel| panel.title.clone()) else {
+            return false;
+        };
+        self.clear_workspace_rename();
+        self.panel_rename_buffer = title;
+        self.renaming_panel = Some(panel_id);
+        true
+    }
+
     pub(in crate::app) fn clear_panel_rename(&mut self) {
         self.renaming_panel = None;
         self.panel_rename_buffer.clear();
@@ -149,6 +162,28 @@ mod tests {
     use horizon_core::{PanelKind, PanelOptions, PanelResume};
 
     use super::normalize_new_panel_resume;
+    use crate::app::test_support::{command_options, test_app};
+
+    #[test]
+    fn sidebar_double_click_starts_rename_state() {
+        let mut app = test_app();
+        let workspace = app.board.ensure_workspace();
+        let panel_id = app
+            .create_panel_with_options(command_options("build", "exec cat"), workspace)
+            .expect("panel should spawn");
+        app.renaming_workspace = Some(workspace);
+
+        assert!(app.start_panel_rename(panel_id));
+
+        assert_eq!(app.renaming_panel, Some(panel_id));
+        assert_eq!(app.panel_rename_buffer, "build");
+        assert_eq!(app.renaming_workspace, None, "one inline editor at a time");
+
+        app.clear_panel_rename();
+        assert!(!app.start_panel_rename(horizon_core::PanelId(9_999)));
+        assert_eq!(app.renaming_panel, None);
+        app.board.shutdown_terminal_panels();
+    }
 
     #[test]
     fn new_agent_panels_always_start_fresh_sessions() {

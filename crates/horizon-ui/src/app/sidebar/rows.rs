@@ -331,6 +331,14 @@ fn paint_close_button(painter: &Painter, rect: Rect, hovered: bool) {
     );
 }
 
+/// Asks for the inline rename of a panel and brings the panel (and its titlebar editor)
+/// into view, as the sidebar workspace Rename entry does for the workspace label.
+pub(super) fn request_panel_rename(actions: &mut SidebarActions, panel_id: PanelId) {
+    actions.rename_panel = Some(panel_id);
+    actions.focus_panel = Some(panel_id);
+    actions.pan_to_panel = Some(panel_id);
+}
+
 impl HorizonApp {
     pub(super) fn render_sidebar_panel(
         &mut self,
@@ -439,6 +447,9 @@ impl HorizonApp {
         } else if row_response.clicked() {
             actions.focus_panel = Some(panel.id);
             actions.pan_to_panel = Some(panel.id);
+            if row_response.double_clicked() {
+                request_panel_rename(actions, panel.id);
+            }
         }
 
         let row_response = if label_truncated && !close_hovered {
@@ -529,6 +540,18 @@ mod tests {
         assert!((with.hint_right - with.status.min.x).abs() < f32::EPSILON);
         assert!((without.label_width - with.label_width - SIDEBAR_STATUS_COLUMN).abs() < 0.01);
         assert!((with.status.center().y - 113.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn rename_request_focuses_and_pans_to_the_panel_so_the_editor_is_visible() {
+        let mut actions = SidebarActions::default();
+
+        request_panel_rename(&mut actions, PanelId(7));
+
+        assert_eq!(actions.rename_panel, Some(PanelId(7)));
+        assert_eq!(actions.focus_panel, Some(PanelId(7)));
+        assert_eq!(actions.pan_to_panel, Some(PanelId(7)));
+        assert_eq!(actions.close_panel, None);
     }
 
     #[test]

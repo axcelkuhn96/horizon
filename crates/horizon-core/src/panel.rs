@@ -1,5 +1,6 @@
 mod agent_status;
 mod env;
+mod naming;
 mod spawn;
 
 use std::borrow::Cow;
@@ -350,6 +351,13 @@ impl Panel {
         self.has_custom_name
     }
 
+    /// The name the user (or a preset) gave this panel, `None` while the panel is titled by
+    /// its terminal. This is the name `horizon link` and the sidebar show.
+    #[must_use]
+    pub fn custom_name(&self) -> Option<&str> {
+        self.has_custom_name.then_some(self.title.as_str())
+    }
+
     #[must_use]
     pub fn display_title(&self) -> Cow<'_, str> {
         if self.kind == PanelKind::Ssh {
@@ -426,10 +434,9 @@ impl Panel {
 
     #[must_use]
     pub fn rename(&mut self, name: &str) -> bool {
-        let trimmed = name.trim();
-        if trimmed.is_empty() {
+        let Some(trimmed) = naming::normalize_panel_name(name) else {
             return false;
-        }
+        };
 
         trimmed.clone_into(&mut self.title);
         self.has_custom_name = true;

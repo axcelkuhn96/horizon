@@ -238,7 +238,9 @@ impl RuntimeState {
 
                         PanelState {
                             local_id: panel.local_id.clone(),
-                            name: panel.title.clone(),
+                            // Only a chosen name is saved: a terminal-titled panel restores as
+                            // terminal-titled instead of freezing its fallback title as a name.
+                            name: panel.custom_name().unwrap_or_default().to_owned(),
                             kind: panel.kind,
                             command: panel.launch_command.clone(),
                             args: panel.launch_args.clone(),

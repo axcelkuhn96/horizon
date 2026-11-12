@@ -53,6 +53,64 @@ fn rename_panel_rejects_blank_names() {
 }
 
 #[test]
+fn rename_panel_rejects_overlong_and_control_character_names() {
+    let mut board = Board::new();
+    let workspace_id = board.create_workspace("frontend");
+    let panel_id = board
+        .create_panel(editor_panel_options(), workspace_id)
+        .expect("panel should spawn");
+    assert!(board.rename_panel(panel_id, "  backend  "));
+
+    assert!(!board.rename_panel(panel_id, &"x".repeat(81)));
+    assert!(!board.rename_panel(panel_id, "bad\u{1b}[31mname"));
+
+    let panel = board.panel(panel_id).expect("panel should exist");
+    assert_eq!(panel.title, "backend");
+    assert_eq!(panel.custom_name(), Some("backend"));
+}
+
+#[test]
+fn custom_name_survives_runtime_state_round_trip() {
+    let mut board = Board::new();
+    let workspace_id = board.create_workspace("frontend");
+    let renamed = board
+        .create_panel(editor_panel_options(), workspace_id)
+        .expect("panel should spawn");
+    let untouched = board
+        .create_panel(editor_panel_options(), workspace_id)
+        .expect("panel should spawn");
+    assert!(board.rename_panel(renamed, "backend shell"));
+    let renamed_local = board.panel(renamed).expect("panel").local_id.clone();
+    let untouched_local = board.panel(untouched).expect("panel").local_id.clone();
+
+    let state = crate::runtime_state::RuntimeState::from_board(
+        &board,
+        crate::config::WindowConfig::default(),
+        crate::view::CanvasViewState::default(),
+    );
+    let yaml = state.to_yaml().expect("serialize runtime state");
+    let reloaded: crate::runtime_state::RuntimeState = serde_yaml::from_str(&yaml).expect("reload runtime state");
+    let restored = Board::from_runtime_state(&reloaded).expect("board");
+
+    let renamed_panel = restored
+        .panel(restored.panel_id_by_local_id(&renamed_local).expect("renamed panel"))
+        .expect("panel");
+    assert_eq!(renamed_panel.custom_name(), Some("backend shell"));
+    let untouched_panel = restored
+        .panel(
+            restored
+                .panel_id_by_local_id(&untouched_local)
+                .expect("untouched panel"),
+        )
+        .expect("panel");
+    assert_eq!(
+        untouched_panel.custom_name(),
+        None,
+        "a panel nobody named must not freeze its fallback title as a custom name"
+    );
+}
+
+#[test]
 fn close_panel_removes_panel_attention() {
     let mut board = Board::new();
     let workspace_id = board.create_workspace("frontend");

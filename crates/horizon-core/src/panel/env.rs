@@ -39,8 +39,9 @@ fn sanitize_name(title: &str) -> String {
 }
 
 /// Panel-link variables Horizon sets on every terminal panel: the panel's local id and
-/// title at spawn, the link socket and this executable's path, so an agent can call
-/// `"$HORIZON_BIN" link ...` even when `horizon` is not on `PATH`. Without a running link
+/// title at spawn (a later rename does not reach the running process: `horizon link list`
+/// shows the current name, the id stays stable), the link socket and this executable's path,
+/// so an agent can call `"$HORIZON_BIN" link ...` even when `horizon` is not on `PATH`. Without a running link
 /// server `HORIZON_SOCKET` is set empty: the PTY spawn can only add variables, so an empty
 /// value is how a stale socket inherited from an outer Horizon is overridden (the CLI treats
 /// an empty value as unset).
