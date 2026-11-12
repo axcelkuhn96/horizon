@@ -252,6 +252,7 @@ pub struct AppShortcuts {
     pub focus_panel_up: ShortcutBinding,
     pub focus_panel_down: ShortcutBinding,
     pub toggle_scroll_pan: ShortcutBinding,
+    pub claude_launcher: ShortcutBinding,
 }
 
 impl Default for AppShortcuts {
@@ -282,6 +283,7 @@ impl Default for AppShortcuts {
             focus_panel_up: ShortcutBinding::new(ps, ShortcutKey::ArrowUp),
             focus_panel_down: ShortcutBinding::new(ps, ShortcutKey::ArrowDown),
             toggle_scroll_pan: ShortcutBinding::new(ps, ShortcutKey::Letter('P')),
+            claude_launcher: ShortcutBinding::new(ps, ShortcutKey::Letter('L')),
         }
     }
 }
@@ -583,6 +585,17 @@ mod tests {
         assert_eq!(
             shortcuts.toggle_scroll_pan,
             ShortcutBinding::new(ps, ShortcutKey::Letter('P'))
+        );
+    }
+
+    #[test]
+    fn app_shortcuts_default_claude_launcher_binding() {
+        let shortcuts = AppShortcuts::default();
+        let ps = ShortcutModifiers::PRIMARY_SHIFT;
+
+        assert_eq!(
+            shortcuts.claude_launcher,
+            ShortcutBinding::new(ps, ShortcutKey::Letter('L'))
         );
     }
 

@@ -1,9 +1,12 @@
 #![forbid(unsafe_code)]
 
 pub mod agent_detect;
+pub mod agent_status;
 mod agents;
 mod attention;
 mod board;
+pub mod claude_sessions;
+pub mod claude_usage;
 mod config;
 mod config_migration;
 pub mod dir_search;
@@ -14,14 +17,17 @@ pub mod file_search;
 pub mod file_search_runner;
 pub mod file_tree;
 pub mod git_changes;
+pub mod git_overview;
 pub mod git_refresher;
 pub mod git_status;
 pub mod git_watcher;
 mod horizon_home;
 mod layout;
+pub mod link;
 mod managed_install;
 mod opencode_paths;
 mod panel;
+mod proc_foreground;
 mod remote_hosts;
 mod runtime_state;
 pub mod search;
@@ -38,17 +44,26 @@ mod usage_stats;
 mod view;
 mod workspace;
 
+/// Wakes the UI from a background thread (e.g. `egui::Context::request_repaint`)
+/// after a producer delivered a message that would otherwise wait for the next frame.
+pub type Waker = std::sync::Arc<dyn Fn() + Send + Sync>;
+
 pub use agents::{AgentDefinition, AgentIntegrationKind, AgentResumeMode, agent_definition, all_agent_kinds};
 pub use alacritty_terminal::index::Side as TerminalSide;
 pub use alacritty_terminal::selection::SelectionType;
 pub use attention::{AttentionId, AttentionItem, AttentionSeverity, AttentionState};
 pub use board::{
-    Board, Direction, PanelRect, ShutdownProgress, WorkspaceDockSide, WorkspaceLayout, nearest_in_direction,
+    Board, Direction, PanelRect, RenameOutcome, STATUS_ATTENTION_SOURCE, ShutdownProgress, StatusNotice,
+    WorkspaceDockSide, WorkspaceLayout, nearest_in_direction,
 };
 pub use config::{
-    AppearanceConfig, AppearanceTheme, Config, FeaturesConfig, InputConfig, OverlaysConfig, PresetConfig,
-    ShortcutsConfig, SpeechBackend, SpeechConfig, SpeechHotkeyMode, SpeechProfile, SpeechTask, TerminalConfig,
-    WindowConfig, WorkspaceConfig, scroll_should_pan_canvas,
+    AppearanceConfig, AppearanceTheme, CLAUDE_BASE_PRESET_NAME, ClaudeProfile, Config, EffectivePrompt, FeaturesConfig,
+    InputConfig, MAX_PROMPT_NAME_CHARS, MAX_PROMPT_TEXT_BYTES, OverlaysConfig, PanelSnapshotForTemplate, PresetConfig,
+    PromptIssue, PromptIssueKind, PromptScope, SavedPrompt, ShortcutsConfig, SpeechBackend, SpeechConfig,
+    SpeechHotkeyMode, SpeechProfile, SpeechTask, TerminalConfig, WindowConfig, WorkspaceConfig, claude_profile_preset,
+    discover_claude_profiles, effective_prompts, expand_config_dir, grid_position, move_item, scroll_should_pan_canvas,
+    skipped_prompts, template_from_workspace, terminal_from_preset, upsert_template, validate_claude_profiles,
+    validate_prompts,
 };
 pub use editor::{MarkdownEditor, PanelContent, PreviewMode};
 pub use error::{Error, Result};
@@ -58,15 +73,18 @@ pub use git_status::{DiffHunk, DiffLine, DiffLineKind, FileChange, FileDiff, Fil
 pub use git_watcher::GitWatcher;
 pub use horizon_home::HorizonHome;
 pub use managed_install::ManagedInstall;
-pub use panel::{DEFAULT_PANEL_SIZE, Panel, PanelId, PanelKind, PanelLayout, PanelOptions, PanelResume};
+pub use panel::{
+    DEFAULT_PANEL_SIZE, MAX_PANEL_NAME_CHARS, Panel, PanelId, PanelKind, PanelLayout, PanelOptions, PanelResume,
+};
+pub use proc_foreground::shell_is_busy;
 pub use remote_hosts::{
     RemoteHost, RemoteHostCatalog, RemoteHostConnectionHistoryEntry, RemoteHostConnectionSummary, RemoteHostSources,
     RemoteHostStatus, discover_remote_hosts, summarize_remote_host_connections,
 };
 pub use runtime_state::{
     AgentSessionBinding, AgentSessionCatalog, AgentSessionRecord, DetachedWorkspaceState, PanelState, PanelTemplateRef,
-    RuntimeState, WorkspaceState, WorkspaceTemplateRef, live_claude_session_ids, most_recent_unclaimed_session_for,
-    new_local_id,
+    RuntimeState, UiPrefs, WorkspaceState, WorkspaceTemplateRef, claude_config_dir_for_env,
+    claude_transcript_exists_for_env, live_claude_session_ids, most_recent_unclaimed_session_for, new_local_id,
 };
 pub use search::{PanelSearchResult, SearchMatch, SearchOptions, SearchResults, search_board};
 pub use session_store::{
@@ -75,9 +93,11 @@ pub use session_store::{
 };
 pub use shortcuts::{AppShortcuts, ShortcutBinding, ShortcutKey, ShortcutModifiers};
 pub use ssh::{DiscoveredSshHost, SshConnection, SshConnectionStatus, discover_ssh_hosts};
+#[cfg(target_os = "linux")]
+pub use terminal::shell_pid_behind_wrapper;
 pub use terminal::{AgentNotification, ClickTarget, Terminal, open_url};
 pub use transcript::PanelTranscript;
 pub use usage_dashboard::UsageDashboard;
 pub use usage_stats::{DailyUsage, ToolUsage, UsageSnapshot, format_cost, format_tokens};
 pub use view::{CanvasViewState, DEFAULT_CANVAS_ZOOM, MAX_CANVAS_ZOOM, MIN_CANVAS_ZOOM, clamp_canvas_zoom};
-pub use workspace::{WORKSPACE_COLORS, Workspace, WorkspaceId};
+pub use workspace::{WORKSPACE_COLORS, Workspace, WorkspaceId, workspace_color_hex, workspace_color_index};

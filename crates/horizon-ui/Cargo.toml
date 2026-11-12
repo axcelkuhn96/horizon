@@ -36,6 +36,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 profiling.workspace = true
 serde_yaml.workspace = true
+serde_json.workspace = true
 tempfile.workspace = true
 alacritty_terminal.workspace = true
 egui_commonmark.workspace = true
@@ -45,3 +46,6 @@ tokio.workspace = true
 surge-core.workspace = true
 transcribe-cpp = { workspace = true, optional = true }
 cpal = { workspace = true, optional = true }
+
+[dev-dependencies]
+horizon-core = { workspace = true, features = ["test-support"] }

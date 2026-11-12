@@ -190,6 +190,7 @@ impl HorizonApp {
         }
 
         let started = Instant::now();
+        self.shutdown_link();
 
         let save_started = Instant::now();
         self.auto_save_runtime_state();
@@ -283,6 +284,7 @@ impl HorizonApp {
 
         let started = Instant::now();
         self.exit_cleanup_complete = true;
+        self.shutdown_link();
 
         let save_started = Instant::now();
         self.auto_save_runtime_state();
@@ -354,6 +356,12 @@ impl HorizonApp {
 
     #[profiling::function]
     pub(super) fn process_frame_inputs(&mut self, ctx: &Context) -> bool {
+        // A focused panel counts as looked at only while a Horizon window has the OS focus.
+        // `any_viewport_focused` still holds last frame's aggregate here (the root viewport
+        // re-seeds it below), which covers a panel living in a detached window.
+        let root_has_focus = ctx.input(|input| input.viewport().focused.unwrap_or(true));
+        self.board
+            .set_window_focused(root_has_focus || self.any_viewport_focused);
         self.sync_panel_focus_from_pointer_press(ctx);
         // Speech runs before the fullscreen handler so that Escape cancels an
         // active recording instead of also exiting panel fullscreen.
@@ -373,7 +381,12 @@ impl HorizonApp {
         self.poll_remote_hosts_refresh();
         self.poll_ssh_upload_flow();
         self.poll_git_watchers();
+        self.poll_git_overviews(ctx);
+        self.poll_worktree_events(ctx);
         self.poll_config_reload();
+        self.poll_claude_usage(ctx);
+        self.poll_agent_status();
+        self.note_panel_sessions(ctx);
         self.poll_update_check();
         self.maybe_start_update_check();
 
@@ -808,6 +821,7 @@ impl HorizonApp {
 
         if let Ok(config) = Config::load(Some(&self.config_path)) {
             tracing::info!("config file changed, reloading presets");
+            self.board.seed_template_baseline(&self.template_config);
             self.apply_runtime_config(&config);
             self.board.sync_workspace_metadata(&config);
         }
@@ -945,6 +959,11 @@ impl HorizonApp {
         self.cancel_unattended_recording();
         self.render_dir_picker(ctx);
         self.render_command_palette(ctx);
+        self.render_claude_launcher(ctx);
+        self.render_claude_sessions(ctx);
+        self.render_send_to_panel(ctx);
+        self.render_worktree_dialogs(ctx);
+        self.poll_link(ctx);
         self.render_remote_hosts_overlay(ctx);
         self.render_session_manager(ctx);
         self.render_ssh_upload_flow(ctx);
@@ -1001,36 +1020,12 @@ mod tests {
     };
     use std::time::{Duration, Instant};
 
-    use eframe::CreationContext;
     use egui::Context;
-    use horizon_core::{Config, HorizonHome, PanelId, RuntimeState, SessionStore, StartupDecision};
+    use horizon_core::PanelId;
 
-    use super::{
-        HoldHotkeyTransition, HorizonApp, SPEECH_RELEASE_OWNERSHIP_TIMEOUT, SpeechActivity, hold_hotkey_transition,
-    };
+    use super::{HoldHotkeyTransition, SPEECH_RELEASE_OWNERSHIP_TIMEOUT, SpeechActivity, hold_hotkey_transition};
     use crate::app::HeldSpeechBinding;
-    use crate::input;
-
-    fn test_app() -> HorizonApp {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let config_path = temp.path().join("config.yaml");
-        let home = HorizonHome::from_root(temp.path().join(".horizon"));
-        let session_store = SessionStore::new(home, config_path.clone());
-        let config = Config::default();
-        let ctx = Context::default();
-        let cc = CreationContext::_new_kittest(ctx);
-
-        HorizonApp::new(
-            &cc,
-            &config,
-            config_path,
-            session_store,
-            StartupDecision::Ephemeral {
-                runtime_state: Box::new(RuntimeState::default()),
-            },
-            input::ObservedKeyboardInputs::default(),
-        )
-    }
+    use crate::app::test_support::test_app;
 
     #[test]
     fn finalize_frame_requests_repaint_when_theme_application_is_deferred() {

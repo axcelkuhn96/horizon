@@ -17,7 +17,7 @@ pub(super) fn drain_replay_events(event_rx: &mpsc::Receiver<Event>) -> ReplayRes
             Event::Title(title) => match Terminal::parse_horizon_title(&title) {
                 Some(HorizonOscTitle::SetTitle(next_title)) => state.title = next_title,
                 Some(HorizonOscTitle::ClearTitle) => state.title.clear(),
-                Some(HorizonOscTitle::Notification(_) | HorizonOscTitle::Ignore) => {}
+                Some(HorizonOscTitle::Notification(_) | HorizonOscTitle::Status(_) | HorizonOscTitle::Ignore) => {}
                 None => state.title = title,
             },
             Event::ResetTitle => {

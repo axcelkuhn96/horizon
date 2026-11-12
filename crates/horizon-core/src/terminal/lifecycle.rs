@@ -84,6 +84,7 @@ impl Terminal {
             child_exit_status: None,
             bell_pending: false,
             pending_notification: None,
+            pending_status: std::collections::VecDeque::new(),
         };
         terminal.process_events();
         Ok(terminal)

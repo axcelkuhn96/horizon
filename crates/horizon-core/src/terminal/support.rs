@@ -118,7 +118,8 @@ pub(super) fn current_cwd_for_pid(pid: u32) -> Option<PathBuf> {
 /// `pid` unchanged when it is not a `script` wrapper (transcript capture
 /// disabled), in which case the PTY child already is the shell.
 #[cfg(target_os = "linux")]
-fn shell_pid_behind_wrapper(pid: u32) -> u32 {
+#[must_use]
+pub fn shell_pid_behind_wrapper(pid: u32) -> u32 {
     if proc_comm(pid).as_deref() != Some("script") {
         return pid;
     }

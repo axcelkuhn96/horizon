@@ -44,6 +44,16 @@ pub enum CommandId {
     /// Flip whether 2-finger scroll over a panel pans the canvas or scrolls
     /// the terminal scrollback.
     ToggleScrollPan,
+
+    // Claude
+    /// Open the Claude profile launcher overlay.
+    OpenClaudeLauncher,
+    /// Open the recent Claude sessions of the active workspace.
+    OpenRecentSessions,
+    /// Paste the saved prompt at this index of the effective list into the focused terminal.
+    InsertPrompt(usize),
+    /// Like [`Self::InsertPrompt`], then press Enter.
+    InsertPromptAndSend(usize),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -51,6 +61,7 @@ pub enum Category {
     Workspace,
     Panel,
     Preset,
+    Prompt,
     Action,
 }
 
@@ -60,6 +71,7 @@ impl Category {
             Self::Workspace => "WORKSPACES",
             Self::Panel => "PANELS",
             Self::Preset => "PRESETS",
+            Self::Prompt => "PROMPTS",
             Self::Action => "ACTIONS",
         }
     }
@@ -189,6 +201,21 @@ fn view_commands(shortcuts: &AppShortcuts, primary_label: &str) -> Vec<CommandEn
 fn global_commands(shortcuts: &AppShortcuts, primary_label: &str) -> Vec<CommandEntry> {
     vec![
         command_entry(
+            CommandId::OpenClaudeLauncher,
+            "Claude launcher",
+            shortcuts.claude_launcher.display_label(primary_label),
+            &["claude", "session", "profile", "account", "launch"],
+        ),
+        CommandEntry {
+            id: CommandId::OpenRecentSessions,
+            label: "Recent Claude sessions".into(),
+            shortcut: None,
+            keywords: ["claude", "session", "resume", "history", "recent", "continue"]
+                .iter()
+                .map(|keyword| (*keyword).into())
+                .collect(),
+        },
+        command_entry(
             CommandId::ToggleSettings,
             "Settings",
             shortcuts.toggle_settings.display_label(primary_label),
@@ -228,6 +255,11 @@ mod tests {
     #[test]
     fn action_commands_all_have_shortcuts() {
         for entry in action_commands(&AppShortcuts::default(), "Ctrl") {
+            if entry.id == CommandId::OpenRecentSessions {
+                // Reachable from the palette and the sidebar menu; no key of its own.
+                assert!(entry.shortcut.is_none());
+                continue;
+            }
             assert!(entry.shortcut.is_some(), "entry '{}' has no shortcut", entry.label);
         }
     }

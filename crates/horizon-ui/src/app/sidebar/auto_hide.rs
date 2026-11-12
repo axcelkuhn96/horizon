@@ -4,7 +4,7 @@
 //! from rendering. The runtime rendering in [`super`] reads these constants and
 //! calls [`sidebar_reveal_state`].
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Delay before the auto-hiding sidebar collapses after the pointer leaves it.
 pub(super) const SIDEBAR_AUTO_HIDE_DELAY: Duration = Duration::from_millis(1500);
@@ -12,6 +12,16 @@ pub(super) const SIDEBAR_AUTO_HIDE_DELAY: Duration = Duration::from_millis(1500)
 pub(super) const SIDEBAR_STRIP_WIDTH: f32 = 6.0;
 /// Width of the pointer-reachable region used to re-reveal a collapsed sidebar.
 pub(super) const SIDEBAR_STRIP_HOVER_WIDTH: f32 = 10.0;
+
+/// Auto-hide bookkeeping: last pointer hover and whether the sidebar was fully revealed.
+#[derive(Default)]
+pub(in crate::app) struct SidebarAutoHideState {
+    pub(super) last_hover: Option<Instant>,
+    pub(super) revealed: bool,
+    /// The renamed workspace's canvas label is covered only by the revealed sidebar: the sidebar
+    /// row hosts the editor for now, without pinning the sidebar open.
+    pub(super) rename_label_under_sidebar: bool,
+}
 
 /// Visibility outcome for the auto-hiding sidebar. Pure, egui-free for testing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

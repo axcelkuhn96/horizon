@@ -1,12 +1,16 @@
 mod bar;
+mod claude;
+pub(crate) use claude::select_claude_tab;
 mod general;
 mod presets;
+mod prompts_section;
 mod shortcuts;
 mod speech;
 #[cfg(test)]
 pub(in crate::app) use speech::ClipboardCapture;
 pub(in crate::app) use speech::PendingCapture;
 pub(in crate::app) use speech::SpeechModelInfoCache;
+mod workspaces;
 mod yaml_editor;
 
 use egui::{Color32, Context, Margin, Stroke, Vec2};
@@ -27,6 +31,8 @@ enum SettingsTab {
     General,
     Shortcuts,
     Presets,
+    Claude,
+    Workspaces,
     Yaml,
 }
 
@@ -36,11 +42,20 @@ impl SettingsTab {
             Self::General => "General",
             Self::Shortcuts => "Shortcuts",
             Self::Presets => "Presets",
+            Self::Claude => "Claude",
+            Self::Workspaces => "Workspaces",
             Self::Yaml => "YAML",
         }
     }
 
-    const ALL: [Self; 4] = [Self::General, Self::Shortcuts, Self::Presets, Self::Yaml];
+    const ALL: [Self; 6] = [
+        Self::General,
+        Self::Shortcuts,
+        Self::Presets,
+        Self::Claude,
+        Self::Workspaces,
+        Self::Yaml,
+    ];
 }
 
 pub(super) enum SettingsStatus {
@@ -55,7 +70,10 @@ pub(super) struct SettingsEditor {
     pub(super) original: String,
     pub(super) status: SettingsStatus,
     active_tab: SettingsTab,
-    editing_config: Option<Config>,
+    /// Parsed `buffer`; `pub(super)` so "Save as template" can merge into it.
+    pub(super) editing_config: Option<Config>,
+    claude_tab: claude::ClaudeTabState,
+    workspaces_tab: workspaces::WorkspacesTabState,
 }
 
 #[derive(Clone, Copy)]
@@ -70,25 +88,30 @@ enum SettingsAction {
 impl HorizonApp {
     pub(super) fn toggle_settings(&mut self) {
         if let Some(editor) = self.settings.take() {
-            if let Ok(config) = Config::from_yaml(&editor.original) {
+            if let Ok(config) = Config::from_yaml_lenient(&editor.original) {
                 self.apply_live_preview(&config);
             }
         } else {
             let content = self.load_or_generate_config_yaml();
-            let editing_config = Config::from_yaml(&content).ok();
+            let editing_config = Config::from_yaml_lenient(&content).ok();
+            if let Some(config) = &editing_config {
+                self.board.seed_template_baseline(config);
+            }
             self.settings = Some(SettingsEditor {
                 original: content.clone(),
                 buffer: content,
                 status: SettingsStatus::None,
                 active_tab: SettingsTab::General,
                 editing_config,
+                claude_tab: claude::ClaudeTabState::default(),
+                workspaces_tab: workspaces::WorkspacesTabState::default(),
             });
         }
     }
 
     fn load_or_generate_config_yaml(&self) -> String {
         if let Ok(content) = std::fs::read_to_string(&self.config_path)
-            && Config::from_yaml(&content).is_ok()
+            && Config::from_yaml_lenient(&content).is_ok()
         {
             return content;
         }
@@ -141,6 +164,8 @@ impl HorizonApp {
         if let Some(editor) = self.settings.as_mut() {
             render_settings_panel(ctx, &config_path, editor, &mut self.speech_model_info_cache);
         }
+        self.process_pending_template_open(ctx);
+        self.process_pending_template_browse();
     }
 
     fn apply_live_preview(&mut self, config: &Config) {
@@ -153,7 +178,7 @@ impl HorizonApp {
             SettingsAction::None => {}
             SettingsAction::Close => {
                 if let Some(editor) = self.settings.take()
-                    && let Ok(config) = Config::from_yaml(&editor.original)
+                    && let Ok(config) = Config::from_yaml_lenient(&editor.original)
                 {
                     self.apply_live_preview(&config);
                 }
@@ -161,7 +186,7 @@ impl HorizonApp {
             SettingsAction::Revert => {
                 let original = self.settings.as_ref().map(|e| e.original.clone());
                 if let Some(original) = original {
-                    let parsed = Config::from_yaml(&original).ok();
+                    let parsed = Config::from_yaml_lenient(&original).ok();
                     if let Some(ref config) = parsed {
                         self.apply_live_preview(config);
                     }
@@ -253,13 +278,20 @@ impl HorizonApp {
             self.speech_escape_cancelled = false;
             tracing::info!("speech configuration changed; speech system rebuilt");
         }
+        let presets = config.resolved_presets();
+        // Runs every frame while Settings is open: only a real change may bump the launcher rows
+        // (that rebuilds the launcher and re-resolves the polled profiles).
+        let rows_changed = self.presets != presets || self.template_config.claude_profiles != config.claude_profiles;
         self.template_config = config.clone();
         self.shortcuts = resolve_shortcuts(config);
         self.resolved_pan_modifier = resolve_pan_modifier(config);
         self.scroll_pans_over_panels = config.input.scroll_pans_over_panels;
         self.action_commands_cache =
             crate::command_registry::action_commands(&self.shortcuts, util::primary_shortcut_label());
-        self.presets = config.resolved_presets();
+        self.presets = presets;
+        if rows_changed {
+            self.hub.invalidate_launcher_rows();
+        }
         self.board.attention_enabled = config.features.attention_feed;
         if self.appearance_theme != config.appearance.theme {
             self.appearance_theme = config.appearance.theme;
@@ -312,9 +344,23 @@ fn render_settings_panel(
                 SettingsTab::Yaml => {
                     yaml_editor::render(ui, config_path, &mut editor.buffer, available);
                 }
+                SettingsTab::Claude => render_editor_tab(ui, editor, available, claude::show),
+                SettingsTab::Workspaces => render_editor_tab(ui, editor, available, workspaces::show),
                 tab => render_gui_tab(ui, tab, editor, model_info_cache, available),
             }
         });
+}
+
+fn render_editor_tab(
+    ui: &mut egui::Ui,
+    editor: &mut SettingsEditor,
+    available: Vec2,
+    show: fn(&mut egui::Ui, &mut SettingsEditor),
+) {
+    egui::ScrollArea::vertical()
+        .max_height(available.y)
+        .auto_shrink([false, false])
+        .show(ui, |ui| show(ui, editor));
 }
 
 fn render_gui_tab(
@@ -341,8 +387,8 @@ fn render_gui_tab(
                 SettingsTab::General => general::render(ui, config, model_info_cache),
                 SettingsTab::Shortcuts => shortcuts::render(ui, config),
                 SettingsTab::Presets => presets::render(ui, config),
-                // Yaml is handled before this function is called.
-                SettingsTab::Yaml => return,
+                // Yaml, Claude and Workspaces are handled before this function is called.
+                SettingsTab::Yaml | SettingsTab::Claude | SettingsTab::Workspaces => return,
             };
             if changed && let Ok(yaml) = config.to_yaml() {
                 editor.buffer = yaml;
@@ -350,8 +396,18 @@ fn render_gui_tab(
         });
 }
 
+/// Moves the editor to `tab`. Leaving the YAML tab re-parses the buffer into
+/// `editing_config` so GUI tabs never work from a stale copy; if the YAML does
+/// not parse, the GUI tabs show their "unable to parse" state.
+fn switch_tab(editor: &mut SettingsEditor, tab: SettingsTab) {
+    if editor.active_tab == SettingsTab::Yaml && tab != SettingsTab::Yaml {
+        editor.editing_config = Config::from_yaml_lenient(&editor.buffer).ok();
+    }
+    editor.active_tab = tab;
+}
+
 fn render_tab_bar(ui: &mut egui::Ui, editor: &mut SettingsEditor) {
-    let old_tab = editor.active_tab;
+    let mut clicked = None;
 
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
@@ -375,14 +431,13 @@ fn render_tab_bar(ui: &mut egui::Ui, editor: &mut SettingsEditor) {
                 .corner_radius(TAB_CORNER_RADIUS);
 
             if ui.add(btn).clicked() {
-                editor.active_tab = tab;
+                clicked = Some(tab);
             }
         }
     });
 
-    // Re-parse buffer when switching from YAML to a GUI tab.
-    if old_tab == SettingsTab::Yaml && editor.active_tab != SettingsTab::Yaml {
-        editor.editing_config = Config::from_yaml(&editor.buffer).ok();
+    if let Some(tab) = clicked {
+        switch_tab(editor, tab);
     }
 }
 
@@ -409,4 +464,82 @@ fn section_card(ui: &mut egui::Ui, content: impl FnOnce(&mut egui::Ui)) {
 
 fn dim_label(ui: &mut egui::Ui, text: &str) {
     ui.add(egui::Label::new(egui::RichText::new(text).color(theme::FG_DIM()).size(11.0)).wrap());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn editor(buffer: &str, tab: SettingsTab) -> SettingsEditor {
+        SettingsEditor {
+            buffer: buffer.to_owned(),
+            original: String::new(),
+            status: SettingsStatus::None,
+            active_tab: tab,
+            editing_config: None,
+            claude_tab: claude::ClaudeTabState::default(),
+            workspaces_tab: workspaces::WorkspacesTabState::default(),
+        }
+    }
+
+    #[test]
+    fn leaving_the_yaml_tab_reparses_the_edited_buffer() {
+        let yaml = Config::default().to_yaml().expect("yaml");
+        let mut editor = editor(&yaml, SettingsTab::Yaml);
+        switch_tab(&mut editor, SettingsTab::Claude);
+        assert!(editor.active_tab == SettingsTab::Claude);
+        assert!(editor.editing_config.is_some());
+    }
+
+    #[test]
+    fn a_bad_saved_prompt_stays_editable_instead_of_clearing_the_editing_config() {
+        let yaml = "prompts:\n  - name: a\n    text: one\n  - name: A\n    text: two\n";
+        assert!(Config::from_yaml(yaml).is_err(), "the save path stays strict");
+        let mut editor = editor(yaml, SettingsTab::Yaml);
+        switch_tab(&mut editor, SettingsTab::Claude);
+        let config = editor.editing_config.expect("kept for the editor to mark");
+        assert_eq!(config.prompts.len(), 2);
+    }
+
+    #[test]
+    fn invalid_yaml_still_switches_tab_and_clears_the_editing_config() {
+        let mut editor = editor("window: [unclosed", SettingsTab::Yaml);
+        switch_tab(&mut editor, SettingsTab::Claude);
+        assert!(editor.active_tab == SettingsTab::Claude);
+        assert!(editor.editing_config.is_none());
+    }
+
+    #[test]
+    fn switching_between_gui_tabs_does_not_touch_the_buffer_config() {
+        let mut editor = editor("window: [unclosed", SettingsTab::General);
+        switch_tab(&mut editor, SettingsTab::Claude);
+        assert!(editor.active_tab == SettingsTab::Claude);
+        assert!(editor.editing_config.is_none());
+    }
+
+    #[test]
+    fn apply_runtime_config_bumps_the_launcher_rows_only_when_presets_or_profiles_change() {
+        let mut app = crate::app::test_support::test_app();
+        let config = app.template_config.clone();
+
+        let before = app.hub.rows_version;
+        app.apply_runtime_config(&config);
+        app.apply_runtime_config(&config);
+        assert_eq!(
+            app.hub.rows_version, before,
+            "an unchanged config must not rebuild the launcher"
+        );
+
+        let mut with_profile = config.clone();
+        with_profile.claude_profiles = vec![horizon_core::ClaudeProfile {
+            name: "conta9".to_owned(),
+            config_dir: "/nonexistent/.claude-conta9".to_owned(),
+        }];
+        app.apply_runtime_config(&with_profile);
+        let after_change = app.hub.rows_version;
+        assert_ne!(after_change, before);
+
+        app.apply_runtime_config(&with_profile);
+        assert_eq!(app.hub.rows_version, after_change);
+    }
 }

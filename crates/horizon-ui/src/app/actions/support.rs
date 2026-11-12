@@ -317,6 +317,7 @@ mod tests {
                 user: Some("deploy".to_string()),
                 ..SshConnection::default()
             }),
+            env: std::collections::BTreeMap::new(),
         }
     }
 

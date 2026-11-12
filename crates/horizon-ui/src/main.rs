@@ -9,8 +9,10 @@ mod editor_widget;
 mod file_search_widget;
 mod file_tree_widget;
 mod git_changes_widget;
+mod hook_cli;
 mod image_paste;
 mod input;
+mod link_cli;
 mod loading_spinner;
 mod native_app;
 mod paste_files;
@@ -36,7 +38,25 @@ use horizon_core::{
 };
 use tracing_subscriber::fmt::format::FmtSpan;
 
-fn main() -> eframe::Result {
+fn main() -> std::process::ExitCode {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some((_, link_args)) = args.split_first().filter(|(first, _)| first.as_str() == "link") {
+        return link_cli::run(link_args);
+    }
+    if let Some((_, hook_args)) = args.split_first().filter(|(first, _)| first.as_str() == "hook") {
+        return hook_cli::run(hook_args);
+    }
+
+    match run_gui() {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("Error: {error:?}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+fn run_gui() -> eframe::Result {
     init_tracing();
 
     let horizon_home = HorizonHome::resolve();

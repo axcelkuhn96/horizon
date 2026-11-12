@@ -251,7 +251,7 @@ impl HorizonApp {
             let _ = self.fit_workspace_in_rect(workspace_id, detached_canvas_rect(ctx));
         }
         if actions.toggle_minimap {
-            self.minimap_visible = !self.minimap_visible;
+            self.toggle_minimap();
         }
     }
 
@@ -327,7 +327,7 @@ impl HorizonApp {
                         .on_hover_text(minimap_shortcut.as_str())
                         .clicked()
                     {
-                        self.minimap_visible = !self.minimap_visible;
+                        self.toggle_minimap();
                     }
                 });
             });

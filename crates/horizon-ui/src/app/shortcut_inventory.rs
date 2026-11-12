@@ -2,7 +2,7 @@ use horizon_core::{AppShortcuts, ShortcutBinding};
 
 use crate::terminal_widget::SSH_RECONNECT_SHORTCUT;
 
-const GLOBAL_SHORTCUT_COUNT: usize = 19;
+const GLOBAL_SHORTCUT_COUNT: usize = 20;
 
 pub(crate) fn global_shortcut_bindings(shortcuts: &AppShortcuts) -> [ShortcutBinding; GLOBAL_SHORTCUT_COUNT] {
     [
@@ -25,6 +25,7 @@ pub(crate) fn global_shortcut_bindings(shortcuts: &AppShortcuts) -> [ShortcutBin
         shortcuts.fullscreen_window,
         shortcuts.save_editor,
         shortcuts.search,
+        shortcuts.claude_launcher,
     ]
 }
 

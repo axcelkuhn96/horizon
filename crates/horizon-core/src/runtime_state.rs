@@ -1,7 +1,8 @@
 mod agent_sessions;
 mod claude_live_sessions;
+mod ui_prefs;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
 use serde::{Deserialize, Deserializer, Serialize};
@@ -9,16 +10,18 @@ use uuid::Uuid;
 
 use crate::agent_detect::{RunningAgent, detect_running_agent};
 use crate::board::{Board, WorkspaceLayout};
-use crate::config::{Config, TerminalConfig, WindowConfig, WorkspaceConfig};
+use crate::config::{ClaudeProfile, Config, TerminalConfig, WindowConfig, WorkspaceConfig};
 use crate::error::{Error, Result};
 use crate::layout::workspace_slot_width;
 use crate::panel::{PanelKind, PanelOptions, PanelResume};
 use crate::ssh::SshConnection;
 use crate::terminal::Terminal;
 use crate::view::CanvasViewState;
+use crate::workspace::workspace_color_hex;
 
 pub use agent_sessions::{AgentSessionCatalog, AgentSessionRecord, most_recent_unclaimed_session_for};
-pub use claude_live_sessions::{claude_session_transcript_exists, live_claude_session_ids};
+pub use claude_live_sessions::{claude_config_dir_for_env, claude_transcript_exists_for_env, live_claude_session_ids};
+pub use ui_prefs::UiPrefs;
 
 const RUNTIME_STATE_VERSION: u32 = 2;
 const DEFAULT_ROWS: u16 = 24;
@@ -46,6 +49,8 @@ pub struct RuntimeState {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub detached_workspaces: Vec<DetachedWorkspaceState>,
     pub workspaces: Vec<WorkspaceState>,
+    #[serde(default, skip_serializing_if = "UiPrefs::is_default")]
+    pub ui: UiPrefs,
 }
 
 impl RuntimeState {
@@ -72,6 +77,7 @@ impl RuntimeState {
             focused_panel_local_id: None,
             detached_workspaces: Vec::new(),
             workspaces,
+            ui: UiPrefs::default(),
         }
     }
 
@@ -170,7 +176,7 @@ impl RuntimeState {
                     panel.kind,
                     session_id.clone(),
                     panel.cwd.clone(),
-                    Some(panel.name.clone()),
+                    empty_to_none(&panel.name).map(str::to_owned),
                     None,
                 ));
             }
@@ -207,7 +213,7 @@ impl RuntimeState {
 
     #[must_use]
     pub fn from_board(board: &Board, window: WindowConfig, canvas_view: CanvasViewState) -> Self {
-        Self::from_board_with_detached_workspaces(board, window, canvas_view, Vec::new())
+        Self::from_board_with_detached_workspaces(board, window, canvas_view, Vec::new(), &[])
     }
 
     #[must_use]
@@ -216,6 +222,7 @@ impl RuntimeState {
         window: WindowConfig,
         canvas_view: CanvasViewState,
         detached_workspaces: Vec<DetachedWorkspaceState>,
+        claude_profiles: &[ClaudeProfile],
     ) -> Self {
         let mut workspaces: Vec<WorkspaceState> = board
             .workspaces
@@ -231,7 +238,9 @@ impl RuntimeState {
 
                         PanelState {
                             local_id: panel.local_id.clone(),
-                            name: panel.title.clone(),
+                            // Only a chosen name is saved: a terminal-titled panel restores as
+                            // terminal-titled instead of freezing its fallback title as a name.
+                            name: panel.custom_name().unwrap_or_default().to_owned(),
                             kind: panel.kind,
                             command: panel.launch_command.clone(),
                             args: panel.launch_args.clone(),
@@ -267,10 +276,13 @@ impl RuntimeState {
                             running_agent: if panel.kind == PanelKind::Shell
                                 && panel.terminal_title.to_lowercase().contains("claude")
                             {
-                                panel.child_pid().and_then(detect_running_agent)
+                                panel
+                                    .child_pid()
+                                    .and_then(|pid| detect_running_agent(pid, claude_profiles))
                             } else {
                                 None
                             },
+                            env: panel.env.clone(),
                         }
                     })
                     .collect();
@@ -284,6 +296,7 @@ impl RuntimeState {
                     layout: workspace.layout,
                     panels,
                     sidebar_collapsed: workspace.sidebar_collapsed,
+                    color: Some(workspace_color_hex(workspace.color_idx)),
                 }
             })
             .collect();
@@ -305,6 +318,7 @@ impl RuntimeState {
                 .map(|panel| panel.local_id.clone()),
             detached_workspaces,
             workspaces,
+            ui: UiPrefs::default(),
         }
     }
 }
@@ -359,6 +373,7 @@ impl Default for RuntimeState {
             focused_panel_local_id: None,
             detached_workspaces: Vec::new(),
             workspaces: Vec::new(),
+            ui: UiPrefs::default(),
         }
     }
 }
@@ -389,6 +404,10 @@ pub struct WorkspaceState {
     /// Sidebar-only: persists across relaunch, does not affect canvas panels.
     #[serde(default)]
     pub sidebar_collapsed: bool,
+    /// Accent color as `#rrggbb` of a `WORKSPACE_COLORS` entry. `None` keeps
+    /// the board's positional default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
 }
 
 fn deserialize_workspace_layout<'de, D>(deserializer: D) -> std::result::Result<Option<WorkspaceLayout>, D::Error>
@@ -454,6 +473,7 @@ impl WorkspaceState {
             layout,
             panels,
             sidebar_collapsed: workspace.sidebar_collapsed,
+            color: workspace.color.clone(),
         }
     }
 }
@@ -495,6 +515,9 @@ pub struct PanelState {
     /// this field deserialize to `None` (retro-compatible via `#[serde(default)]`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub running_agent: Option<RunningAgent>,
+    /// Extra PTY environment from the preset/template; omitted when empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
 }
 
 impl PanelState {
@@ -543,6 +566,7 @@ impl PanelState {
             collapsed: panel.collapsed,
             had_session_activity: false,
             running_agent: None,
+            env: panel.env.clone(),
         }
     }
 
@@ -570,7 +594,7 @@ impl PanelState {
     #[must_use]
     pub fn to_panel_options(&self) -> PanelOptions {
         PanelOptions {
-            name: if self.name.is_empty() {
+            name: if self.name.is_empty() || is_fallback_terminal_name(&self.name) {
                 None
             } else {
                 Some(self.name.clone())
@@ -591,6 +615,7 @@ impl PanelState {
             transcript_root: None,
             restore_as_disconnected_snapshot: false,
             collapsed: self.collapsed,
+            env: self.env.clone(),
             is_restore: true,
         }
     }
@@ -617,6 +642,7 @@ impl Default for PanelState {
             collapsed: false,
             had_session_activity: false,
             running_agent: None,
+            env: BTreeMap::new(),
         }
     }
 }
@@ -679,6 +705,14 @@ fn normalize_cwd(cwd: Option<&str>) -> Option<String> {
 
 fn empty_to_none(value: &str) -> Option<&str> {
     if value.is_empty() { None } else { Some(value) }
+}
+
+/// `true` for the auto-generated "Terminal N" title. Older state files stored it as if the
+/// user had chosen it; restoring it as a custom name would pin the fallback over the smart
+/// label, so it restores as unnamed.
+fn is_fallback_terminal_name(name: &str) -> bool {
+    name.strip_prefix("Terminal ")
+        .is_some_and(|rest| !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()))
 }
 
 #[cfg(test)]
@@ -913,6 +947,7 @@ mod tests {
                 ..TerminalConfig::default()
             }],
             sidebar_collapsed: false,
+            prompts: Vec::new(),
         };
 
         let state = WorkspaceState::from_config(0, &workspace, [120.0, 64.0]);
@@ -933,6 +968,7 @@ mod tests {
                 ..TerminalConfig::default()
             }],
             sidebar_collapsed: false,
+            prompts: Vec::new(),
         };
 
         let state = WorkspaceState::from_config(0, &workspace, [120.0, 64.0]);
@@ -981,6 +1017,7 @@ workspaces:
                 ..TerminalConfig::default()
             }],
             sidebar_collapsed: false,
+            prompts: Vec::new(),
         };
 
         let state = WorkspaceState::from_config(0, &workspace, [120.0, 64.0]);
@@ -1025,6 +1062,7 @@ workspaces:
             position: None,
             terminals: Vec::new(),
             sidebar_collapsed: true,
+            prompts: Vec::new(),
         };
 
         let state = WorkspaceState::from_config(0, &workspace, [120.0, 64.0]);
@@ -1080,6 +1118,80 @@ workspaces:
     }
 
     #[test]
+    fn workspaces_template_color_hydrates_board_and_round_trips() {
+        let config = WorkspaceConfig {
+            name: "tinted".to_string(),
+            color: Some("#F38BA8".to_string()),
+            cwd: None,
+            position: None,
+            terminals: Vec::new(),
+            sidebar_collapsed: false,
+            prompts: Vec::new(),
+        };
+        let state = RuntimeState {
+            workspaces: vec![
+                WorkspaceState::from_config(
+                    0,
+                    &WorkspaceConfig {
+                        color: None,
+                        ..config.clone()
+                    },
+                    [0.0, 0.0],
+                ),
+                WorkspaceState::from_config(1, &config, [800.0, 0.0]),
+            ],
+            ..RuntimeState::default()
+        };
+
+        let board = crate::board::Board::from_runtime_state(&state).expect("board");
+        assert_eq!(board.workspaces[0].color_idx, 0, "no color keeps the positional slot");
+        assert_eq!(board.workspaces[1].color_idx, 3, "#f38ba8 is palette slot 3");
+
+        let saved = RuntimeState::from_board(&board, WindowConfig::default(), CanvasViewState::default());
+        let reloaded = crate::board::Board::from_runtime_state(&saved).expect("board");
+        assert_eq!(reloaded.workspaces[1].color_idx, 3);
+    }
+
+    #[test]
+    fn fallback_terminal_names_restore_as_unnamed() {
+        let named = |name: &str| PanelState {
+            name: name.to_string(),
+            ..PanelState::default()
+        };
+
+        assert_eq!(named("Terminal 12").to_panel_options().name, None);
+        assert_eq!(named("").to_panel_options().name, None);
+        assert_eq!(named("Backend").to_panel_options().name.as_deref(), Some("Backend"));
+        assert_eq!(
+            named("Terminal 1 logs").to_panel_options().name.as_deref(),
+            Some("Terminal 1 logs")
+        );
+        assert_eq!(named("Terminal ").to_panel_options().name.as_deref(), Some("Terminal "));
+    }
+
+    #[test]
+    fn unnamed_legacy_session_panel_gets_no_binding_label() {
+        let mut state = RuntimeState {
+            workspaces: vec![WorkspaceState {
+                panels: vec![PanelState {
+                    kind: PanelKind::Claude,
+                    resume: PanelResume::Session {
+                        session_id: "s1".to_string(),
+                    },
+                    ..PanelState::default()
+                }],
+                ..WorkspaceState::default()
+            }],
+            ..RuntimeState::default()
+        };
+
+        state.bootstrap_missing_agent_bindings(&AgentSessionCatalog::default(), &HashSet::new());
+
+        let binding = state.workspaces[0].panels[0].session_binding.as_ref().expect("binding");
+        assert_eq!(binding.label, None);
+    }
+
+    #[test]
     fn collapsed_flag_flows_through_to_panel_options() {
         let panel = PanelState {
             collapsed: true,
@@ -1087,6 +1199,52 @@ workspaces:
         };
 
         assert!(panel.to_panel_options().collapsed);
+    }
+
+    #[test]
+    fn panel_state_env_round_trips_yaml() {
+        let state = RuntimeState {
+            workspaces: vec![WorkspaceState {
+                local_id: "workspace".to_string(),
+                name: "alpha".to_string(),
+                panels: vec![PanelState {
+                    local_id: "panel".to_string(),
+                    name: "Claude work".to_string(),
+                    kind: PanelKind::Claude,
+                    env: std::collections::BTreeMap::from([(
+                        "CLAUDE_CONFIG_DIR".to_string(),
+                        "/home/u/.claude-work".to_string(),
+                    )]),
+                    ..PanelState::default()
+                }],
+                ..WorkspaceState::default()
+            }],
+            ..RuntimeState::default()
+        };
+
+        let yaml = state.to_yaml().expect("serialize runtime state");
+        assert!(yaml.contains("CLAUDE_CONFIG_DIR"));
+
+        let reloaded: RuntimeState = serde_yaml::from_str(&yaml).expect("deserialize runtime state");
+        let panel = &reloaded.workspaces[0].panels[0];
+        assert_eq!(
+            panel.env.get("CLAUDE_CONFIG_DIR").map(String::as_str),
+            Some("/home/u/.claude-work")
+        );
+        assert_eq!(panel.to_panel_options().env, panel.env);
+    }
+
+    #[test]
+    fn old_runtime_yaml_without_env_loads() {
+        let yaml = "workspaces:\n- name: alpha\n  panels:\n  - local_id: panel\n    name: Shell\n    kind: shell\n";
+        let state: RuntimeState = serde_yaml::from_str(yaml).expect("old runtime yaml loads");
+        let panel = &state.workspaces[0].panels[0];
+        assert!(panel.env.is_empty());
+        let reserialized = state.to_yaml().expect("serialize runtime state");
+        assert!(
+            !reserialized.contains("env:"),
+            "empty env must be omitted: {reserialized}"
+        );
     }
 
     #[test]
@@ -1190,6 +1348,7 @@ workspaces: []
             WindowConfig::default(),
             CanvasViewState::new([18.0, -12.0], 1.25),
             detached_workspaces.clone(),
+            &[],
         );
 
         assert_eq!(state.detached_workspaces.len(), 1);

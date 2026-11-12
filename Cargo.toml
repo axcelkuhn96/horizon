@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/horizon-core", "crates/horizon-cursor", "crates/horizon-ui"]
 
 [workspace.package]
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"
@@ -19,8 +19,8 @@ pedantic = { level = "warn", priority = -1 }
 struct_excessive_bools = "allow"
 
 [workspace.dependencies]
-horizon-core = { path = "crates/horizon-core", version = "0.4.0" }
-horizon-cursor = { path = "crates/horizon-cursor", version = "0.4.0" }
+horizon-core = { path = "crates/horizon-core", version = "0.5.0" }
+horizon-cursor = { path = "crates/horizon-cursor", version = "0.5.0" }
 thiserror = "2.0.18"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
@@ -43,6 +43,8 @@ git2 = { version = "0.21", default-features = false }
 regex = "1.12.4"
 ignore = "0.4"
 arboard = "3.6.1"
+# Blocking HTTP client for the single Claude usage GET: rustls (no OpenSSL), no async runtime.
+ureq = { version = "3.5.2", default-features = false, features = ["rustls"] }
 png = "0.18.1"
 tokio = { version = "1.52.3", features = ["rt", "macros"] }
 surge-core = { git = "https://github.com/fintermobilityas/surge.git", tag = "v1.0.0-beta.52", package = "surge-core" }

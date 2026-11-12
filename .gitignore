@@ -18,3 +18,6 @@ crates/horizon-ui/publish-assets/
 .idea/caches/
 
 profiling-output/
+
+# Agent workflow scratch (reports, briefs)
+.superpowers/

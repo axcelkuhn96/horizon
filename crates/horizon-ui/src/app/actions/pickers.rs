@@ -50,8 +50,31 @@ impl HorizonApp {
                     tracing::error!("failed to create panel: {error}");
                 }
             }
+            DirPickerPurpose::TemplateCwd {
+                template_index,
+                template_name,
+            } => {
+                if let Some(path) = path {
+                    self.apply_template_cwd(template_index, &template_name, path);
+                }
+                return;
+            }
         }
         self.mark_runtime_dirty();
+    }
+
+    /// Opens the directory picker for a "Browse" request raised by Settings → Workspaces.
+    pub(in crate::app) fn process_pending_template_browse(&mut self) {
+        let Some(request) = self.take_pending_template_browse() else {
+            return;
+        };
+        self.dir_picker = Some(DirPicker::with_seed(
+            DirPickerPurpose::TemplateCwd {
+                template_index: request.index,
+                template_name: request.name,
+            },
+            request.seed.as_deref(),
+        ));
     }
 
     pub(in crate::app) fn handle_canvas_double_click(&mut self, ctx: &Context) {

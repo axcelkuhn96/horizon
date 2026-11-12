@@ -1,27 +1,34 @@
+mod agent_status;
+mod env;
+mod naming;
 mod spawn;
 
 use std::borrow::Cow;
-use std::path::PathBuf;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::Deserialize;
 
 use crate::agent_definition;
+use crate::agent_status::AgentStatusState;
 use crate::editor::{MarkdownEditor, PanelContent};
 use crate::error::Result;
 use crate::git_changes::DiffViewer;
-use crate::runtime_state::{AgentSessionBinding, PanelTemplateRef, claude_session_transcript_exists};
+use crate::runtime_state::{AgentSessionBinding, PanelTemplateRef, claude_transcript_exists_for_env};
 use crate::ssh::{SshConnection, SshConnectionStatus};
 use crate::terminal::{AgentNotification, Terminal, TerminalSpawnOptions};
 use crate::usage_dashboard::UsageDashboard;
 use crate::workspace::WorkspaceId;
 
+use self::env::{horizon_injected_env, merge_spawn_env};
+pub use self::naming::MAX_PANEL_NAME_CHARS;
 pub use self::spawn::current_unix_millis;
 #[cfg(test)]
 use self::spawn::platform_default_shell;
 use self::spawn::{
-    AgentLaunchContext, agent_env, kitty_keyboard_for_kind, resolve_launch_command, scrollback_limit_for_kind,
-    spawn_panel,
+    AgentLaunchContext, kitty_keyboard_for_kind, resolve_launch_command, scrollback_limit_for_kind, spawn_panel,
+    spawn_panel_linked,
 };
 
 const DEFAULT_CELL_WIDTH: u16 = 8;
@@ -129,6 +136,8 @@ pub struct PanelOptions {
     pub transcript_root: Option<PathBuf>,
     pub restore_as_disconnected_snapshot: bool,
     pub collapsed: bool,
+    /// Extra environment for the PTY, from the preset (generic; e.g. `CLAUDE_CONFIG_DIR`).
+    pub env: BTreeMap<String, String>,
     /// True when this panel is being restored from persisted state rather
     /// than newly added; continue-style agents only reconnect on restore.
     pub is_restore: bool,
@@ -154,6 +163,7 @@ impl Default for PanelOptions {
             transcript_root: None,
             restore_as_disconnected_snapshot: false,
             collapsed: false,
+            env: BTreeMap::new(),
             is_restore: false,
         }
     }
@@ -190,9 +200,16 @@ pub struct Panel {
     /// When `true`, the panel renders as titlebar-only (body hidden). The PTY
     /// stays alive — collapsing never kills the terminal session.
     pub collapsed: bool,
+    /// Extra PTY environment from the preset; reused on restart and persisted.
+    pub env: BTreeMap<String, String>,
+    /// Panel-link socket exposed to the PTY as `HORIZON_SOCKET`; set by the board at
+    /// spawn and refreshed before a restart.
+    pub(crate) link_socket: Option<PathBuf>,
     /// The panel height (`layout.size[1]`) recorded before collapse, so expand
     /// can restore the prior height. `None` when the panel has never collapsed.
     expanded_height: Option<f32>,
+    /// What the agent in this panel is doing; fed by the status hooks and the live-session file.
+    pub(crate) agent_status: AgentStatusState,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -263,6 +280,20 @@ impl Panel {
         spawn_panel(id, workspace_id, opts)
     }
 
+    /// Like [`Panel::spawn`], exposing the panel-link socket to the PTY as `HORIZON_SOCKET`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the terminal runtime cannot be created.
+    pub(crate) fn spawn_linked(
+        id: PanelId,
+        workspace_id: WorkspaceId,
+        opts: PanelOptions,
+        link_socket: Option<&Path>,
+    ) -> Result<Self> {
+        spawn_panel_linked(id, workspace_id, opts, link_socket)
+    }
+
     /// Build a terminal-backed placeholder for a panel that failed to restore.
     ///
     /// # Errors
@@ -312,6 +343,20 @@ impl Panel {
             had_output,
             cwd_changed: self.update_tracked_cwd(current_cwd),
         }
+    }
+
+    /// Whether the user (or a preset) named this panel, as opposed to the
+    /// terminal-title fallback.
+    #[must_use]
+    pub const fn has_custom_name(&self) -> bool {
+        self.has_custom_name
+    }
+
+    /// The name the user (or a preset) gave this panel, `None` while the panel is titled by
+    /// its terminal. This is the name `horizon link` and the sidebar show.
+    #[must_use]
+    pub fn custom_name(&self) -> Option<&str> {
+        self.has_custom_name.then_some(self.title.as_str())
     }
 
     #[must_use]
@@ -390,10 +435,9 @@ impl Panel {
 
     #[must_use]
     pub fn rename(&mut self, name: &str) -> bool {
-        let trimmed = name.trim();
-        if trimmed.is_empty() {
+        let Some(trimmed) = naming::normalize_panel_name(name) else {
             return false;
-        }
+        };
 
         trimmed.clone_into(&mut self.title);
         self.has_custom_name = true;
@@ -504,6 +548,7 @@ impl Panel {
 
         let rows = terminal.rows();
         let cols = terminal.cols();
+        self.agent_status.clear_on_exit();
 
         // Graceful shutdown of the old terminal.
         let _ = terminal.shutdown_with_timeout(Duration::from_secs(2));
@@ -511,10 +556,12 @@ impl Panel {
         // A pre-assigned Claude binding may not have a transcript yet (panel
         // never received a message); resuming it would fail, so relaunch
         // fresh under the same session id instead.
+        let transcript_exists = claude_transcript_exists_for_env(&self.env);
         let should_resume = self.kind.supports_session_binding()
-            && self.session_binding.as_ref().is_some_and(|binding| {
-                self.kind != PanelKind::Claude || claude_session_transcript_exists(&binding.session_id)
-            });
+            && self
+                .session_binding
+                .as_ref()
+                .is_some_and(|binding| self.kind != PanelKind::Claude || transcript_exists(&binding.session_id));
         let (program, launch_args) = resolve_launch_command(
             self.launch_command.clone(),
             self.launch_args.clone(),
@@ -541,7 +588,8 @@ impl Panel {
             );
         }
 
-        let env = agent_env(self.kind);
+        let injected = horizon_injected_env(&self.local_id, &self.title, self.link_socket.as_deref());
+        let env = merge_spawn_env(self.kind, &self.env, &injected);
         self.content = PanelContent::Terminal(Terminal::spawn(TerminalSpawnOptions {
             program,
             args: launch_args,
@@ -744,7 +792,10 @@ mod tests {
             ssh_connection: None,
             ssh_status: None,
             collapsed: false,
+            env: std::collections::BTreeMap::new(),
+            link_socket: None,
             expanded_height: None,
+            agent_status: crate::agent_status::AgentStatusState::default(),
         }
     }
 
@@ -753,6 +804,12 @@ mod tests {
         let panel = test_panel("Terminal 1", "Build running", false);
 
         assert_eq!(panel.display_title(), "Build running");
+    }
+
+    #[test]
+    fn has_custom_name_reflects_how_the_panel_was_named() {
+        assert!(test_panel("Backend", "", true).has_custom_name());
+        assert!(!test_panel("Terminal 1", "", false).has_custom_name());
     }
 
     #[test]

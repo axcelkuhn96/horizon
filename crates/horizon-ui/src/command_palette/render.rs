@@ -3,7 +3,7 @@ use egui::{CornerRadius, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
 use crate::app::util::usize_to_f32;
 use crate::theme;
 
-use super::{INPUT_HEIGHT, MAX_VISIBLE_ROWS, PALETTE_WIDTH, ROW_HEIGHT, ResultItem, SECTION_HEADER_HEIGHT};
+use super::{Category, INPUT_HEIGHT, MAX_VISIBLE_ROWS, PALETTE_WIDTH, ROW_HEIGHT, ResultItem, SECTION_HEADER_HEIGHT};
 
 pub(super) struct PaletteLayout {
     pub screen: Rect,
@@ -100,7 +100,15 @@ pub(super) fn render_result_row(
 
     let text_y = row_rect.center().y;
 
-    let label_x = if let Some(color) = item.accent {
+    let label_x = if item.category == Category::Prompt {
+        let color = if item.detail_accent {
+            theme::ACCENT()
+        } else {
+            theme::FG_DIM()
+        };
+        paint_quote_icon(ui, Pos2::new(row_rect.min.x + 15.0, text_y), color);
+        row_rect.min.x + 30.0
+    } else if let Some(color) = item.accent {
         ui.painter_at(row_rect)
             .circle_filled(Pos2::new(row_rect.min.x + 14.0, text_y), 4.5, color);
         row_rect.min.x + 30.0
@@ -125,7 +133,11 @@ pub(super) fn render_result_row(
                 egui::Align2::LEFT_CENTER,
                 &item.detail,
                 egui::FontId::proportional(11.0),
-                theme::FG_DIM(),
+                if item.detail_accent {
+                    theme::ACCENT()
+                } else {
+                    theme::FG_DIM()
+                },
             );
         }
     }
@@ -135,6 +147,17 @@ pub(super) fn render_result_row(
     }
 
     clicked
+}
+
+/// Quotation mark: two dots with a short tail each, drawn so it needs no font glyph.
+fn paint_quote_icon(ui: &egui::Ui, center: Pos2, color: egui::Color32) {
+    let painter = ui.painter();
+    let stroke = Stroke::new(1.6_f32, color);
+    for dx in [-3.5_f32, 3.5] {
+        let dot = center + Vec2::new(dx, -1.5);
+        painter.circle_filled(dot, 2.2, color);
+        painter.line_segment([dot + Vec2::new(1.4, 0.6), dot + Vec2::new(-0.4, 4.6)], stroke);
+    }
 }
 
 fn paint_shortcut_badge(ui: &egui::Ui, row_rect: Rect, text_y: f32, shortcut: &str) {

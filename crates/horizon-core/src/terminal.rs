@@ -7,7 +7,7 @@ mod selection;
 mod support;
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, mpsc};
@@ -24,6 +24,7 @@ use alacritty_terminal::term::{self, RenderableContent, Term, TermDamage, TermMo
 use alacritty_terminal::tty::{self, Options as PtyOptions, Shell};
 use alacritty_terminal::vte::ansi::Rgb;
 
+use crate::agent_status::StatusEvent;
 use crate::error::{Error, Result};
 
 use self::replay::{ReplayRestoreState, drain_replay_events};
@@ -32,6 +33,8 @@ use self::resize::{queue_debounced_pty_resize, should_debounce_pty_resize};
 #[cfg(test)]
 use self::support::default_terminal_rgb;
 pub use self::support::open_url;
+#[cfg(target_os = "linux")]
+pub use self::support::shell_pid_behind_wrapper;
 use self::support::{
     ColorLookup, current_cwd_for_pid, find_file_path_at_column, find_url_at_column, replay_terminal_bytes,
 };
@@ -85,8 +88,13 @@ enum HorizonOscTitle {
     Notification(AgentNotification),
     SetTitle(String),
     ClearTitle,
+    /// `HORIZON_STATUS:<state>[:<session_id>]`: agent status pushed by the Claude hooks.
+    Status(StatusEvent),
     Ignore,
 }
+
+/// Status events kept between two drains; a runaway writer cannot grow memory past this.
+const MAX_PENDING_STATUS_EVENTS: usize = 8;
 
 #[derive(Clone)]
 struct TerminalEventProxy {
@@ -148,6 +156,7 @@ pub struct Terminal {
     child_exit_status: Option<std::process::ExitStatus>,
     bell_pending: bool,
     pending_notification: Option<AgentNotification>,
+    pending_status: VecDeque<StatusEvent>,
 }
 
 /// Gate for `Terminal::write_input`: returns `true` when the bytes must be
@@ -280,6 +289,31 @@ mod tests {
     }
 
     #[test]
+    fn status_osc_does_not_break_horizon_notify_title_parsing() {
+        assert!(matches!(
+            Terminal::parse_horizon_title("HORIZON_STATUS:working"),
+            Some(HorizonOscTitle::Status(_))
+        ));
+        assert_eq!(
+            Terminal::parse_horizon_title("HORIZON_STATUS:dancing"),
+            Some(HorizonOscTitle::Ignore),
+            "an invalid status must not leak into the visible title"
+        );
+        assert_eq!(
+            Terminal::parse_horizon_title("HORIZON_NOTIFY:info:Saved"),
+            Some(HorizonOscTitle::Notification(AgentNotification {
+                severity: "info".to_string(),
+                message: "Saved".to_string(),
+            })),
+        );
+        assert_eq!(
+            Terminal::parse_horizon_title("HORIZON_TITLE:set:Build running"),
+            Some(HorizonOscTitle::SetTitle("Build running".to_string())),
+        );
+        assert_eq!(Terminal::parse_horizon_title("cargo test"), None);
+    }
+
+    #[test]
     fn parse_notify_without_severity_is_ignored() {
         assert_eq!(
             Terminal::parse_horizon_title("HORIZON_NOTIFY::Saved"),
@@ -352,6 +386,48 @@ mod tests {
                 message: "Saved".to_string(),
             })
         );
+        assert!(terminal.shutdown_with_timeout(Duration::from_secs(2)));
+    }
+
+    #[test]
+    fn terminal_event_status_populates_pending_status() {
+        use crate::agent_status::{AgentStatus, StatusEvent};
+
+        let mut terminal = spawn_test_terminal();
+        terminal.title = "Existing title".to_string();
+
+        terminal.handle_event(Event::Title("HORIZON_STATUS:working:f054f32b-7840-4c95".to_string()));
+        terminal.handle_event(Event::Title("HORIZON_STATUS:done".to_string()));
+        terminal.handle_event(Event::Title("HORIZON_STATUS:bogus".to_string()));
+
+        assert_eq!(terminal.title(), "Existing title");
+        assert_eq!(terminal.take_notification(), None);
+        assert_eq!(
+            terminal.take_status_events(),
+            vec![
+                StatusEvent {
+                    state: AgentStatus::Working,
+                    session_id: Some("f054f32b-7840-4c95".to_string()),
+                },
+                StatusEvent {
+                    state: AgentStatus::Done,
+                    session_id: None,
+                },
+            ]
+        );
+        assert!(terminal.take_status_events().is_empty(), "draining empties the queue");
+        assert!(terminal.shutdown_with_timeout(Duration::from_secs(2)));
+    }
+
+    #[test]
+    fn pending_status_queue_is_bounded() {
+        let mut terminal = spawn_test_terminal();
+
+        for _ in 0..(super::MAX_PENDING_STATUS_EVENTS + 5) {
+            terminal.handle_event(Event::Title("HORIZON_STATUS:working".to_string()));
+        }
+
+        assert_eq!(terminal.take_status_events().len(), super::MAX_PENDING_STATUS_EVENTS);
         assert!(terminal.shutdown_with_timeout(Duration::from_secs(2)));
     }
 

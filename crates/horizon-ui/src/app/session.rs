@@ -1,11 +1,13 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
 use egui::Context;
+use horizon_core::agent_detect::{RunningAgent, default_claude_config_dir};
 use horizon_core::{
-    AgentSessionBinding, AgentSessionCatalog, Board, PanelId, PanelKind, PanelResume, PanelState,
-    live_claude_session_ids,
+    AgentSessionBinding, AgentSessionCatalog, Board, ClaudeProfile, PanelId, PanelKind, PanelResume, PanelState,
+    claude_config_dir_for_env, expand_config_dir, live_claude_session_ids,
 };
 
 /// Build a `<binary> --resume <session_id>` command string.
@@ -30,6 +32,56 @@ pub(crate) fn resume_command(binary: &str, session_id: &str) -> Option<String> {
         return None;
     }
     Some(format!("{binary} --resume {session_id}"))
+}
+
+/// Build the shell command that resumes `session_id` for a detected agent.
+///
+/// Agents running outside the default `~/.claude` config dir get a
+/// `CLAUDE_CONFIG_DIR=<dir>` prefix so the resume reads the right account's
+/// store. Legacy `claude2` agents keep their bare alias, which sets the dir
+/// itself. Returns `None` when the id/binary fail [`resume_command`] or the
+/// config dir cannot be quoted safely.
+pub(crate) fn agent_resume_command(agent: &RunningAgent, session_id: &str, home: Option<&Path>) -> Option<String> {
+    let command = resume_command(&agent.binary, session_id)?;
+    let is_default = home.is_none_or(|home| agent.config_dir == default_claude_config_dir(home));
+    if agent.binary == "claude2" || is_default {
+        return Some(command);
+    }
+    let dir = shell_single_quote(agent.config_dir.to_str()?)?;
+    Some(format!("CLAUDE_CONFIG_DIR={dir} {command}"))
+}
+
+/// `text` in single quotes, safe to paste into a POSIX shell; `None` when it holds a control
+/// character (a newline would end the command line early).
+pub(crate) fn shell_single_quote(text: &str) -> Option<String> {
+    if text.chars().any(char::is_control) {
+        return None;
+    }
+    Some(format!("'{}'", text.replace('\'', "'\\''")))
+}
+
+/// Every Claude config dir a startup bootstrap must check for live sessions:
+/// the default dir, each profile dir and each dir a saved panel runs under.
+fn startup_claude_config_dirs(
+    runtime_state: &horizon_core::RuntimeState,
+    profiles: &[ClaudeProfile],
+    home: &Path,
+) -> BTreeSet<PathBuf> {
+    let mut dirs = BTreeSet::from([default_claude_config_dir(home)]);
+    dirs.extend(
+        profiles
+            .iter()
+            .map(|profile| expand_config_dir(&profile.config_dir, home)),
+    );
+    dirs.extend(
+        runtime_state
+            .workspaces
+            .iter()
+            .flat_map(|workspace| &workspace.panels)
+            .filter(|panel| panel.kind == PanelKind::Claude)
+            .map(|panel| claude_config_dir_for_env(&panel.env, home)),
+    );
+    dirs
 }
 
 use crate::{loading_spinner, theme};
@@ -178,20 +230,31 @@ impl HorizonApp {
         self.pending_detached_reattach.clear();
         self.canvas_view = runtime_state.canvas_view_or_default();
         self.pan_target = None;
+        self.minimap_visible = runtime_state.ui.minimap_visible_or_default();
+        self.hud_visible = runtime_state.ui.hud_visible_or_default();
         self.initial_pan_done = runtime_state.has_persisted_canvas_view();
         self.runtime_dirty_since = None;
         self.git_watchers.clear();
-        self.startup_receiver = Self::runtime_state_needs_session_bootstrap(runtime_state)
-            .then(|| Self::spawn_startup_bootstrap(runtime_state.clone()));
+        self.startup_receiver = Self::runtime_state_needs_session_bootstrap(runtime_state).then(|| {
+            Self::spawn_startup_bootstrap(runtime_state.clone(), self.template_config.effective_claude_profiles())
+        });
+        let link_socket = self.board.link_socket().map(Path::to_path_buf);
         self.board = if self.startup_receiver.is_some() {
-            Board::new()
+            let mut board = Board::new();
+            board.set_link_socket(link_socket);
+            board
         } else {
-            Board::from_runtime_state_with_transcripts(runtime_state, self.transcript_root.as_deref()).unwrap_or_else(
-                |error| {
-                    tracing::error!("failed to restore runtime state: {error}");
-                    Board::new()
-                },
+            Board::from_runtime_state_with_link_socket(
+                runtime_state,
+                self.transcript_root.as_deref(),
+                link_socket.as_deref(),
             )
+            .unwrap_or_else(|error| {
+                tracing::error!("failed to restore runtime state: {error}");
+                let mut board = Board::new();
+                board.set_link_socket(link_socket.clone());
+                board
+            })
         };
         self.board.attention_enabled = self.template_config.features.attention_feed;
     }
@@ -223,14 +286,23 @@ impl HorizonApp {
                 .is_some_and(|agent| panel.kind == PanelKind::Shell && agent.session_id.is_some())
     }
 
-    pub(super) fn spawn_startup_bootstrap(mut runtime_state: horizon_core::RuntimeState) -> Receiver<StartupBootstrap> {
+    pub(super) fn spawn_startup_bootstrap(
+        mut runtime_state: horizon_core::RuntimeState,
+        profiles: Vec<ClaudeProfile>,
+    ) -> Receiver<StartupBootstrap> {
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
             let session_catalog = AgentSessionCatalog::load().unwrap_or_else(|error| {
                 tracing::warn!("failed to load agent session catalog: {error}");
                 AgentSessionCatalog::default()
             });
-            let busy_session_ids = live_claude_session_ids();
+            let busy_session_ids: HashSet<String> = std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .map(|home| startup_claude_config_dirs(&runtime_state, &profiles, &home))
+                .unwrap_or_default()
+                .iter()
+                .flat_map(|dir| live_claude_session_ids(dir))
+                .collect();
             runtime_state.bootstrap_missing_agent_bindings(&session_catalog, &busy_session_ids);
             let _ = tx.send(StartupBootstrap {
                 runtime_state,
@@ -257,19 +329,24 @@ impl HorizonApp {
             Ok(bootstrap) => {
                 self.session_catalog = bootstrap.session_catalog;
                 self.last_session_catalog_refresh = Some(Instant::now());
-                self.board = Board::from_runtime_state_with_transcripts(
+                let link_socket = self.board.link_socket().map(Path::to_path_buf);
+                self.board = Board::from_runtime_state_with_link_socket(
                     &bootstrap.runtime_state,
                     self.transcript_root.as_deref(),
+                    link_socket.as_deref(),
                 )
                 .unwrap_or_else(|error| {
                     tracing::error!("failed to restore runtime state: {error}");
-                    Board::new()
+                    let mut board = Board::new();
+                    board.set_link_socket(link_socket.clone());
+                    board
                 });
                 self.board.attention_enabled = self.template_config.features.attention_feed;
 
                 // Inject `<binary> --resume <session_id>\n` into every restored Shell
                 // panel that had a running Claude agent at save time.  This re-launches
-                // claude/claude2 inside the fresh zsh that the restored panel opened.
+                // claude inside the fresh zsh that the restored panel opened, with the
+                // saved CLAUDE_CONFIG_DIR when the agent ran outside `~/.claude`.
                 //
                 // The session_id comes exclusively from the agent process's argv
                 // (`--resume <uuid>` captured at save time).  If no id was captured
@@ -291,7 +368,8 @@ impl HorizonApp {
                         let Some(ref session_id) = agent.session_id else {
                             continue;
                         };
-                        let Some(cmd) = resume_command(&agent.binary, session_id) else {
+                        let home = std::env::var_os("HOME").map(PathBuf::from);
+                        let Some(cmd) = agent_resume_command(agent, session_id, home.as_deref()) else {
                             tracing::warn!(
                                 binary = %agent.binary,
                                 session_id = %session_id,
@@ -526,7 +604,9 @@ pub(super) fn render_loading_view(ctx: &Context) {
 mod tests {
     use std::collections::HashSet;
 
-    use super::{DynamicPanelBindingState, HorizonApp, collect_dynamic_binding_updates, resume_command};
+    use super::{
+        DynamicPanelBindingState, HorizonApp, agent_resume_command, collect_dynamic_binding_updates, resume_command,
+    };
 
     // ── resume_command ────────────────────────────────────────────────────────
 
@@ -542,6 +622,60 @@ mod tests {
     fn resume_command_returns_command_for_valid_uuid_claude2() {
         let result = resume_command("claude2", VALID_UUID);
         assert_eq!(result, Some(format!("claude2 --resume {VALID_UUID}")));
+    }
+
+    fn agent_with(binary: &str, config_dir: &str) -> horizon_core::agent_detect::RunningAgent {
+        horizon_core::agent_detect::RunningAgent {
+            binary: binary.to_string(),
+            config_dir: std::path::PathBuf::from(config_dir),
+            session_id: None,
+        }
+    }
+
+    #[test]
+    fn agent_resume_command_omits_env_for_default_config_dir() {
+        let home = std::path::Path::new("/home/x");
+        let agent = agent_with("claude", "/home/x/.claude");
+        assert_eq!(
+            agent_resume_command(&agent, VALID_UUID, Some(home)),
+            Some(format!("claude --resume {VALID_UUID}"))
+        );
+    }
+
+    #[test]
+    fn agent_resume_command_prefixes_config_dir_for_other_profiles() {
+        let home = std::path::Path::new("/home/x");
+        let agent = agent_with("claude", "/home/x/.claude-work");
+        assert_eq!(
+            agent_resume_command(&agent, VALID_UUID, Some(home)),
+            Some(format!(
+                "CLAUDE_CONFIG_DIR='/home/x/.claude-work' claude --resume {VALID_UUID}"
+            ))
+        );
+    }
+
+    #[test]
+    fn agent_resume_command_quotes_hostile_config_dir() {
+        let home = std::path::Path::new("/home/x");
+        let quoted = agent_with("claude", "/tmp/it's");
+        assert_eq!(
+            agent_resume_command(&quoted, VALID_UUID, Some(home)),
+            Some(format!(
+                "CLAUDE_CONFIG_DIR='/tmp/it'\\''s' claude --resume {VALID_UUID}"
+            ))
+        );
+        let newline = agent_with("claude", "/tmp/a\nb");
+        assert_eq!(agent_resume_command(&newline, VALID_UUID, Some(home)), None);
+    }
+
+    #[test]
+    fn agent_resume_command_keeps_legacy_claude2_alias_bare() {
+        let home = std::path::Path::new("/home/x");
+        let agent = agent_with("claude2", "/home/x/.claude-conta2");
+        assert_eq!(
+            agent_resume_command(&agent, VALID_UUID, Some(home)),
+            Some(format!("claude2 --resume {VALID_UUID}"))
+        );
     }
 
     #[test]
@@ -605,6 +739,7 @@ mod tests {
                 template: None,
                 layout: None,
                 sidebar_collapsed: false,
+                color: None,
                 panels: vec![PanelState {
                     local_id: "panel".to_string(),
                     name: "Claude".to_string(),
@@ -630,6 +765,7 @@ mod tests {
                 template: None,
                 layout: None,
                 sidebar_collapsed: false,
+                color: None,
                 panels: vec![PanelState {
                     local_id: "panel".to_string(),
                     name: "OpenCode".to_string(),
@@ -657,6 +793,7 @@ mod tests {
                 template: None,
                 layout: None,
                 sidebar_collapsed: false,
+                color: None,
                 panels: vec![PanelState {
                     local_id: "shell".to_string(),
                     name: "Shell".to_string(),
@@ -692,6 +829,7 @@ mod tests {
                 template: None,
                 layout: None,
                 sidebar_collapsed: false,
+                color: None,
                 panels: vec![PanelState {
                     local_id: "shell".to_string(),
                     name: "Shell".to_string(),
@@ -726,6 +864,7 @@ mod tests {
                 template: None,
                 layout: None,
                 sidebar_collapsed: false,
+                color: None,
                 panels: vec![PanelState {
                     local_id: "shell".to_string(),
                     name: "Shell".to_string(),
@@ -755,6 +894,7 @@ mod tests {
                 template: None,
                 layout: None,
                 sidebar_collapsed: false,
+                color: None,
                 panels: vec![PanelState {
                     local_id: "panel".to_string(),
                     name: "Pi".to_string(),
@@ -782,6 +922,7 @@ mod tests {
                 template: None,
                 layout: None,
                 sidebar_collapsed: false,
+                color: None,
                 panels: vec![PanelState {
                     local_id: "claude-active".to_string(),
                     name: "Claude".to_string(),
@@ -813,6 +954,7 @@ mod tests {
                 template: None,
                 layout: None,
                 sidebar_collapsed: false,
+                color: None,
                 panels: vec![
                     // Non-agent panel — never bootstrap-eligible.
                     PanelState {
@@ -868,6 +1010,7 @@ mod tests {
                 template: None,
                 layout: None,
                 sidebar_collapsed: false,
+                color: None,
                 panels: vec![
                     PanelState {
                         local_id: "gemini".to_string(),

@@ -1,12 +1,34 @@
 use std::time::{Duration, Instant};
 
-use horizon_core::{DetachedWorkspaceState, RuntimeState};
+use horizon_core::{DetachedWorkspaceState, RuntimeState, UiPrefs};
 
 use super::HorizonApp;
 
 impl HorizonApp {
     pub(super) fn mark_runtime_dirty(&mut self) {
         self.runtime_dirty_since.get_or_insert_with(Instant::now);
+    }
+
+    /// Single entry point for the minimap toggle (shortcut, palette, detached menu).
+    pub(super) fn set_minimap_visible(&mut self, visible: bool) {
+        if replace_if_changed(&mut self.minimap_visible, visible) {
+            self.mark_runtime_dirty();
+        }
+    }
+
+    /// Single entry point for the HUD toggle (shortcut, palette).
+    pub(super) fn set_hud_visible(&mut self, visible: bool) {
+        if replace_if_changed(&mut self.hud_visible, visible) {
+            self.mark_runtime_dirty();
+        }
+    }
+
+    pub(super) fn toggle_minimap(&mut self) {
+        self.set_minimap_visible(!self.minimap_visible);
+    }
+
+    pub(super) fn toggle_hud(&mut self) {
+        self.set_hud_visible(!self.hud_visible);
     }
 
     pub(super) fn flush_runtime_if_dirty(&mut self) {
@@ -34,12 +56,14 @@ impl HorizonApp {
             })
             .collect();
 
-        let runtime_state = RuntimeState::from_board_with_detached_workspaces(
+        let mut runtime_state = RuntimeState::from_board_with_detached_workspaces(
             &self.board,
             self.window_config.clone(),
             self.canvas_view,
             detached_workspaces,
+            &self.template_config.effective_claude_profiles(),
         );
+        runtime_state.ui = UiPrefs::from_visibility(self.minimap_visible, self.hud_visible);
         if let Err(error) = self
             .session_store
             .save_runtime_state(&active_session.session_id, &runtime_state)
@@ -71,5 +95,73 @@ impl HorizonApp {
                 }
             }
         });
+    }
+}
+
+/// Stores `new` and reports whether it differs from the current value.
+fn replace_if_changed(current: &mut bool, new: bool) -> bool {
+    let changed = *current != new;
+    *current = new;
+    changed
+}
+
+#[cfg(test)]
+mod tests {
+    use horizon_core::{Config, RuntimeState};
+
+    use super::*;
+    use crate::app::test_support::{test_app_in, test_app_with};
+
+    #[test]
+    fn toggle_minimap_marks_state_dirty() {
+        let mut visible = true;
+
+        assert!(replace_if_changed(&mut visible, false));
+        assert!(!visible);
+    }
+
+    #[test]
+    fn setting_the_same_visibility_does_not_mark_state_dirty() {
+        let mut visible = true;
+
+        assert!(!replace_if_changed(&mut visible, true));
+        assert!(visible);
+    }
+
+    #[test]
+    fn toggle_minimap_marks_runtime_dirty() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut app = test_app_in(temp.path());
+        app.runtime_dirty_since = None;
+
+        app.toggle_minimap();
+
+        assert!(!app.minimap_visible);
+        assert!(app.runtime_dirty_since.is_some());
+    }
+
+    #[test]
+    fn toggle_hud_marks_runtime_dirty() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut app = test_app_in(temp.path());
+        app.runtime_dirty_since = None;
+
+        app.toggle_hud();
+
+        assert!(app.hud_visible);
+        assert!(app.runtime_dirty_since.is_some());
+    }
+
+    #[test]
+    fn persisted_ui_prefs_are_restored_on_activation() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = RuntimeState::default();
+        state.ui.minimap_visible = Some(false);
+        state.ui.hud_visible = Some(true);
+
+        let app = test_app_with(temp.path(), &Config::default(), state, None);
+
+        assert!(!app.minimap_visible);
+        assert!(app.hud_visible);
     }
 }

@@ -1,15 +1,18 @@
+mod agent_status;
 mod arrangement;
 mod attention;
 mod geometry;
+mod link;
 mod navigation;
 mod shutdown;
 mod workspaces;
 
+pub use agent_status::{STATUS_ATTENTION_SOURCE, StatusNotice};
 pub use navigation::{Direction, PanelRect, nearest_in_direction};
 pub use shutdown::ShutdownProgress;
 
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
@@ -71,6 +74,18 @@ impl WorkspaceLayout {
     }
 }
 
+/// What committing the inline panel-name editor did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RenameOutcome {
+    /// The panel now carries the typed name.
+    Renamed,
+    /// The editor was committed unchanged on a panel still titled by its fallback; nothing to
+    /// store, so the panel stays on its smart label.
+    Unchanged,
+    /// Blank, overlong or carrying a control character; the panel keeps its name.
+    Rejected,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WorkspaceDockSide {
     Left,
@@ -85,12 +100,21 @@ pub struct Board {
     pub attention: Vec<AttentionItem>,
     panel_attention_signals: HashMap<PanelId, String>,
     retained_empty_workspaces: HashSet<WorkspaceId>,
+    /// Lowercased template names as of the last metadata sync (or seed); lets
+    /// the sync tell an in-place rename from a deleted template.
+    template_names_baseline: Option<Vec<String>>,
     pub focused: Option<PanelId>,
     pub active_workspace: Option<WorkspaceId>,
     pub attention_enabled: bool,
     next_panel_id: u64,
     next_workspace_id: u64,
     next_attention_id: u64,
+    link_socket: Option<PathBuf>,
+    /// Status changes that want a toast; drained by the interface.
+    status_notices: Vec<StatusNotice>,
+    /// Whether any Horizon window has the OS focus; a focused panel in an unfocused window is
+    /// not being looked at (agent status notifications).
+    window_focused: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -108,13 +132,22 @@ impl Board {
             attention: Vec::new(),
             panel_attention_signals: HashMap::new(),
             retained_empty_workspaces: HashSet::new(),
+            template_names_baseline: None,
             focused: None,
             active_workspace: None,
             attention_enabled: false,
             next_panel_id: 1,
             next_workspace_id: 1,
             next_attention_id: 1,
+            link_socket: None,
+            status_notices: Vec::new(),
+            window_focused: true,
         }
+    }
+
+    /// Tells the board whether any Horizon window has the OS focus (default `true`).
+    pub fn set_window_focused(&mut self, focused: bool) {
+        self.window_focused = focused;
     }
 
     /// Build a board from a YAML config.
@@ -141,7 +174,22 @@ impl Board {
     ///
     /// Returns an error if the runtime state cannot be restored.
     pub fn from_runtime_state_with_transcripts(state: &RuntimeState, transcript_root: Option<&Path>) -> Result<Self> {
+        Self::from_runtime_state_with_link_socket(state, transcript_root, None)
+    }
+
+    /// Like [`Self::from_runtime_state_with_transcripts`], but panels spawned during the
+    /// restore already get `HORIZON_SOCKET` set to `link_socket`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the runtime state cannot be restored.
+    pub fn from_runtime_state_with_link_socket(
+        state: &RuntimeState,
+        transcript_root: Option<&Path>,
+        link_socket: Option<&Path>,
+    ) -> Result<Self> {
         let mut board = Self::new();
+        board.link_socket = link_socket.map(Path::to_path_buf);
 
         for workspace_state in &state.workspaces {
             let ws_id = board.create_workspace_record(workspace_state);
@@ -240,6 +288,7 @@ impl Board {
             .iter_mut()
             .find(|p| p.id == id)
             .ok_or_else(|| Error::Pty(format!("panel {} not found", id.0)))?;
+        panel.link_socket.clone_from(&self.link_socket);
         panel.restart()
     }
 
@@ -314,6 +363,7 @@ impl Board {
             output.had_terminal_output |= panel_output.had_output;
             output.cwd_changed |= panel_output.cwd_changed;
         }
+        self.process_agent_status();
         // Only run attention detection when terminals actually produced new
         // output.  The expensive path — `detect_attention()` — locks the
         // terminal mutex and iterates the full display, so skipping it on

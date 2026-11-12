@@ -1,15 +1,26 @@
+mod account_badge;
 mod actions;
+mod agent_status_ui;
 mod attention_feed;
 mod canvas;
+mod claude_auto;
+mod claude_launcher;
+mod claude_quick_start;
+mod claude_sessions;
 mod detached_viewports;
 mod file_drop;
 mod file_drop_highlight;
 mod frame_stats;
+mod hub_state;
+mod hub_toast;
+mod hub_ui;
 mod lifecycle;
+mod link;
 mod minimap;
 mod panel_chrome;
 mod panels;
 mod persistence;
+mod prompts;
 mod remote_hosts;
 mod root_chrome;
 mod session;
@@ -21,10 +32,15 @@ mod sidebar;
 pub(crate) mod speech;
 mod ssh_upload;
 mod startup_session;
+#[cfg(test)]
+mod test_support;
 mod updates;
+mod usage_alerts;
+mod usage_chips;
 pub(crate) mod util;
 mod view;
 mod workspace;
+mod worktree_dialog;
 mod yaml_highlight;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -236,11 +252,11 @@ pub struct HorizonApp {
     fullscreen_panel: Option<PanelId>,
     sidebar_visible: bool,
     sidebar_drag_workspace: Option<WorkspaceId>,
-    sidebar_last_hover: Option<Instant>,
-    sidebar_auto_hide_revealed: bool,
+    sidebar_auto_hide: sidebar::SidebarAutoHideState,
     minimap_visible: bool,
     hud_visible: bool,
     renaming_workspace: Option<WorkspaceId>,
+    hub: hub_state::HubState,
     rename_buffer: String,
     renaming_panel: Option<PanelId>,
     panel_rename_buffer: String,
@@ -319,12 +335,41 @@ impl HorizonApp {
         startup: StartupDecision,
         observed_keyboard_inputs: input::ObservedKeyboardInputs,
     ) -> Self {
+        // Started before any session is restored so restored panels get HORIZON_SOCKET.
+        let link_server = link::start_link_server(&cc.egui_ctx);
+        let mut app = Self::with_link_server(
+            cc,
+            config,
+            config_path,
+            session_store,
+            startup,
+            observed_keyboard_inputs,
+            link_server,
+        );
+        // Only the real app polls Claude usage; `with_link_server` (tests) never does.
+        let user_home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+        app.hub.usage.enable_polling(user_home, app.session_store.home());
+        app
+    }
+
+    /// `new` with the panel-link server injected; tests pass `None` so no real
+    /// socket is bound.
+    pub(crate) fn with_link_server(
+        cc: &eframe::CreationContext<'_>,
+        config: &Config,
+        config_path: PathBuf,
+        session_store: SessionStore,
+        startup: StartupDecision,
+        observed_keyboard_inputs: input::ObservedKeyboardInputs,
+        link_server: Option<horizon_core::link::LinkServer>,
+    ) -> Self {
         let shortcuts = resolve_shortcuts(config);
         let action_commands_cache =
             super::command_registry::action_commands(&shortcuts, self::util::primary_shortcut_label());
         cc.egui_ctx.set_fonts(configure_fonts());
         let mut board = Board::new();
         board.attention_enabled = config.features.attention_feed;
+        board.set_link_socket(link_server.as_ref().map(|server| server.path().to_path_buf()));
         let resolved_theme = theme::resolve_theme(config.appearance.theme, cc.egui_ctx.system_theme());
         theme::set_theme(resolved_theme);
 
@@ -344,6 +389,7 @@ impl HorizonApp {
             action_commands_cache,
         };
         let mut app = Self::initial_state(config, bootstrap);
+        app.hub.link.set_server(link_server);
 
         match startup {
             StartupDecision::Open { session, .. } => app.activate_persistent_session(&session),
@@ -382,11 +428,11 @@ impl HorizonApp {
             fullscreen_panel: None,
             sidebar_visible: true,
             sidebar_drag_workspace: None,
-            sidebar_last_hover: None,
-            sidebar_auto_hide_revealed: false,
+            sidebar_auto_hide: sidebar::SidebarAutoHideState::default(),
             minimap_visible: true,
             hud_visible: false,
             renaming_workspace: None,
+            hub: hub_state::HubState::default(),
             rename_buffer: String::new(),
             renaming_panel: None,
             panel_rename_buffer: String::new(),

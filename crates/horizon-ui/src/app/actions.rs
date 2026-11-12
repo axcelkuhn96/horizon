@@ -1,10 +1,14 @@
 mod command_palette;
 mod interaction;
 mod layout;
+mod open_template;
 mod panels;
 mod pickers;
 mod search;
 mod support;
+mod workspace_templates;
+
+pub(in crate::app) use workspace_templates::TemplateSaved;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -200,6 +204,7 @@ mod tests {
                 user: Some("deploy".to_string()),
                 ..horizon_core::SshConnection::default()
             }),
+            env: std::collections::BTreeMap::new(),
         }];
 
         let entries = command_palette_preset_entries(&presets);

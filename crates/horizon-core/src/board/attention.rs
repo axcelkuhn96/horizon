@@ -5,6 +5,10 @@ use crate::panel::{PanelId, current_unix_millis};
 use crate::workspace::WorkspaceId;
 
 use super::Board;
+use super::agent_status::STATUS_ATTENTION_SOURCE;
+
+/// Resolved or dismissed entries kept; older ones are dropped as new entries arrive.
+const MAX_CLOSED_ATTENTION: usize = 64;
 
 impl Board {
     pub(super) fn update_attention(&mut self) {
@@ -63,7 +67,9 @@ impl Board {
                 let ids_to_resolve: Vec<_> = self
                     .attention
                     .iter()
-                    .filter(|item| item.panel_id == Some(panel_id) && item.is_open())
+                    .filter(|item| {
+                        item.panel_id == Some(panel_id) && item.is_open() && item.source != STATUS_ATTENTION_SOURCE
+                    })
                     .map(|item| item.id)
                     .collect();
                 for id in ids_to_resolve {
@@ -100,11 +106,13 @@ impl Board {
         }
     }
 
+    /// Resolves the panel's open entries except the agent-status one, which only the status
+    /// machine resolves (when the agent works again or is gone).
     fn resolve_open_attention_for_panel(&mut self, panel_id: PanelId) {
         let ids_to_resolve: Vec<_> = self
             .attention
             .iter()
-            .filter(|item| item.panel_id == Some(panel_id) && item.is_open())
+            .filter(|item| item.panel_id == Some(panel_id) && item.is_open() && item.source != STATUS_ATTENTION_SOURCE)
             .map(|item| item.id)
             .collect();
         for id in ids_to_resolve {
@@ -142,7 +150,25 @@ impl Board {
             summary,
             severity,
         ));
+        self.trim_closed_attention();
         id
+    }
+
+    /// Keeps the newest [`MAX_CLOSED_ATTENTION`] resolved/dismissed entries (the list is in
+    /// creation order); open ones are never dropped.
+    fn trim_closed_attention(&mut self) {
+        let closed = self.attention.iter().filter(|item| !item.is_open()).count();
+        let mut excess = closed.saturating_sub(MAX_CLOSED_ATTENTION);
+        if excess == 0 {
+            return;
+        }
+        self.attention.retain(|item| {
+            if item.is_open() || excess == 0 {
+                return true;
+            }
+            excess -= 1;
+            false
+        });
     }
 
     #[must_use]
@@ -178,5 +204,40 @@ impl Board {
                     .cmp(&right.severity)
                     .then_with(|| left.id.0.cmp(&right.id.0))
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MAX_CLOSED_ATTENTION;
+    use crate::attention::AttentionSeverity;
+    use crate::board::Board;
+
+    #[test]
+    fn resolved_entries_are_capped_and_open_ones_survive() {
+        let mut board = Board::new();
+        let workspace_id = board.create_workspace("work");
+        let open = board.create_attention(workspace_id, None, "test", "stays open", AttentionSeverity::Low);
+        let mut first_closed = None;
+        for index in 0..(MAX_CLOSED_ATTENTION + 10) {
+            let id = board.create_attention(
+                workspace_id,
+                None,
+                "test",
+                format!("closed {index}"),
+                AttentionSeverity::Low,
+            );
+            first_closed.get_or_insert(id);
+            assert!(board.resolve_attention(id));
+        }
+        board.create_attention(workspace_id, None, "test", "one more", AttentionSeverity::Low);
+
+        let closed = board.attention.iter().filter(|item| !item.is_open()).count();
+        assert_eq!(closed, MAX_CLOSED_ATTENTION);
+        assert!(board.attention.iter().any(|item| item.id == open && item.is_open()));
+        assert!(
+            board.attention.iter().all(|item| Some(item.id) != first_closed),
+            "the oldest resolved entry is dropped first"
+        );
     }
 }

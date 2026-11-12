@@ -1,10 +1,27 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+mod claude_profiles;
+mod features;
 mod input;
+mod prompts;
+mod workspace_template;
+pub use workspace_template::{
+    PanelSnapshotForTemplate, grid_position, move_item, template_from_workspace, terminal_from_preset, upsert_template,
+};
 
+pub use claude_profiles::{
+    CLAUDE_BASE_PRESET_NAME, ClaudeProfile, claude_profile_preset, discover_claude_profiles, expand_config_dir,
+    validate_claude_profiles,
+};
+pub use features::FeaturesConfig;
 pub use input::{InputConfig, scroll_should_pan_canvas};
+pub use prompts::{
+    EffectivePrompt, MAX_PROMPT_NAME_CHARS, MAX_PROMPT_TEXT_BYTES, PromptIssue, PromptIssueKind, PromptScope,
+    SavedPrompt, effective_prompts, skipped_prompts, validate_prompts,
+};
 
 use crate::config_migration::{self, CURRENT_CONFIG_VERSION};
 use crate::error::{Error, Result};
@@ -34,6 +51,11 @@ pub struct Config {
     pub presets: Vec<PresetConfig>,
     #[serde(default)]
     pub workspaces: Vec<WorkspaceConfig>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub claude_profiles: Vec<ClaudeProfile>,
+    /// Saved prompts available in every workspace.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prompts: Vec<SavedPrompt>,
 }
 
 /// Existing config files without a `version` field are treated as v1
@@ -55,6 +77,8 @@ impl Default for Config {
             input: InputConfig::default(),
             presets: default_presets(),
             workspaces: Vec::new(),
+            claude_profiles: Vec::new(),
+            prompts: Vec::new(),
         }
     }
 }
@@ -82,7 +106,7 @@ impl Default for AppearanceConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct PresetConfig {
     pub name: String,
     #[serde(default)]
@@ -97,6 +121,9 @@ pub struct PresetConfig {
     pub resume: PanelResume,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh_connection: Option<SshConnection>,
+    /// Extra environment variables for the PTY (e.g. `CLAUDE_CONFIG_DIR`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
 }
 
 impl PresetConfig {
@@ -110,6 +137,7 @@ impl PresetConfig {
             ssh_connection: self.ssh_connection.clone(),
             kind: self.kind,
             resume: self.resume.clone(),
+            env: self.env.clone(),
             ..PanelOptions::default()
         }
     }
@@ -153,6 +181,7 @@ pub(crate) fn default_opencode_preset() -> PresetConfig {
         args: Vec::new(),
         resume: PanelResume::Fresh,
         ssh_connection: None,
+        env: BTreeMap::new(),
     }
 }
 
@@ -165,6 +194,7 @@ pub(crate) fn default_gemini_presets() -> [PresetConfig; 1] {
         args: Vec::new(),
         resume: PanelResume::Fresh,
         ssh_connection: None,
+        env: BTreeMap::new(),
     }]
 }
 
@@ -181,6 +211,7 @@ pub(crate) fn default_kilo_preset() -> PresetConfig {
         args: Vec::new(),
         resume: PanelResume::Fresh,
         ssh_connection: None,
+        env: BTreeMap::new(),
     }
 }
 
@@ -193,6 +224,7 @@ pub(crate) fn default_pi_preset() -> PresetConfig {
         args: Vec::new(),
         resume: PanelResume::Fresh,
         ssh_connection: None,
+        env: BTreeMap::new(),
     }
 }
 
@@ -258,6 +290,7 @@ pub(crate) fn default_codex_preset() -> PresetConfig {
         args: vec!["--no-alt-screen".to_string()],
         resume: PanelResume::Fresh,
         ssh_connection: None,
+        env: BTreeMap::new(),
     }
 }
 
@@ -274,6 +307,7 @@ pub(crate) fn default_claude_preset() -> PresetConfig {
         args: vec!["--permission-mode".to_string(), "auto".to_string()],
         resume: PanelResume::Fresh,
         ssh_connection: None,
+        env: BTreeMap::new(),
     }
 }
 
@@ -287,6 +321,7 @@ fn default_presets() -> Vec<PresetConfig> {
             args: Vec::new(),
             resume: PanelResume::Fresh,
             ssh_connection: None,
+            env: BTreeMap::new(),
         },
         default_codex_preset(),
         default_claude_preset(),
@@ -304,6 +339,7 @@ fn default_presets() -> Vec<PresetConfig> {
             args: Vec::new(),
             resume: PanelResume::Fresh,
             ssh_connection: None,
+            env: BTreeMap::new(),
         },
         PresetConfig {
             name: "Files".to_string(),
@@ -313,6 +349,7 @@ fn default_presets() -> Vec<PresetConfig> {
             args: Vec::new(),
             resume: PanelResume::Fresh,
             ssh_connection: None,
+            env: BTreeMap::new(),
         },
         PresetConfig {
             name: "Markdown".to_string(),
@@ -322,6 +359,7 @@ fn default_presets() -> Vec<PresetConfig> {
             args: Vec::new(),
             resume: PanelResume::Fresh,
             ssh_connection: None,
+            env: BTreeMap::new(),
         },
         PresetConfig {
             name: "Usage".to_string(),
@@ -331,6 +369,7 @@ fn default_presets() -> Vec<PresetConfig> {
             args: Vec::new(),
             resume: PanelResume::Fresh,
             ssh_connection: None,
+            env: BTreeMap::new(),
         },
     ]);
     presets
@@ -365,6 +404,7 @@ pub struct ShortcutsConfig {
     pub focus_panel_up: String,
     pub focus_panel_down: String,
     pub toggle_scroll_pan: String,
+    pub claude_launcher: String,
 }
 
 impl Default for ShortcutsConfig {
@@ -394,6 +434,7 @@ impl Default for ShortcutsConfig {
             focus_panel_up: "Ctrl+Shift+Up".to_string(),
             focus_panel_down: "Ctrl+Shift+Down".to_string(),
             toggle_scroll_pan: "Ctrl+Shift+P".to_string(),
+            claude_launcher: "Ctrl+Shift+L".to_string(),
         }
     }
 }
@@ -433,6 +474,7 @@ impl ShortcutsConfig {
             focus_panel_up: parse_shortcut("focus_panel_up", &self.focus_panel_up)?,
             focus_panel_down: parse_shortcut("focus_panel_down", &self.focus_panel_down)?,
             toggle_scroll_pan: parse_shortcut("toggle_scroll_pan", &self.toggle_scroll_pan)?,
+            claude_launcher: parse_shortcut("claude_launcher", &self.claude_launcher)?,
         };
 
         validate_distinct_shortcuts([
@@ -460,10 +502,17 @@ impl ShortcutsConfig {
             ("focus_panel_up", shortcuts.focus_panel_up),
             ("focus_panel_down", shortcuts.focus_panel_down),
             ("toggle_scroll_pan", shortcuts.toggle_scroll_pan),
+            ("claude_launcher", shortcuts.claude_launcher),
         ])?;
 
         Ok(shortcuts)
     }
+}
+
+/// Serde predicate: keeps a default-off flag out of the serialized config.
+#[allow(clippy::trivially_copy_pass_by_ref)] // serde's `skip_serializing_if` hands over `&T`
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -474,6 +523,8 @@ pub struct OverlaysConfig {
     pub minimap_height: f32,
     pub minimap_width: f32,
     pub sidebar_auto_hide: bool,
+    #[serde(skip_serializing_if = "is_false")]
+    pub minimap_auto_hide: bool,
 }
 
 impl Default for OverlaysConfig {
@@ -484,22 +535,7 @@ impl Default for OverlaysConfig {
             minimap_height: 180.0,
             minimap_width: 320.0,
             sidebar_auto_hide: false,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(default)]
-pub struct FeaturesConfig {
-    pub attention_feed: bool,
-    pub speech: SpeechConfig,
-}
-
-impl Default for FeaturesConfig {
-    fn default() -> Self {
-        Self {
-            attention_feed: true,
-            speech: SpeechConfig::default(),
+            minimap_auto_hide: false,
         }
     }
 }
@@ -519,6 +555,9 @@ pub struct WorkspaceConfig {
     /// Sidebar-only: does not affect canvas panels. Persists across relaunch.
     #[serde(default)]
     pub sidebar_collapsed: bool,
+    /// Saved prompts of this workspace; they shadow global ones of the same name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prompts: Vec<SavedPrompt>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -546,6 +585,9 @@ pub struct TerminalConfig {
     pub ssh_connection: Option<SshConnection>,
     #[serde(default)]
     pub collapsed: bool,
+    /// Extra environment variables for the PTY (same semantics as `PresetConfig.env`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
 }
 
 impl Default for TerminalConfig {
@@ -563,6 +605,7 @@ impl Default for TerminalConfig {
             size: None,
             ssh_connection: None,
             collapsed: false,
+            env: BTreeMap::new(),
         }
     }
 }
@@ -608,7 +651,11 @@ impl Config {
             config_migration::migrate_if_needed(&mut config, config_path)?;
         }
 
-        config.validate()?;
+        // A bad hand-edited prompt must not make the whole file unloadable (the app would fall
+        // back to defaults and a later save would overwrite it), nor be dropped (a later save
+        // would delete the user's text): it stays in the config as written, `effective_prompts`
+        // skips it at use time and the Settings editor marks it.
+        config.validate_without_prompts()?;
         Ok(config)
     }
 
@@ -620,6 +667,19 @@ impl Config {
     pub fn from_yaml(contents: &str) -> Result<Self> {
         let config = Self::deserialize_yaml(contents)?;
         config.validate()?;
+        Ok(config)
+    }
+
+    /// Like [`Self::from_yaml`], but a prompt that is unsafe to keep (control characters, oversize,
+    /// duplicate name) does not fail it: the prompt stays as written so the Settings editor can
+    /// show and fix it instead of losing it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if deserialization or any non-prompt validation fails.
+    pub fn from_yaml_lenient(contents: &str) -> Result<Self> {
+        let config = Self::deserialize_yaml(contents)?;
+        config.validate_without_prompts()?;
         Ok(config)
     }
 
@@ -667,10 +727,19 @@ impl Config {
     ///
     /// Returns an error if any configured shortcut is invalid or duplicated.
     pub fn validate(&self) -> Result<()> {
+        self.validate_without_prompts()?;
+        prompts::validate_all_prompts(&self.prompts, &self.workspaces)?;
+        Ok(())
+    }
+
+    /// [`Self::validate`] minus the saved prompts, which are checked strictly only when the user
+    /// saves (a hand-edited bad one must not make the file unloadable).
+    pub(crate) fn validate_without_prompts(&self) -> Result<()> {
         let shortcuts = self.shortcuts.resolve()?;
         self.input.resolve_pan_modifier()?;
         crate::speech_config::validate_speech(&self.features.speech, &shortcuts)?;
         validate_ssh_connections(&self.presets, &self.workspaces)?;
+        validate_claude_profiles(&self.claude_profiles)?;
         Ok(())
     }
 
@@ -684,6 +753,14 @@ impl Config {
             .filter_map(|preset| preset.ssh_connection.as_ref())
             .map(normalized_ssh_target)
             .collect();
+
+        if let Some(home) = std::env::var_os("HOME") {
+            for preset in self.derived_claude_presets(Path::new(&home)) {
+                if known_names.insert(preset.name.to_ascii_lowercase()) {
+                    presets.push(preset);
+                }
+            }
+        }
 
         match discover_ssh_hosts(None) {
             Ok(discovered_hosts) => {
@@ -706,6 +783,7 @@ impl Config {
                         args: Vec::new(),
                         resume: PanelResume::Fresh,
                         ssh_connection: Some(host.connection),
+                        env: BTreeMap::new(),
                     });
                 }
             }
@@ -809,6 +887,20 @@ mod tests {
 
     use super::{Config, FeaturesConfig, PresetConfig, config_candidates_with_env};
     use crate::panel::PanelKind;
+
+    #[test]
+    fn minimap_auto_hide_is_serialized_only_when_enabled() {
+        let mut config = Config::default();
+
+        let yaml = config.to_yaml().expect("should serialize");
+        assert!(!yaml.contains("minimap_auto_hide"));
+
+        config.overlays.minimap_auto_hide = true;
+        let yaml = config.to_yaml().expect("should serialize");
+        let reloaded: Config = serde_yaml::from_str(&yaml).expect("should deserialize");
+        assert!(yaml.contains("minimap_auto_hide: true"));
+        assert!(reloaded.overlays.minimap_auto_hide);
+    }
 
     #[test]
     fn includes_horizon_config_candidates() {
@@ -1035,6 +1127,32 @@ mod tests {
     }
 
     #[test]
+    fn claude_launcher_default_string_parses_to_ctrl_shift_l() {
+        use crate::shortcuts::{ShortcutBinding, ShortcutKey, ShortcutModifiers};
+
+        let defaults = super::ShortcutsConfig::default();
+
+        assert_eq!(defaults.claude_launcher, "Ctrl+Shift+L");
+        assert_eq!(
+            ShortcutBinding::parse(&defaults.claude_launcher).expect("claude_launcher should parse"),
+            ShortcutBinding::new(ShortcutModifiers::PRIMARY_SHIFT, ShortcutKey::Letter('L'))
+        );
+        let resolved = defaults.resolve().expect("default shortcuts should resolve");
+        assert_eq!(resolved.claude_launcher, crate::AppShortcuts::default().claude_launcher);
+    }
+
+    #[test]
+    fn claude_launcher_shortcut_colliding_with_existing_is_rejected() {
+        let error = Config::from_yaml("shortcuts:\n  claude_launcher: Ctrl+Shift+K\n")
+            .expect_err("config should reject claude_launcher shortcut colliding with command_palette");
+
+        let message = error.to_string();
+        assert!(message.contains("claude_launcher"));
+        assert!(message.contains("duplicate shortcut") || message.contains("conflicts with"));
+        assert!(matches!(error, crate::Error::Config(_)));
+    }
+
+    #[test]
     fn focus_panel_shortcut_colliding_with_existing_is_rejected() {
         let error = Config::from_yaml("shortcuts:\n  focus_panel_left: Ctrl+Shift+K\n")
             .expect_err("config should reject focus_panel shortcut colliding with command_palette");
@@ -1105,6 +1223,7 @@ presets:
             args: Vec::new(),
             resume: super::PanelResume::Fresh,
             ssh_connection: None,
+            env: super::BTreeMap::new(),
         };
 
         assert!(!preset.requires_workspace_cwd());

@@ -26,6 +26,7 @@ fn search_shortcut_command(focused_kind: Option<PanelKind>) -> CommandId {
 
 impl HorizonApp {
     pub(in crate::app) fn open_command_palette(&mut self) {
+        self.hub.claude_launcher = None;
         self.command_palette = Some(CommandPalette::new());
     }
 
@@ -33,6 +34,7 @@ impl HorizonApp {
         self.command_palette = if self.command_palette.is_some() {
             None
         } else {
+            self.hub.claude_launcher = None;
             Some(CommandPalette::new())
         };
     }
@@ -110,12 +112,14 @@ impl HorizonApp {
             command_palette_workspace_entries(&self.board, &detached_workspace_ids, self.board.active_workspace);
         let panel_entries = command_palette_panel_entries(&self.board, &detached_workspace_ids);
         let preset_entries = command_palette_preset_entries(&self.presets);
+        self.hub.prompts.refresh(&self.template_config, &self.board);
 
         let action = palette.show(
             ctx,
             &workspace_entries,
             &panel_entries,
             &preset_entries,
+            &self.hub.prompts.entries,
             &self.action_commands_cache,
         );
         match action {
@@ -151,8 +155,8 @@ impl HorizonApp {
                 let _ = self.fit_active_workspace(ctx);
             }
             CommandId::ToggleSidebar => self.sidebar_visible = !self.sidebar_visible,
-            CommandId::ToggleHud => self.hud_visible = !self.hud_visible,
-            CommandId::ToggleMinimap => self.minimap_visible = !self.minimap_visible,
+            CommandId::ToggleHud => self.toggle_hud(),
+            CommandId::ToggleMinimap => self.toggle_minimap(),
             CommandId::ToggleFullscreenWindow => {
                 let is_fullscreen = ctx.input(|input| input.viewport().fullscreen.unwrap_or(false));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!is_fullscreen));
@@ -215,6 +219,10 @@ impl HorizonApp {
             }
             CommandId::SearchFileContents => self.open_explorer_search(),
             CommandId::PasteIntoExplorer => self.paste_files_into_explorer(),
+            CommandId::OpenClaudeLauncher => self.toggle_claude_launcher(),
+            CommandId::OpenRecentSessions => self.open_claude_sessions_for_active(ctx),
+            CommandId::InsertPrompt(index) => self.insert_prompt_by_index(ctx, index, false),
+            CommandId::InsertPromptAndSend(index) => self.insert_prompt_by_index(ctx, index, true),
             CommandId::ToggleScrollPan => {
                 self.scroll_pans_over_panels = !self.scroll_pans_over_panels;
                 tracing::info!(
@@ -290,6 +298,7 @@ impl HorizonApp {
             (self.shortcuts.toggle_sessions, CommandId::ToggleSessions),
             (self.shortcuts.new_terminal, CommandId::NewPanel),
             (self.shortcuts.toggle_scroll_pan, CommandId::ToggleScrollPan),
+            (self.shortcuts.claude_launcher, CommandId::OpenClaudeLauncher),
         ];
 
         // The search shortcut (Ctrl+Shift+F) is handled separately so it can be

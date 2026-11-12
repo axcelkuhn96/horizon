@@ -1,8 +1,14 @@
 use std::collections::HashMap;
+use std::time::Instant;
 
-use egui::{Context, CursorIcon, Id, Order, PopupAnchor, Pos2, Rect, Sense, Tooltip, Ui, Vec2};
+use egui::{Context, CornerRadius, CursorIcon, Id, LayerId, Order, PopupAnchor, Pos2, Rect, Sense, Tooltip, Ui, Vec2};
 use horizon_core::{Board, Panel, PanelId, WorkspaceId};
 
+use crate::theme;
+
+use super::auto_hide::{
+    MINIMAP_HINT_LENGTH, MINIMAP_HINT_THICKNESS, MINIMAP_REVEAL_ZONE_PAD, minimap_alpha_target, minimap_fade_secs,
+};
 use super::{
     HorizonApp, MINIMAP_MARGIN, MINIMAP_PAD, MinimapHitTarget, MinimapModel, MinimapScope, minimap_model,
     paint_minimap_contents, panel_minimap_screen_rect, workspace_minimap_screen_rect,
@@ -16,7 +22,7 @@ pub(super) fn render_scoped_minimap(
     scope: MinimapScope,
     overlay_id: Id,
 ) -> f32 {
-    if !app.fixed_overlays_visible() || !app.minimap_visible || !scope_has_content(app, scope) {
+    if !app.fixed_overlays_visible() || !scope_has_content(app, scope) {
         return 0.0;
     }
 
@@ -24,11 +30,17 @@ pub(super) fn render_scoped_minimap(
         return 0.0;
     };
     let minimap_height = model.outer_size.y;
+    let Some(opacity) = minimap_opacity(app, ctx, overlay_id, model.outer_size) else {
+        // Auto-hidden but manually visible: keep reserving the height so the
+        // attention feed does not jump when hover reveals the minimap.
+        return auto_hidden_reserved_height(app.minimap_visible, minimap_height);
+    };
 
     let response = egui::Area::new(overlay_id)
         .anchor(egui::Align2::RIGHT_BOTTOM, Vec2::new(-MINIMAP_MARGIN, -MINIMAP_MARGIN))
         .order(Order::Foreground)
         .show(ctx, |ui| {
+            ui.set_opacity(opacity);
             let (response, painter) = ui.allocate_painter(model.outer_size, Sense::click_and_drag());
             let hovered = if response.dragged() {
                 None
@@ -74,6 +86,73 @@ pub(super) fn render_scoped_minimap(
     }
 
     minimap_height
+}
+
+/// Height the minimap reserves while not drawn: its full height when only
+/// auto-hidden (matches the overlay exclusion zone), none when manually hidden.
+fn auto_hidden_reserved_height(manual_visible: bool, outer_height: f32) -> f32 {
+    if manual_visible { outer_height } else { 0.0 }
+}
+
+/// Opacity to draw the minimap with, or `None` while it is hidden.
+///
+/// The manual `toggle_minimap` switch is the master: a manually hidden minimap
+/// never reveals on hover. With `overlays.minimap_auto_hide` on, the minimap
+/// also fades in when the pointer nears its corner and out shortly after it
+/// leaves; nothing repaints while it stays hidden.
+fn minimap_opacity(app: &mut HorizonApp, ctx: &Context, overlay_id: Id, outer_size: Vec2) -> Option<f32> {
+    let manual_visible = app.minimap_visible;
+    if !app.template_config.overlays.minimap_auto_hide {
+        app.hub.minimap_auto_hide.remove(&overlay_id);
+        return manual_visible.then_some(1.0);
+    }
+
+    let minimap_rect = Rect::from_min_size(
+        ctx.content_rect().max - Vec2::splat(MINIMAP_MARGIN) - outer_size,
+        outer_size,
+    );
+    let zone = minimap_rect.expand(MINIMAP_REVEAL_ZONE_PAD);
+    let now = Instant::now();
+    let state = app.hub.minimap_auto_hide.entry(overlay_id).or_default();
+    // A press that started inside the zone (drag, click) keeps the minimap open
+    // even when the pointer is dragged past its edge.
+    let interacting = state.revealed()
+        && ctx.input(|input| {
+            input.pointer.any_down() && input.pointer.press_origin().is_some_and(|origin| zone.contains(origin))
+        });
+    let pointer_in_zone = interacting || ctx.pointer_interact_pos().is_some_and(|pos| zone.contains(pos));
+
+    let reveal = state.observe(manual_visible, true, pointer_in_zone, now);
+    if let Some(remaining) = state.hide_in(pointer_in_zone, now) {
+        ctx.request_repaint_after(remaining);
+    }
+
+    let opacity = ctx.animate_value_with_time(
+        overlay_id.with("auto_hide_fade"),
+        minimap_alpha_target(reveal),
+        minimap_fade_secs(reveal),
+    );
+    if opacity > 0.0 {
+        return Some(opacity);
+    }
+    if manual_visible {
+        paint_reveal_hint(ctx, overlay_id, minimap_rect);
+    }
+    None
+}
+
+/// Thin accent line in the corner so the user knows where to point to reveal
+/// the auto-hidden minimap.
+fn paint_reveal_hint(ctx: &Context, overlay_id: Id, minimap_rect: Rect) {
+    let hint = Rect::from_min_max(
+        Pos2::new(
+            minimap_rect.max.x - MINIMAP_HINT_LENGTH,
+            minimap_rect.max.y - MINIMAP_HINT_THICKNESS,
+        ),
+        minimap_rect.max,
+    );
+    ctx.layer_painter(LayerId::new(Order::Foreground, overlay_id.with("auto_hide_hint")))
+        .rect_filled(hint, CornerRadius::same(1), theme::alpha(theme::ACCENT(), 90));
 }
 
 fn center_minimap_point(app: &mut HorizonApp, model: &MinimapModel, canvas_rect: Rect, origin: Pos2, pointer: Pos2) {
@@ -323,8 +402,8 @@ mod tests {
     use horizon_core::{Board, PanelKind, PanelOptions};
 
     use super::{
-        MinimapHitTarget, MinimapScope, last_hit, minimap_panel_source, minimap_widget_info,
-        restore_minimap_panel_focus,
+        MinimapHitTarget, MinimapScope, auto_hidden_reserved_height, last_hit, minimap_panel_source,
+        minimap_widget_info, restore_minimap_panel_focus,
     };
 
     /// The minimap is painted as a single surface, so its accessibility label
@@ -405,5 +484,11 @@ mod tests {
 
         assert_eq!(board.focused, Some(clicked_panel));
         assert_eq!(board.active_workspace, Some(workspace_id));
+    }
+
+    #[test]
+    fn auto_hidden_minimap_reserves_its_height_only_when_manually_visible() {
+        assert!((auto_hidden_reserved_height(true, 188.0) - 188.0).abs() < f32::EPSILON);
+        assert!(auto_hidden_reserved_height(false, 188.0).abs() < f32::EPSILON);
     }
 }

@@ -1,9 +1,15 @@
-use egui::{Align, Color32, CornerRadius, Id, Layout, Margin, Pos2, Rect, Stroke, StrokeKind, UiBuilder, Vec2};
-use horizon_core::{AttentionSeverity, PanelId, PanelKind, SshConnectionStatus, agent_definition};
+use egui::{Align, Color32, CornerRadius, Id, Layout, Margin, Pos2, Rect, Sense, Stroke, StrokeKind, UiBuilder, Vec2};
+use horizon_core::{
+    AttentionSeverity, MAX_PANEL_NAME_CHARS, PanelId, PanelKind, SshConnectionStatus, agent_definition,
+};
 
 use crate::theme;
 
 use super::RenameEditAction;
+use super::account_badge::{PlacedBadge, show_account_badge};
+use super::agent_status_ui::{AgentChip, status_label};
+use super::claude_quick_start::titlebar::{self as quick_start, STRIP_GAP};
+use super::link::{LinkBadgeView, paint_link_badge};
 use super::speech::MicState;
 use super::util::{format_compact_count, usize_to_f32};
 
@@ -27,8 +33,30 @@ pub(super) struct PanelChrome<'a> {
     pub attention_badge: Option<&'a (AttentionSeverity, String)>,
     pub ssh_status: Option<SshConnectionStatus>,
     pub process_exit_label: Option<&'a str>,
+    /// "Message received" badge, shown for 3 s after a panel-link delivery.
+    pub link_badge: Option<&'a LinkBadgeView>,
     /// Speech mic control; `None` when speech input is not enabled.
     pub mic: Option<MicControl>,
+    /// Claude quick-start strip on local shell panels.
+    pub quick_start: Option<QuickStartControl>,
+    /// Status dot and session name of the agent in this panel, already placed in the titlebar.
+    pub agent: Option<&'a AgentChip<'a>>,
+    /// Account marker with the weekly quota ring. Inside the agent chip's group when the panel has
+    /// one, standing alone otherwise.
+    pub account: Option<&'a PlacedBadge<'a>>,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct QuickStartControl {
+    /// The strip's rect in the titlebar; it is painted by the panel code after the chrome.
+    pub rect: Rect,
+}
+
+impl QuickStartControl {
+    /// Titlebar width the strip takes, gap included.
+    pub(super) fn slot(self) -> f32 {
+        self.rect.width() + STRIP_GAP
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -42,6 +70,23 @@ impl PanelChrome<'_> {
     /// Leftmost titlebar control: badges and the title stop left of this.
     fn controls_anchor(&self) -> Rect {
         self.mic.map_or(self.close_rect, |mic| mic.rect)
+    }
+
+    /// Titlebar width taken left of the history meter by the quick-start strip and the agent chip
+    /// (which includes the account badge; without a chip the badge takes its own slot).
+    fn right_slots(&self) -> f32 {
+        let badge_alone = if self.agent.is_none() {
+            self.account.map_or(0.0, PlacedBadge::slot)
+        } else {
+            0.0
+        };
+        self.quick_start.map_or(0.0, QuickStartControl::slot) + self.agent.map_or(0.0, AgentChip::slot) + badge_alone
+    }
+
+    /// Where the badges stack from: the controls anchor, moved left of the quick-start strip and
+    /// the agent chip.
+    fn badge_anchor(&self) -> Rect {
+        self.controls_anchor().translate(Vec2::new(-self.right_slots(), 0.0))
     }
 }
 
@@ -147,7 +192,8 @@ fn panel_kind_label_color(base: Color32, focused: bool) -> Color32 {
 }
 
 #[profiling::function]
-pub(super) fn paint_panel_chrome(ui: &mut egui::Ui, chrome: PanelChrome<'_>) {
+/// Paints the panel chrome. Returns `true` when the account badge was clicked.
+pub(super) fn paint_panel_chrome(ui: &mut egui::Ui, chrome: PanelChrome<'_>) -> bool {
     let painter = ui.painter_at(chrome.panel_rect);
     let accent = panel_chrome_accent(chrome.kind, chrome.workspace_accent, chrome.focused);
 
@@ -221,6 +267,15 @@ pub(super) fn paint_panel_chrome(ui: &mut egui::Ui, chrome: PanelChrome<'_>) {
         );
     }
 
+    // The agent chip stays on collapsed panels: a hidden Claude that waits for the user must
+    // still show it.
+    if let Some(chip) = chrome.agent {
+        paint_agent_chip(ui, &painter, chrome.panel_id, chip, chrome.focused);
+    }
+    let account_clicked = chrome
+        .account
+        .is_some_and(|badge| show_account_badge(ui, &painter, chrome.panel_id, badge));
+
     // Collapsed panels are titlebar-only: skip the badges/history meter that
     // describe the (hidden) body. The caret + close button stay visible.
     if !chrome.collapsed {
@@ -228,7 +283,7 @@ pub(super) fn paint_panel_chrome(ui: &mut egui::Ui, chrome: PanelChrome<'_>) {
             paint_attention_badge(
                 &painter,
                 chrome.titlebar_rect,
-                chrome.controls_anchor(),
+                chrome.badge_anchor(),
                 *severity,
                 summary,
             );
@@ -237,7 +292,7 @@ pub(super) fn paint_panel_chrome(ui: &mut egui::Ui, chrome: PanelChrome<'_>) {
             paint_ssh_status_badge(
                 &painter,
                 chrome.titlebar_rect,
-                chrome.controls_anchor(),
+                chrome.badge_anchor(),
                 chrome.scrollback_limit > 0,
                 status,
             );
@@ -246,10 +301,14 @@ pub(super) fn paint_panel_chrome(ui: &mut egui::Ui, chrome: PanelChrome<'_>) {
             paint_process_exited_badge(
                 &painter,
                 chrome.titlebar_rect,
-                chrome.controls_anchor(),
+                chrome.badge_anchor(),
                 chrome.scrollback_limit > 0,
                 label,
             );
+        }
+
+        if let Some(view) = chrome.link_badge {
+            paint_link_badge_stacked(&painter, &chrome, view);
         }
 
         if chrome.scrollback_limit > 0 {
@@ -285,6 +344,7 @@ pub(super) fn paint_panel_chrome(ui: &mut egui::Ui, chrome: PanelChrome<'_>) {
         chrome.close_hovered,
         chrome.collapsed,
     );
+    account_clicked
 }
 
 /// Paint the collapse/expand caret to the left of the close button. The glyph
@@ -421,6 +481,79 @@ fn paint_close_and_resize_controls(
     );
 }
 
+/// Titlebar room kept for the workspace dot and the start of the title; the chip group (status
+/// dot, account badge, names) never grows into it.
+const CHIP_GROUP_LEFT_RESERVE: f32 = 80.0;
+
+/// X where the chip group ends: one gap left of the quick-start strip, or where the strip would end.
+fn chip_group_right(
+    titlebar_rect: Rect,
+    controls: Rect,
+    collapse: Rect,
+    has_history_meter: bool,
+    strip: Option<Rect>,
+) -> f32 {
+    strip.map_or_else(
+        || quick_start_strip_right(titlebar_rect, controls, collapse, has_history_meter),
+        |strip| strip.min.x - STRIP_GAP,
+    )
+}
+
+/// Widest the chip group (agent chip and account badge) may be, so it stops short of the title.
+pub(super) fn chip_group_budget(
+    titlebar_rect: Rect,
+    controls: Rect,
+    collapse: Rect,
+    has_history_meter: bool,
+    strip: Option<Rect>,
+) -> f32 {
+    let right = chip_group_right(titlebar_rect, controls, collapse, has_history_meter, strip);
+    (right - titlebar_rect.min.x - CHIP_GROUP_LEFT_RESERVE).max(0.0)
+}
+
+/// Rect of the agent chip in the titlebar: it ends one gap left of the quick-start strip, or
+/// where the strip would end when the panel has none.
+pub(super) fn agent_chip_rect(
+    titlebar_rect: Rect,
+    controls: Rect,
+    collapse: Rect,
+    has_history_meter: bool,
+    strip: Option<Rect>,
+    width: f32,
+) -> Rect {
+    let right = chip_group_right(titlebar_rect, controls, collapse, has_history_meter, strip);
+    Rect::from_min_size(
+        Pos2::new(right - width, titlebar_rect.center().y - AgentChip::height() * 0.5),
+        Vec2::new(width, AgentChip::height()),
+    )
+}
+
+/// Paints the agent chip and gives it a hover-only tooltip (status, session name, id, account).
+fn paint_agent_chip(
+    ui: &mut egui::Ui,
+    painter: &egui::Painter,
+    panel_id: PanelId,
+    chip: &AgentChip<'_>,
+    focused: bool,
+) {
+    chip.paint(painter, focused);
+    let response = ui.interact(
+        chip.rect,
+        ui.make_persistent_id(("panel_agent_chip", panel_id.0)),
+        Sense::hover(),
+    );
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, status_label(chip.status)));
+    // The account badge inside the chip has its own tooltip; the chip's would open on top of it.
+    let over_badge = response
+        .hover_pos()
+        .is_some_and(|pos| chip.has_badge() && chip.badge_rect().contains(pos));
+    if !over_badge {
+        response.on_hover_ui(|ui| {
+            ui.label(chip.tooltip());
+        });
+    }
+}
+
 /// Compute the right x boundary where the title text must stop, accounting
 /// for all badges (history meter, SSH status, attention) that sit to its right.
 fn title_right_boundary(chrome: &PanelChrome<'_>) -> f32 {
@@ -439,7 +572,57 @@ fn title_right_boundary(chrome: &PanelChrome<'_>) -> f32 {
         // Attention badge sits left of the history meter; reserve ~110px.
         right -= 110.0;
     }
-    right
+    if chrome.link_badge.is_some() {
+        // Link badge sits left of the status badges; reserve ~120px.
+        right -= 120.0;
+    }
+    // The quick-start strip and the agent chip sit left of the history meter; the badges stack
+    // left of them.
+    right - chrome.right_slots()
+}
+
+/// Gap between stacked titlebar badges.
+const BADGE_STACK_GAP: f32 = 6.0;
+
+/// Link badge in the SSH/exit/attention badge slot, stacked to their left when present.
+fn paint_link_badge_stacked(painter: &egui::Painter, chrome: &PanelChrome<'_>, view: &LinkBadgeView) {
+    let anchor = chrome.badge_anchor();
+    let right_edge = if chrome.scrollback_limit > 0 {
+        panel_history_badge_rect(chrome.titlebar_rect, anchor).min.x - 6.0
+    } else {
+        anchor.min.x - 8.0
+    };
+    let font = egui::FontId::proportional(10.0);
+    let status_labels = chrome
+        .ssh_status
+        .map(SshConnectionStatus::label)
+        .into_iter()
+        .chain(chrome.process_exit_label);
+    let status_widths: Vec<f32> = status_labels
+        .map(|label| {
+            painter
+                .layout_no_wrap(label.to_string(), font.clone(), Color32::PLACEHOLDER)
+                .size()
+                .x
+        })
+        .collect();
+    // The attention badge only sits in this slot next to the history meter.
+    let attention_width = chrome
+        .attention_badge
+        .filter(|_| chrome.scrollback_limit > 0)
+        .map(|(severity, summary)| {
+            let text = attention_badge_text(*severity, summary);
+            painter.layout_no_wrap(text, font, Color32::PLACEHOLDER).size().x
+        });
+    let taken = badge_stack_offset(&status_widths, attention_width);
+    paint_link_badge(painter, chrome.titlebar_rect, right_edge, taken, view);
+}
+
+/// How far left of the shared badge slot the link badge starts: every
+/// status badge (label padding 16) and the attention badge (padding 12) in that slot, plus gaps.
+fn badge_stack_offset(status_widths: &[f32], attention_width: Option<f32>) -> f32 {
+    let statuses: f32 = status_widths.iter().map(|width| width + 16.0 + BADGE_STACK_GAP).sum();
+    statuses + attention_width.map_or(0.0, |width| width + 12.0 + BADGE_STACK_GAP)
 }
 
 #[profiling::function]
@@ -539,6 +722,19 @@ fn paint_history_meter(ui: &egui::Ui, painter: &egui::Painter, meter: HistoryMet
     );
 }
 
+/// Icon plus the summary cut for display; what the attention badge paints.
+fn attention_badge_text(severity: AttentionSeverity, summary: &str) -> String {
+    let icon = attention_severity_icon(severity);
+    let display_text = if summary.len() > 30 {
+        let mut truncated = summary[..29].to_string();
+        truncated.push('\u{2026}');
+        truncated
+    } else {
+        summary.to_string()
+    };
+    format!("{icon} {display_text}")
+}
+
 #[profiling::function]
 fn paint_attention_badge(
     painter: &egui::Painter,
@@ -548,17 +744,8 @@ fn paint_attention_badge(
     summary: &str,
 ) {
     let color = attention_severity_color(severity);
-    let icon = attention_severity_icon(severity);
 
-    // Truncate the summary for display.
-    let display_text = if summary.len() > 30 {
-        let mut truncated = summary[..29].to_string();
-        truncated.push('\u{2026}');
-        truncated
-    } else {
-        summary.to_string()
-    };
-    let badge_text = format!("{icon} {display_text}");
+    let badge_text = attention_badge_text(severity, summary);
     let font = egui::FontId::proportional(10.0);
 
     // Position the badge left of the history meter area.
@@ -706,6 +893,21 @@ fn panel_history_badge_rect(titlebar_rect: Rect, close_rect: Rect) -> Rect {
     )
 }
 
+/// X where the quick-start strip ends for a panel whose controls start at `controls` (mic or
+/// close). Without a history meter the strip stops left of the collapse caret too.
+pub(super) fn quick_start_strip_right(
+    titlebar_rect: Rect,
+    controls: Rect,
+    collapse: Rect,
+    has_history_meter: bool,
+) -> f32 {
+    quick_start::strip_right(
+        panel_history_badge_rect(titlebar_rect, controls),
+        has_history_meter,
+        controls.min.x.min(collapse.min.x),
+    )
+}
+
 pub(super) fn panel_title_content_rect(titlebar_rect: Rect, close_rect: Rect, has_workspace_accent: bool) -> Rect {
     let left = if has_workspace_accent {
         titlebar_rect.min.x + 26.0
@@ -736,6 +938,7 @@ pub(super) fn show_inline_rename_editor(
         .font(font)
         .text_color(theme::FG())
         .frame(false)
+        .char_limit(MAX_PANEL_NAME_CHARS)
         .desired_width(rect.width())
         .margin(Margin::ZERO);
     let response = ui.add(edit);
@@ -761,7 +964,8 @@ mod tests {
     use egui::{Color32, Pos2, Rect};
 
     use super::{
-        focus_ring_stroke, panel_border_stroke, panel_fill, panel_title_color, panel_titlebar_fill,
+        BADGE_STACK_GAP, CHIP_GROUP_LEFT_RESERVE, badge_stack_offset, chip_group_budget, focus_ring_stroke,
+        panel_border_stroke, panel_fill, panel_title_color, panel_titlebar_fill, quick_start_strip_right,
         title_focus_indicator_rect,
     };
 
@@ -778,6 +982,29 @@ mod tests {
     }
 
     #[test]
+    fn chip_group_budget_stops_short_of_the_title() {
+        let titlebar = Rect::from_min_size(Pos2::new(10.0, 0.0), egui::Vec2::new(520.0, 30.0));
+        let close = Rect::from_min_size(Pos2::new(490.0, 6.0), egui::Vec2::new(18.0, 18.0));
+        let collapse = Rect::from_min_size(Pos2::new(466.0, 6.0), egui::Vec2::new(18.0, 18.0));
+        let strip = Rect::from_min_size(Pos2::new(300.0, 5.0), egui::Vec2::new(72.0, 20.0));
+        let budget = chip_group_budget(titlebar, close, collapse, true, Some(strip));
+        let right = strip.min.x - super::STRIP_GAP;
+        assert!((budget - (right - titlebar.min.x - CHIP_GROUP_LEFT_RESERVE)).abs() < 1e-3);
+        // A strip pushed to the very left leaves no room instead of a negative width.
+        let crowded = Rect::from_min_size(Pos2::new(20.0, 5.0), egui::Vec2::new(72.0, 20.0));
+        assert!(chip_group_budget(titlebar, close, collapse, true, Some(crowded)).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn link_badge_offset_adds_the_attention_badge_only_when_it_is_in_the_slot() {
+        assert!(badge_stack_offset(&[], None).abs() < f32::EPSILON);
+        let statuses = badge_stack_offset(&[40.0], None);
+        assert!((statuses - (40.0 + 16.0 + BADGE_STACK_GAP)).abs() < f32::EPSILON);
+        let with_attention = badge_stack_offset(&[40.0], Some(70.0));
+        assert!((with_attention - statuses - (70.0 + 12.0 + BADGE_STACK_GAP)).abs() < f32::EPSILON);
+    }
+
+    #[test]
     fn title_focus_indicator_stays_inside_titlebar() {
         let titlebar_rect = Rect::from_min_max(Pos2::new(10.0, 20.0), Pos2::new(210.0, 54.0));
         let indicator = title_focus_indicator_rect(titlebar_rect);
@@ -786,5 +1013,20 @@ mod tests {
         assert!(titlebar_rect.contains(indicator.max - indicator.size() * 0.01));
         assert!(indicator.width() > 0.0);
         assert!(indicator.height() > 0.0);
+    }
+
+    #[test]
+    fn quick_start_strip_without_a_history_meter_stops_left_of_the_collapse_caret() {
+        let titlebar = Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(600.0, 34.0));
+        let close = Rect::from_center_size(Pos2::new(582.0, 17.0), egui::Vec2::splat(16.0));
+        let collapse = Rect::from_center_size(Pos2::new(560.0, 17.0), egui::Vec2::splat(16.0));
+        let mic = Rect::from_center_size(Pos2::new(538.0, 17.0), egui::Vec2::splat(16.0));
+
+        let without_mic = quick_start_strip_right(titlebar, close, collapse, false);
+        let with_mic = quick_start_strip_right(titlebar, mic, collapse, false);
+
+        assert!(without_mic <= collapse.min.x - 8.0 + f32::EPSILON);
+        assert!(with_mic <= mic.min.x - 8.0 + f32::EPSILON);
+        assert!(quick_start_strip_right(titlebar, close, collapse, true) < close.min.x);
     }
 }

@@ -2,16 +2,20 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::config::{ClaudeProfile, expand_config_dir};
+
+const DEFAULT_BINARY: &str = "claude";
+
 /// Identifies which `claude` account/binary is running inside a shell PTY.
 ///
 /// Both accounts share the same binary; the distinguishing signal is the
 /// `CLAUDE_CONFIG_DIR` environment variable in the process's `/proc/<pid>/environ`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunningAgent {
-    /// `"claude"` for the primary account, `"claude2"` for the secondary account
-    /// (whose `CLAUDE_CONFIG_DIR` ends with `.claude-conta2`).
+    /// Always `"claude"`; accounts are told apart by [`Self::config_dir`].
+    /// Legacy runtime states may still carry `"claude2"`.
     pub binary: String,
-    /// Resolved config directory for this agent (e.g. `~/.claude` or `~/.claude-conta2`).
+    /// Resolved config directory for this agent (e.g. `~/.claude` or `~/.claude-work`).
     pub config_dir: PathBuf,
     /// The session UUID passed to `--resume` when claude was launched, if any.
     ///
@@ -21,35 +25,49 @@ pub struct RunningAgent {
     pub session_id: Option<String>,
 }
 
+/// Default Claude config directory: `<home>/.claude`.
+#[must_use]
+pub fn default_claude_config_dir(home: &Path) -> PathBuf {
+    home.join(".claude")
+}
+
 /// Parse NUL-separated environ bytes, extract `CLAUDE_CONFIG_DIR`, and return
 /// the matching [`RunningAgent`].
 ///
 /// Rules:
-/// - If `CLAUDE_CONFIG_DIR` ends with `.claude-conta2` → `binary = "claude2"`, `config_dir` = that path.
-/// - Otherwise (absent or any other value) → `binary = "claude"`, `config_dir = <home>/.claude`.
+/// - `CLAUDE_CONFIG_DIR` equal to a profile's expanded directory → `config_dir` is
+///   that profile's (normalized) directory.
+/// - Any other non-empty value → `config_dir` = that value.
+/// - Absent or empty → `config_dir = <home>/.claude`.
+///
+/// `binary` is always `"claude"`: profiles differ by config dir, not by binary.
 ///
 /// The function is pure and unit-tested; it never reads the filesystem.
 #[must_use]
-pub fn classify_agent_from_environ(environ: &[u8], home: &Path) -> RunningAgent {
-    let config_dir_value = environ
-        .split(|&b| b == 0)
-        .find_map(|entry| {
-            let entry = std::str::from_utf8(entry).ok()?;
-            entry.strip_prefix("CLAUDE_CONFIG_DIR=")
-        })
-        .map(str::to_owned);
+pub fn classify_agent_from_environ(environ: &[u8], home: &Path, profiles: &[ClaudeProfile]) -> RunningAgent {
+    let config_dir_value = environ.split(|&b| b == 0).find_map(|entry| {
+        let entry = std::str::from_utf8(entry).ok()?;
+        entry.strip_prefix("CLAUDE_CONFIG_DIR=")
+    });
 
-    match config_dir_value {
-        Some(val) if val.ends_with(".claude-conta2") => RunningAgent {
-            binary: "claude2".to_owned(),
-            config_dir: PathBuf::from(val),
+    let Some(value) = config_dir_value.filter(|value| !value.is_empty()) else {
+        return RunningAgent {
+            binary: DEFAULT_BINARY.to_owned(),
+            config_dir: default_claude_config_dir(home),
             session_id: None,
-        },
-        _ => RunningAgent {
-            binary: "claude".to_owned(),
-            config_dir: home.join(".claude"),
-            session_id: None,
-        },
+        };
+    };
+
+    let config_dir = PathBuf::from(value);
+    let config_dir = profiles
+        .iter()
+        .map(|profile| expand_config_dir(&profile.config_dir, home))
+        .find(|expanded| *expanded == config_dir)
+        .unwrap_or(config_dir);
+    RunningAgent {
+        binary: DEFAULT_BINARY.to_owned(),
+        config_dir,
+        session_id: None,
     }
 }
 
@@ -104,6 +122,14 @@ fn is_uuid_like(s: &str) -> bool {
     (32..=128).contains(&len) && s.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
 }
 
+/// A running `claude` process and the account it belongs to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClaudeProcess {
+    /// Pid of the `claude` process itself (the one that owns `<config_dir>/sessions/<pid>.json`).
+    pub pid: u32,
+    pub agent: RunningAgent,
+}
+
 /// Walk the process tree rooted at `child_pid` (the PTY child, typically a
 /// `script` wrapper) until we find a process whose `cmdline` identifies it as a
 /// `claude` CLI invocation, then classify it via [`classify_agent_from_environ`].
@@ -116,24 +142,30 @@ fn is_uuid_like(s: &str) -> bool {
 /// All I/O errors are silently swallowed; the environ is never logged.
 #[cfg(target_os = "linux")]
 #[must_use]
-pub fn detect_running_agent(child_pid: i32) -> Option<RunningAgent> {
+pub fn detect_claude_process(child_pid: i32, profiles: &[ClaudeProfile]) -> Option<ClaudeProcess> {
     let home = home_dir()?;
     let pid = u32::try_from(child_pid).ok()?;
     let claude_pid = find_claude_pid(pid)?;
     let environ = std::fs::read(format!("/proc/{claude_pid}/environ")).ok()?;
-    let mut agent = classify_agent_from_environ(&environ, &home);
+    let mut agent = classify_agent_from_environ(&environ, &home, profiles);
     // Read argv to extract --resume <session-id> if present.
     // IO errors → None (session_id stays None); cmdline contents are never logged.
     if let Ok(cmdline) = std::fs::read(format!("/proc/{claude_pid}/cmdline")) {
         agent.session_id = session_id_from_cmdline(&cmdline);
     }
-    Some(agent)
+    Some(ClaudeProcess { pid: claude_pid, agent })
 }
 
 #[cfg(not(target_os = "linux"))]
 #[must_use]
-pub fn detect_running_agent(_child_pid: i32) -> Option<RunningAgent> {
+pub fn detect_claude_process(_child_pid: i32, _profiles: &[ClaudeProfile]) -> Option<ClaudeProcess> {
     None
+}
+
+/// [`detect_claude_process`] without the pid: which account runs inside the PTY child.
+#[must_use]
+pub fn detect_running_agent(child_pid: i32, profiles: &[ClaudeProfile]) -> Option<RunningAgent> {
+    detect_claude_process(child_pid, profiles).map(|process| process.agent)
 }
 
 // ── private helpers (Linux-only) ────────────────────────────────────────────
@@ -211,7 +243,8 @@ fn cmdline_is_claude(pid: u32) -> bool {
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use super::{classify_agent_from_environ, session_id_from_cmdline};
+    use super::{classify_agent_from_environ, default_claude_config_dir, session_id_from_cmdline};
+    use crate::config::ClaudeProfile;
 
     fn home() -> &'static Path {
         Path::new("/home/x")
@@ -314,34 +347,62 @@ mod tests {
         assert_eq!(session_id_from_cmdline(b""), None);
     }
 
-    // (a) CLAUDE_CONFIG_DIR points to .claude-conta2 → claude2
-    #[test]
-    fn conta2_config_dir_returns_claude2() {
-        let environ = env_bytes(&[("CLAUDE_CONFIG_DIR", "/home/x/.claude-conta2")]);
-        let agent = classify_agent_from_environ(&environ, home());
-        assert_eq!(agent.binary, "claude2");
-        assert_eq!(agent.config_dir, PathBuf::from("/home/x/.claude-conta2"));
+    fn profiles() -> Vec<ClaudeProfile> {
+        [
+            ("claude", "~/.claude"),
+            ("work", "~/.claude-work"),
+            ("conta2", "~/.claude-conta2"),
+            ("lab", "/srv/claude-lab/"),
+        ]
+        .into_iter()
+        .map(|(name, dir)| ClaudeProfile {
+            name: name.to_string(),
+            config_dir: dir.to_string(),
+        })
+        .collect()
     }
 
-    // (b) No CLAUDE_CONFIG_DIR → default claude
     #[test]
-    fn missing_config_dir_returns_default_claude() {
+    fn classify_four_profiles_by_config_dir_env() {
+        let cases = [
+            ("/home/x/.claude", "/home/x/.claude"),
+            ("/home/x/.claude-work", "/home/x/.claude-work"),
+            ("/home/x/.claude-conta2/", "/home/x/.claude-conta2"),
+            ("/srv/claude-lab", "/srv/claude-lab"),
+        ];
+        for (value, config_dir) in cases {
+            let environ = env_bytes(&[("HOME", "/home/x"), ("CLAUDE_CONFIG_DIR", value)]);
+            let agent = classify_agent_from_environ(&environ, home(), &profiles());
+            assert_eq!(agent.binary, "claude", "binary for {value}");
+            assert_eq!(agent.config_dir, PathBuf::from(config_dir), "config_dir for {value}");
+        }
+    }
+
+    #[test]
+    fn classify_without_env_is_default_claude() {
         let environ = env_bytes(&[("HOME", "/home/x"), ("TERM", "xterm-256color")]);
-        let agent = classify_agent_from_environ(&environ, home());
+        let agent = classify_agent_from_environ(&environ, home(), &profiles());
         assert_eq!(agent.binary, "claude");
         assert_eq!(agent.config_dir, PathBuf::from("/home/x/.claude"));
+        assert_eq!(default_claude_config_dir(home()), PathBuf::from("/home/x/.claude"));
     }
 
-    // (c) CLAUDE_CONFIG_DIR is some OTHER path → default claude
     #[test]
-    fn other_config_dir_returns_default_claude() {
+    fn classify_unknown_dir_keeps_claude_binary_with_that_dir() {
         let environ = env_bytes(&[("CLAUDE_CONFIG_DIR", "/tmp/foo")]);
-        let agent = classify_agent_from_environ(&environ, home());
+        let agent = classify_agent_from_environ(&environ, home(), &profiles());
+        assert_eq!(agent.binary, "claude");
+        assert_eq!(agent.config_dir, PathBuf::from("/tmp/foo"));
+    }
+
+    #[test]
+    fn classify_empty_env_value_is_default_claude() {
+        let environ = env_bytes(&[("CLAUDE_CONFIG_DIR", "")]);
+        let agent = classify_agent_from_environ(&environ, home(), &profiles());
         assert_eq!(agent.binary, "claude");
         assert_eq!(agent.config_dir, PathBuf::from("/home/x/.claude"));
     }
 
-    // (d) CLAUDE_CONFIG_DIR interleaved with other vars → still found
     #[test]
     fn interleaved_vars_still_finds_config_dir() {
         let environ = env_bytes(&[
@@ -351,15 +412,14 @@ mod tests {
             ("TERM", "xterm-256color"),
             ("PATH", "/usr/bin:/bin"),
         ]);
-        let agent = classify_agent_from_environ(&environ, home());
-        assert_eq!(agent.binary, "claude2");
+        let agent = classify_agent_from_environ(&environ, home(), &profiles());
+        assert_eq!(agent.binary, "claude");
         assert_eq!(agent.config_dir, PathBuf::from("/home/x/.claude-conta2"));
     }
 
-    // (e) Malformed / empty environ → default claude (no panic)
     #[test]
     fn empty_environ_returns_default_claude() {
-        let agent = classify_agent_from_environ(&[], home());
+        let agent = classify_agent_from_environ(&[], home(), &[]);
         assert_eq!(agent.binary, "claude");
         assert_eq!(agent.config_dir, PathBuf::from("/home/x/.claude"));
     }
@@ -368,7 +428,7 @@ mod tests {
     fn garbage_bytes_returns_default_claude() {
         // Arbitrary non-UTF8 bytes should not panic
         let garbage: Vec<u8> = vec![0xFF, 0xFE, 0x00, 0xAB, 0xCD];
-        let agent = classify_agent_from_environ(&garbage, home());
+        let agent = classify_agent_from_environ(&garbage, home(), &profiles());
         assert_eq!(agent.binary, "claude");
         assert_eq!(agent.config_dir, PathBuf::from("/home/x/.claude"));
     }

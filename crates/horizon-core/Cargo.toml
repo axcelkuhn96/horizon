@@ -10,6 +10,8 @@ repository.workspace = true
 
 [features]
 trace-profiling = ["profiling/profile-with-tracing"]
+# Test-only constructors for downstream crates' unit tests (enabled via dev-dependencies).
+test-support = []
 
 [lints]
 workspace = true
@@ -28,6 +30,7 @@ comrak = { version = "0.54", default-features = false }
 git2.workspace = true
 regex.workspace = true
 ignore.workspace = true
+ureq.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

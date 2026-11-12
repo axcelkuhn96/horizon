@@ -116,6 +116,7 @@ impl HorizonApp {
 
         self.command_palette = None;
         self.remote_hosts_overlay = None;
+        self.hub.claude_launcher = None;
         self.reload_session_manager(None, None);
     }
 
