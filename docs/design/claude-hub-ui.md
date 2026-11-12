@@ -225,3 +225,117 @@ Cada workspace com `cwd` dentro de um repo git ganha, logo abaixo da linha de ca
 - **Interação:** clique em linha de worktree = abre terminal shell com `cwd` = worktree, dentro do workspace (foco no novo painel). Clique no toggle expande/recolhe (estado por workspace em `HubState`, não persistido). Clique na linha git: sem ação. Menu de contexto da linha de worktree (`context_menu_above_sidebar`, itens 12, altura 26): **Open terminal here**; **Open Claude here ▸** (submenu largura 240, perfis `Claude · <perfil>` com dot de `profile_accent`, mesmo cabeçalho do §5); **New workspace from worktree** (cria workspace nomeado pelo branch com cwd da worktree); separador; **Copy path** (caminho absoluto; linha "Copied" 1.5 s). Worktree `prunable` desabilita as 3 primeiras ações.
 - **Tooltip** (linha git ou de worktree, `on_hover_ui_at_pointer`, largura 300, margin 12): branch 13 strong + pílula `current`/`main`/`locked`; caminho absoluto monospace 10.5 `FG_DIM` (quebra no meio); `upstream origin/main · ↑2 ahead · ↓1 behind`; `5 changed files`; `Updated 12 s ago` 10.5 `FG_DIM`; rodapé 10 `FG_DIM`: `Click: open terminal · Right-click: more`.
 - **Cache (nada por frame):** `git2` roda só no `OverviewPoller` (thread própria, 15 s + `refresh_now`). Ao chegar `RepoOverview`, a UI constrói uma vez `GitLineCache { overview_version, branch_label, badges, worktree_rows: Vec<WorktreeRow{label, short_path, tooltip}> }` por workspace e só reconstrói quando `overview_version` muda ou ppp/tema muda. Sem `request_repaint` periódico: o poller acorda a UI uma vez por resultado diferente do anterior (resultados idênticos são descartados). `refresh_now` ao abrir o menu da worktree e ao focar a janela.
+
+---
+
+# Parte F — status, sessões, worktrees, Auto, link 2, prompts, prefs
+
+Convenções: mesmas do §0 (primitivos de `hub_ui`), cores só por funções de `theme.rs` (`FG()`, `FG_SOFT()`, `FG_DIM()`, `ACCENT()`, `PALETTE_GREEN/YELLOW/RED()`, `PANEL_BG()`, `PANEL_BG_ALT()`, `TITLEBAR_BG()`, `blend`, `alpha`). Nada anima continuamente; repaint só em transição de estado ou fade com `request_repaint_after`. Modais do hub: sem `ComboBox` (seletores inline).
+
+## 8. Status do agente (dot) e toasts
+
+Quatro estados, distinguíveis por **forma** além de cor (daltonismo):
+
+| Estado | Forma (raio titlebar 4.5 / sidebar 3.5) | Cor | Tooltip |
+|---|---|---|---|
+| working | anel 1.5 px com ponto central r/3 | `ACCENT()` | `Working…` |
+| waiting | ponto cheio + halo r+2 (stroke 1, `alpha 0.45`) | `PALETTE_YELLOW()` | `Waiting for you` |
+| done | ponto cheio com tick branco 1.2 px | `PALETTE_GREEN()` (esmaecido `alpha 0.55` após o painel ser focado = visto) | `Done — ready for next prompt` |
+| error | ponto cheio com × 1.2 px | `PALETTE_RED()` | `Stopped with an error` |
+
+Unknown/sem agente: **nada** é pintado (zero largura).
+
+- **Titlebar:** o dot fica à esquerda do botão "✳ Claude ▾" (T21) e do medidor de histórico; gap 6; hit-rect 16x16 só para tooltip (sem clique). Se o badge de ssh/exit/mensagem ocupa o lugar, o dot vem primeiro (mais à esquerda).
+- **Sidebar:** o dot substitui o ícone de kind **não** — vai logo antes do texto secundário à direita (coluna fixa 12 px, alinhada em todas as linhas do workspace), para a linha não "pular" quando o estado muda. Workspace recolhido: o dot de maior prioridade entre seus painéis (waiting > error > working > done) ao lado da contagem `(4)`.
+- **Toast** (canto inferior direito, 12 px das bordas, largura 320, `Order::Tooltip`, máx. 3 empilhados, gap 6, TTL 6 s, hover pausa o relógio; fill `PANEL_BG_ALT()`, stroke 1 `alpha(FG_DIM(), 90)`, raio 8, barra esquerda 3 px na cor do tipo): linha 1 título 12 strong `FG()` (`conta2 · api-core needs you` / `conta2 · api-core finished`), linha 2 10.5 `FG_DIM()` (primeira linha do `Notification`/"Ready for next prompt"); clique no toast foca o painel e fecha; `✕` 14 px aparece no hover; Esc não fecha (não rouba foco). Aparecem só se o painel não está focado/visível. Entrada também cria `AttentionItem` (aparece no painel de atenção existente) e some quando o painel volta a `working`.
+- **Estados:** vários toasts do mesmo painel/estado são deduplicados; tipos `Info` (accent), `Warn` (`PALETTE_YELLOW`), `Error` (`PALETTE_RED`).
+
+## 10. Sessões recentes do Claude
+
+Modal 560 (frame de modal, scrim), aberto por: item **Recent Claude sessions…** do menu do workspace, `Claude: Recent sessions…` na palette e **Recent sessions…** no launcher/popup do T21.
+
+```
+┌───────────────────────────────────────────────────────────┐
+│ Recent Claude sessions            api-core · 14 sessions  │ header 44h
+├───────────────────────────────────────────────────────────┤
+│ [ filter…                                    ]            │ 28h, foco inicial
+│▌Fix login redirect on expired tokens                      │ linha 44h
+│  ● conta2   2 h ago   ⎇ feat/login   1.2 MB               │
+│ Refactor billing client                                   │
+│  ● conta1   yesterday                                     │
+│ Investigate flaky e2e                          ? unknown  │
+│  — account unknown   Nov 8                                │
+├───────────────────────────────────────────────────────────┤
+│ [Esc] close   ↑↓ select   Enter resume    [Resume here][Resume]│
+└───────────────────────────────────────────────────────────┘
+```
+- **Linha (44h, 2 linhas):** título 12 `FG()` (summary ou primeiro prompt, controle removido, truncado com `hub_ui::elided`); linha 2 10.5 `FG_DIM()`: dot de `profile_accent` + nome da conta, data relativa (`just now`, `5 min ago`, `2 h ago`, `yesterday`, `Nov 8`), branch/cwd relativo se o projeto é um worktree, tamanho. Conta desconhecida: pílula `account unknown` `FG_DIM` e dot hueco. Selecionada: fill `blend(PANEL_BG_ALT(), ACCENT(), 0.22)` + barra 3 px; hover 0.12.
+- **Lista:** altura máx. 320 com scroll, mais recentes primeiro, teto 200; scroll preguiçoso (linhas fora da tela não calculam galley); strings/galleys cacheados por `scan_version`. Carregando: 3 linhas esqueleto `FG_DIM` alpha 0.15 (sem animação); vazio: `No Claude sessions for this project yet` centralizado `FG_DIM`; erro de leitura: linha `PALETTE_RED` 11 sem detalhe de conteúdo.
+- **Ações:** **Resume** (primário 30h) abre **novo painel** com a conta da sessão; **Resume here** (secundário) escreve o comando no shell ativo; Enter = Resume, Shift+Enter = Resume here; duplo clique = Resume.
+- **Conta desconhecida:** o botão vira o passo inline "Which account?": faixa de chips (um por perfil, 28h, dot + nome, `1–9` atalho) no lugar do footer; escolha grava o índice e continua o resume. Sem ComboBox.
+
+## 11. Worktrees: criar com Claude e limpeza
+
+**Entradas:** menu do workspace e da linha git (§5/§7): **New worktree + Claude…**; menu da linha de worktree: **Remove worktree…** (desabilitado se `safe()` falso, com tooltip do bloqueio); menu da seção worktrees (cabeçalho do toggle): **Clean up worktrees…**.
+
+**Diálogo New (modal 480):**
+```
+┌──────────────────────────────────────────────────┐
+│ New worktree + Claude              api-core      │
+├──────────────────────────────────────────────────┤
+│ Branch  [ feat/new-thing                  ]      │ TextEdit 28h, foco inicial
+│  existing: fix/login · chore/deps · release/2.1   │ chips clicáveis (máx. 6, filtro)
+│ From    [ HEAD ▪ main ]  (segmented 2 opções)    │ só se o branch não existe
+│ Path    ../api-core-feat-new-thing   (editável)   │ 10.5 monospace FG_DIM + lápis
+│ Account [Auto][conta1][conta2]                    │ chips inline; Auto = T26
+│ [x] also open as a workspace                      │
+│ <erro de validação / branch já em uso>           │ 11 PALETTE_RED
+│ [Esc]                       [Create + open Claude]│
+└──────────────────────────────────────────────────┘
+```
+- Validação inline enquanto digita (nome inválido, branch já checked out em `<path>`, destino existente); botão primário desabilitado com tooltip do motivo. Criar roda em worker: botão vira "Creating…" (spinner estático de 3 pontos, sem repaint contínuo) e o diálogo trava Esc só até terminar. Sucesso → fecha, abre o painel Claude no worktree e toast `Info`; erro → permanece com a linha vermelha.
+
+**Diálogo Cleanup (modal 560):**
+```
+┌───────────────────────────────────────────────────────────┐
+│ Clean up worktrees                         api-core       │
+│ Only clean, unlocked worktrees can be removed.            │ 10.5 FG_DIM
+├───────────────────────────────────────────────────────────┤
+│ [x] ../api-core-fix-login   fix/login        [merged]     │ linha 40h
+│ [x] ../api-core-old         (dir missing)     [prunable]  │
+│ [ ] ../api-core-wip         feat/wip     ● dirty  blocked │ desabilitada, alpha 0.55
+│ [ ] ../api-core-pin         chore/x      🔒 locked blocked │
+│ [ ] ../api-core-hub         feat/hub     in use  blocked  │
+├───────────────────────────────────────────────────────────┤
+│ [x] also delete merged branches                           │
+│ [Esc]                        [ Remove 2 worktrees ]       │ botão destrutivo PALETTE_RED
+└───────────────────────────────────────────────────────────┘
+```
+- Pílulas de motivo (`pill`): `merged` `PALETTE_GREEN`, `prunable` `FG_DIM`, `orphan` `PALETTE_YELLOW`; bloqueios: `dirty` (dot `PALETTE_YELLOW`), `locked` (cadeado pintado), `in use` (workspace/painel aberto), `unreachable commits`, `main` nunca aparece. Linhas bloqueadas: checkbox desabilitado, tooltip com o motivo exato; **nada bloqueado pode ser marcado**. Marcados por padrão: só `safe()`. Caminho absoluto completo no tooltip da linha. Botão mostra a contagem e fica desabilitado com 0 marcados. Depois de remover: resumo `Removed 2, kept 1 (became dirty)` (a reclassificação no momento da remoção pode manter itens) como linha final + toast; refresh imediato do poller.
+
+## 12. Conta Auto e alerta de uso
+
+- **Linha Auto** (topo do launcher, do popup T21 e do chip de conta do §11): mesma geometria das linhas de perfil (§2), ícone ✳ pintado em `ACCENT()` com pequeno raio de "estrela" no canto, nome `Auto`, e texto secundário cacheado `→ conta2 · 66% left` (`FG_DIM`, 10.5; `PALETTE_YELLOW` se o escolhido tem < 20% sobrando). Atalho `0` (perfis seguem `1–9`). Sem perfil utilizável: linha desabilitada, `alpha 0.55`, secundário `No account available`, tooltip lista por perfil o motivo (`expired`, `no login`). O destino é reavaliado **no clique**; a linha só informa.
+- **Toast de alerta** (§8, tipo Warn/Error): título `conta1 · 80% of weekly limit` (80: barra `PALETTE_YELLOW`; 90: barra e texto do %% `PALETTE_RED`), linha 2 `Resets in 2d 4h · switch to Auto?` com link-texto `Open launcher` (abre o launcher; não troca nada sozinho). Uma vez por cruzamento; sem som. TTL 8 s.
+
+## 13. Link nível 2
+
+- **Send to all Claudes:** no diálogo Send (§6) a primeira linha da lista é `All Claudes in <workspace> (3)` com ícone de grupo (3 pontos pintados) e pílula `broadcast` `FG_DIM`; ao selecioná-la o campo de alvos mostra a lista dos nomes (10.5 `FG_DIM`, truncada com `+N`). Footer: `Send to 3` no lugar de `Send`. Com 0 alvos a linha é omitida. Resultado: toast `Sent to 3 · skipped 1 (not an agent)`.
+- **Ask:** o `horizon link ask` não tem UI própria; no painel **solicitante** aparece um badge `asking <alvo>…` (geometria do badge §6, cor `PALETTE_YELLOW`, sem animação) até a resposta/erro; no **alvo** o badge `from <nome>` do §6 ganha prefixo `ask`. Reply recebido: o badge do solicitante vira `reply from <alvo>` por 2.3 s + fade.
+- **Linha visual transitória** (camada de canvas, abaixo da titlebar dos painéis, acima do fundo): curva de Bézier suave (controle puxado 40% na horizontal) entre as bordas mais próximas dos dois painéis (clipada na borda, não no centro), stroke 1.5 px `alpha(ACCENT(), 170)`, ponta de seta 6 px no destino; `reply` em `PALETTE_GREEN`. Tempo: 0–2.3 s opaca, 2.3–3.0 s fade; ask pendente permanece estática (tracejada 6/4) até resolver, depois some em 0.7 s. Máximo 8 linhas simultâneas (excedentes não pintam); entre workspaces diferentes não há linha. Tooltip: nenhum (não interativa).
+
+## 14. Prompts salvos
+
+- **Palette:** entradas `Prompt: <nome>` (ícone de aspas pintado; escopo no hint à direita: `workspace` `ACCENT` ou `global` `FG_DIM`); workspace primeiro. Enter insere **sem** Enter no terminal focado; Ctrl+Enter insere e envia. Sem terminal focado: toast `Warn` "Focus a terminal first".
+- **Popup do T21:** abaixo da lista de perfis, separador e linha `Insert prompt ▸` (mesma altura 32); abre uma lista no mesmo popup (passo 3, mesmas regras de teclado: ↑↓ Enter Esc, `1–9`), cada linha com nome 12 `FG()` e primeira linha do texto 10.5 `FG_DIM` (truncada); rodapé `Enter insert · Ctrl+Enter insert & send`. Oculta se não há prompts.
+- **Settings:** seção **Saved prompts** no fim de Settings → Claude (globais) e **Prompts** no editor de cada workspace em Settings → Workspaces. Layout por linha (cartão 8 px de padding, raio 6, fill `PANEL_BG_ALT()`): `TextEdit` do nome (28h, 160 de largura) + botão `✕` (icon_button, tooltip "Delete prompt") na mesma linha; abaixo `TextEdit` multilinha monospace 11.5, 3 linhas (cresce até 8) para o texto; contador `n / 8192` 10 `FG_DIM` à direita; erro inline 11 `PALETTE_RED` (`Name already used`, `Too long`). Botão `+ Add prompt` (secundário) ao fim; reordenar não é necessário (ordem de criação). Sem ComboBox, sem modal.
+
+## 15. Minimap: auto-hide e persistência
+
+- **Auto-hide:** como a sidebar (`overlays.sidebar_auto_hide`): com a opção ligada o minimap fica oculto (zero pixels, sem repaint) e **revela** quando o ponteiro entra na zona do minimap expandida em 16 px (canto onde ele fica); entra com fade de 120 ms (alpha 0→1) e sai 600 ms depois que o ponteiro deixa a zona (fade 160 ms). Arrastar/clicar dentro mantém aberto. O atalho `toggle_minimap` continua o interruptor mestre: minimap oculto manualmente não revela por hover. Indicador de revelação: linha fina 2 px `alpha(ACCENT(), 90)` de 48 px no canto (hit-zone visível) só quando oculto por auto-hide, para o usuário saber onde apontar; some quando o minimap está aberto.
+- **Settings → General:** checkbox `Minimap auto-hide` ao lado de `Sidebar auto-hide`, mesma linha de ajuda 10.5 `FG_DIM` ("Show the minimap only when the pointer is near it").
+- **Persistência:** minimap/HUD ligados ou desligados pelo atalho ou pelo menu das viewports destacadas voltam como estavam ao reabrir; sem UI própria.
+
+## 16. Rename de painel (referência)
+
+Sem visual novo: duplo clique na titlebar já abre o editor inline (§existente); na sidebar o duplo clique numa linha de painel abre o mesmo editor inline sobre a linha (altura 26, `TextEdit` com a mesma fonte do rótulo, Enter confirma, Esc cancela, vazio/só espaços descarta). O nome custom aparece em sidebar, badge do §6, diálogo Send e `horizon link list`.

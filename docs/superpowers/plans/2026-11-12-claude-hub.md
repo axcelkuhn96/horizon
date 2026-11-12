@@ -567,3 +567,264 @@ T3+T18 ─ T19 (sidebar git line + worktrees; after T12 and T16 in file order)  
 8. **Config compatibility (S9)** — every new field is `serde(default)` and skipped when empty; no migration; a test per field asserts old YAML loads and round-trips without noise.
 9. **Resume signature changes (Task 4)** — callers of `live_claude_session_ids`/`classify_agent_from_environ` span core and UI; `cargo test --workspace` after the change is the safety net, and the panel's config dir defaults to `~/.claude` so non-profile panels behave as before.
 10. **Scope** — large (20 tasks). If the session runs out, stop after a part boundary (A, C, B, D, E are independently shippable in that order; E needs A's T3 for "Open Claude here"); `/mapear` was the alternative.
+
+---
+
+## Part F — Status, sessões, worktrees, Auto, link nível 2, prompts, prefs, rename
+
+Extensão pedida pelo usuário após o smoke. Mesmas regras de `## Global Constraints` e dos controller rulings vigentes: build liberado (UM processo cargo por worktree, `CARGO_BUILD_JOBS=4`, `free -g` ≥ 4 GB antes); por task: teste focado RED→GREEN, `cargo fmt --all -- --check`, e ao final da task `RUSTFLAGS="-D warnings" cargo test --workspace` + os dois tiers de clippy bloqueantes (`cargo clippy --all-targets --features trace-profiling -- -D warnings` e `cargo clippy --workspace --lib --bins --examples -- -D warnings -D clippy::unwrap_used -D clippy::expect_used`; sem `--features speech` local, anotar no report). Estado novo da UI vive em `HubState` (nunca campos soltos em `app/mod.rs`); sem `ComboBox` em modais do hub (seletores inline); nunca commitar `.superpowers/` nem `Cargo.lock`; nenhum `unwrap`/`expect` em runtime; segredos/prompt do usuário nunca logados. Visual: `docs/design/claude-hub-ui.md` §8–§14, constantes por nome de `theme.rs` (se faltar constante, derivar com `theme::blend`/`theme::alpha` de uma existente; não editar `theme.rs`). Commits terminam com `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
+
+**Pré-condição da Parte F:** T21 (titlebar do painel: `panel_chrome.rs`, `panels.rs`, `claude_quick_start.rs`) e T22 (sidebar: `sidebar.rs`, `sidebar/*`) mergeados em `feat/claude-hub`. Só T27 e T29 (wave F1) não dependem deles e podem ser cortados enquanto T21/T22 ainda estão em worktree.
+
+**F8 (painéis novos nunca se sobrepõem):** tratado pelo smoke T17 em curso; esta parte só referencia. Os painéis criados por T24/T25 (resume, Claude no worktree) usam o mesmo caminho de criação de painel já validado pelo T17, sem posicionamento próprio.
+
+### Mapa F-item → task
+
+| Item | Task | Domínio |
+|---|---|---|
+| F1 status por painel | T23 | OSC `HORIZON_STATUS`, hooks do plugin, dot, toast |
+| F2 sessões recentes | T24 | scanner JSONL + índice de contas + lista/resume |
+| F3 worktree + Claude, limpeza | T25 | git2 ops + diálogos |
+| F4 conta Auto + alertas de uso | T26 | seleção pura + rastreador de cruzamento |
+| F5 link nível 2 | T27 | broadcast, ask/reply, linha visual |
+| F6 prompts salvos | T28 | config + inserção + Settings |
+| F7 prefs de UI + minimap auto-hide | T29 | runtime_state + overlay |
+| F9 rename do painel | T30 | auditoria + nome custom em sidebar/link |
+
+---
+
+### Task 23: Status do agente por painel — hooks, OSC, dot e notificação (domínio: frontend, integracao; tipo: regra-de-negocio (núcleo) + ui; review: seguranca)
+
+**Contexto verificado:** `terminal/events.rs` já interpreta `Event::Title` com prefixo `HORIZON_NOTIFY:`/`HORIZON_TITLE:` (`Terminal::parse_horizon_title` → `HorizonOscTitle::{Notification,SetTitle,ClearTitle,Ignore}`) e `attention.rs` já tem `AttentionItem`/`is_agent_ready_for_input`. O plugin Claude (`HorizonHome::claude_plugin_dir()`, embutido em `plugin_install.rs`) hoje só tem skills; o plugin pode trazer `hooks/hooks.json`. Sem polling: o estado é empurrado pelo hook.
+
+**Files:**
+- Create: `crates/horizon-core/src/agent_status.rs` (`AgentStatus`, `StatusEvent`, parse, regras de transição, política de atenção) — lib.rs: **uma linha** `pub mod agent_status;` (T23 é o dono de `lib.rs` na wave F2)
+- Create: `crates/horizon-ui/src/hook_cli.rs` (subcomando `horizon hook <evento>`), `assets/plugins/claude-code/hooks/hooks.json.tmpl` (modelo; o instalador renderiza com o caminho absoluto do executável)
+- Create: `crates/horizon-ui/src/app/agent_status_ui.rs` (paint do dot, helpers puros)
+- Modify: `terminal/events.rs` + `terminal.rs` (novo `HorizonOscTitle::Status`, campo `pending_status` drenável), `panel.rs` + novo `panel/agent_status.rs` (campo `agent_status: AgentStatusState`, `apply_status_event`, `clear_on_exit`; panel.rs só ganha o campo e uma chamada — a lógica vai ao módulo novo), `main.rs` (despacho `argv[1]=="hook"` antes do eframe, junto do `link`), `plugin_install.rs` (renderizar/sincronizar `hooks/hooks.json`), `app/panel_chrome.rs` e `app/panels.rs` (somente call site do dot na titlebar, à esquerda do medidor de histórico/botão Claude), `app/sidebar/rows.rs` (dot na linha do painel; **não** tocar `sidebar.rs`), `app/hub_state.rs` (um campo `status_ui: StatusUi`), `app/lifecycle.rs` só se a drenagem de toasts precisar de um ponto por frame (preferir o ponto existente de drenagem de atenção)
+- Test: inline nos módulos novos; `crates/horizon-core/tests/agent_status.rs` para transições
+
+**Interfaces:**
+- Produces (core): `pub enum AgentStatus { Unknown, Working, Waiting, Done, Error }`; `pub struct StatusEvent { pub state: AgentStatus, pub session_id: Option<String> }`; `pub fn parse_status_osc(body: &str) -> Option<StatusEvent>` para `HORIZON_STATUS:<working|waiting|done|error|idle|end>[:<session_id>]` (estado desconhecido/`session_id` fora de `[A-Za-z0-9-]{8,64}` → `None`, ignorado; nunca panic); `pub fn attention_policy(prev, next, panel_focused) -> StatusAttention` (`None | Notify{severity}`: `Waiting` → `High`, `Done` após `Working` → `Medium`, `Error` → `High`; sem atenção se o painel está focado/visível ou se `prev == next`); `Panel::agent_status() -> AgentStatus`, `Panel::take_status_event()`; ao sair do processo/`agent_detect` perder o agente → `Unknown` (sem timer); `end` → `Unknown`; restore de sessão → `Unknown` (status não é persistido)
+- Produces (ui): `horizon hook <working|waiting|done|error|session-start|session-end>`: lê stdin (≤ 64 KiB, JSON, só extrai `session_id`, ignora o resto, nada logado), exige `HORIZON_PANEL_ID` no env (senão sai 0 em silêncio — protege Claude fora do Horizon), abre `/dev/tty` e escreve `ESC ] 2 ; HORIZON_STATUS:<estado>[:<session_id>] BEL`; **sempre exit 0** e termina em < 100 ms; sem `/dev/tty` → exit 0 sem efeito (cfg(unix); no-op nas outras plataformas); `pub fn render_hooks_json(exe: &Path) -> String` (caminho com aspas simples seguras, JSON válido; eventos `UserPromptSubmit`/`PreToolUse`→working, `Notification`→waiting, `Stop`→done, `StopFailure`→error, `SessionStart`/`SessionEnd`; `timeout: 5`); `agent_status_ui::paint_status_dot(painter, center, radius, status, seen)` + `status_label(status) -> &'static str` (tooltip/a11y)
+- Consumes: `HubToasts` (criado pelo T27 na F1), `AttentionItem` (fonte `"claude-status"`, resolve no próximo `Working`), `PanelChrome` (T21), rows (T22), `claude_plugin_dir()`/`sync_file_if_changed` (T15)
+
+- [ ] **Step 1: Failing tests (core):** `parse_status_accepts_known_states`, `parse_status_rejects_unknown_state_and_bad_session_id`, `parse_status_oversized_body_is_ignored`, `working_then_done_notifies_medium_when_unfocused`, `waiting_notifies_high`, `focused_panel_does_not_notify`, `same_state_twice_is_deduped`, `process_exit_resets_to_unknown`, `done_marks_unseen_until_panel_focused`, `status_osc_does_not_break_horizon_notify_title_parsing` (regressão dos testes existentes de `parse_horizon_title`), `terminal_event_status_populates_pending_status`.
+- [ ] **Step 2: Failing tests (ui):** `render_hooks_json_is_valid_json_and_quotes_exe_with_spaces_and_quotes`, `render_hooks_json_maps_events`, `plugin_install_writes_rendered_hooks_json`, `plugin_install_hooks_json_updates_when_exe_path_changes`, `hook_cli_parses_session_id_from_stdin_json`, `hook_cli_ignores_malformed_stdin`, `hook_cli_noop_without_panel_id_env`, `hook_osc_bytes_match_protocol`, `status_dot_shape_per_state_is_distinct` (geometria pura: working=anel, waiting=ponto+halo, done=ponto+tick, error=ponto+x).
+- [ ] **Step 3:** `CARGO_BUILD_JOBS=4 cargo test -p horizon-core agent_status` e `-p horizon-ui hook_cli agent_status_ui hub_toast plugin_install` — FAIL (RED).
+- [ ] **Step 4:** Implementar núcleo → CLI/hooks → dot/toast. Eventos de status entram pelo mesmo ponto de drenagem das notificações (`Notification`→atenção): nenhuma thread, nenhum timer. Toast e `AttentionItem` só quando `attention_policy` manda (não spammar: `PreToolUse` repete `Working` → dedupe). Dot: titlebar 4.5 px de raio, sidebar 3.5 px, conforme §8.
+- [ ] **Step 5:** mesmos filtros — PASS (GREEN); fmt; `RUSTFLAGS="-D warnings" cargo test --workspace`; os dois clippy; `node ~/.claude/scripts/gate-seguranca.js` (stdin externo, escrita em `/dev/tty`, JSON do hook: tamanho, tipo, sem eco do conteúdo).
+- [ ] **Step 6:** Verificação real (Task 17 ampliado): iniciar Claude num painel Horizon com o plugin, enviar prompt, ver working→done; disparar permissão, ver waiting + toast + atenção; sair do Claude, ver dot sumir. Screenshot por PID em `.superpowers/sdd/2026-11-12-claude-hub/task-23-visual/`. Claude iniciado manualmente **sem** `--plugin-dir` não reporta status (limitação documentada no report e no skill).
+- [ ] **Step 7:** Commit `feat(ui): per-panel agent status via Claude hooks with dot and toast`.
+
+---
+
+### Task 24: Sessões recentes do Claude por projeto/workspace e resume em 1 clique (domínio: frontend, integracao; tipo: regra-de-negocio (núcleo) + ui; review: seguranca)
+
+**Contexto verificado:** transcripts ficam em `~/.claude/projects/<cwd codificado>/*.jsonl`, compartilhados entre todas as contas por symlink (`usage_stats/claude.rs` já varre esse diretório); logo o caminho **não** diz qual conta rodou a sessão — a atribuição vem de um índice próprio do Horizon. `runtime_state/claude_live_sessions.rs` e `agent_sessions.rs` já ligam painel↔session id; T23 passa a entregar o `session_id` via `HORIZON_STATUS`.
+
+**Files:**
+- Create: `crates/horizon-core/src/claude_sessions/{mod,scan,index,cache}.rs`; `crates/horizon-ui/src/app/claude_sessions.rs` (modal + helpers) e `app/claude_sessions/rows.rs` se > ~500 linhas
+- Modify: `lib.rs` (uma linha `pub mod claude_sessions;`; T24 é o dono de `lib.rs` na wave F4), `app/hub_state.rs` (campo `sessions_ui: SessionsUi`), `app/lifecycle.rs` (registrar `session_id` do `StatusEvent` no índice — chamada, não lógica), `app/claude_quick_start.rs` (passo "Resume…" ganha "Recent sessions…"; novo modo `ResumeId(String)` em `quick_start_command` + teste), `app/claude_launcher.rs` (entrada "Recent sessions…"), `app/sidebar/workspace_menu/*` (item **Recent Claude sessions…** — dono único na wave F4), `app/actions/command_palette.rs` (entrada `Claude: Recent sessions…`; dono único na F4)
+- Test: inline + `crates/horizon-core/tests/claude_sessions.rs` (projeto temporário com JSONL sintéticos)
+
+**Interfaces:**
+- Produces (core): `pub fn encode_project_dir(cwd: &Path) -> String` (todo caractere fora de `[A-Za-z0-9]` vira `-`; **validar o algoritmo contra os diretórios reais de `~/.claude/projects` no Step 1** e fixar a amostra no teste); `pub struct SessionSummary { id: String, title: String, first_prompt: String, updated: SystemTime, size: u64, cwd: PathBuf, account: SessionAccount }`; `pub enum SessionAccount { Profile(String), Unknown }`; `pub struct SessionScanner` (thread única + `mpsc`, como `OverviewPoller`): `request(project_dirs: Vec<PathBuf>)`, `try_recv() -> Option<ScanResult>`; leitura **lazy**: lista por `read_dir` + mtime, e só lê o **início** (≤ 64 KiB) de cada JSONL novo/alterado para título (`summary` do Claude se existir) e primeiro prompt do usuário (ignora linhas `isMeta`, `<command-…>`, `<local-command-…>`, tool results), cache por `(path, mtime, len)`, teto de 200 sessões por projeto (mais recentes) e 1 000 por varredura; linhas inválidas/arquivo truncado/UUID inválido → pula, nunca panic; nada de conteúdo em log
+  - `pub struct AccountIndex` em `~/.horizon/claude-session-accounts.json` (`{"version":1,"sessions":{"<uuid>":{"profile":"conta2","config_dir":"/home/u/.claude-conta2","ts":1731400000}}}`): `load(path)`, `record(session_id, profile, config_dir, ts)`, `lookup(id) -> Option<&Entry>`, `save_atomic()` (tmp+rename, modo 0600, teto 5 000 entradas descartando as mais antigas), tolera arquivo ausente/corrompido (começa vazio, renomeia o corrompido para `.bad`), gravação fora da thread de UI (writer em thread própria com canal)
+  - `pub fn resume_command_args(session_id: &str) -> Result<Vec<String>, SessionError>` (`["--resume", id]`, id deve ser UUID — rejeita qualquer outra coisa antes de montar comando)
+- Produces (ui): `SessionsUi` (estado do modal; lista cacheada por `scan_version`), `fn open_sessions(workspace)`; modal §10; "Resume" cria **novo painel** com preset derivado do perfil + `--resume <id>` e `cwd` do projeto (mesmo caminho de "Open Claude here" do T19/T25; F8 garante posicionamento), ou "Resume here" que escreve o comando no shell ativo via `quick_start_command(..., ResumeId)` (T21); conta `Unknown` → passo inline "Which account?" (chips de perfis, sem ComboBox) antes do resume, e a escolha grava no índice (`record`)
+- Consumes: `StatusEvent.session_id` (T23), `ClaudeProfile`/presets derivados (T1/T3), `git_overview` (worktrees do repo também entram na lista: dirs codificados de cada worktree), `HubToasts` (T27)
+
+- [ ] **Step 1: Failing tests (core):** `encode_project_dir_matches_real_claude_dirs` (amostras reais `/home/axcel/horizon-fork` → `-home-axcel-horizon-fork`, `/a/b.c/d_e`), `scan_lists_sessions_newest_first`, `scan_title_prefers_summary_then_first_user_prompt`, `scan_skips_meta_and_command_lines`, `scan_reads_only_head_bytes`, `scan_cache_hit_when_mtime_and_len_unchanged`, `scan_cache_invalidates_on_mtime_change`, `scan_tolerates_truncated_and_binary_lines`, `scan_caps_sessions_per_project`, `scan_ignores_non_uuid_filenames`, `index_roundtrip_and_mode_0600`, `index_corrupt_file_starts_empty_and_renames_bad`, `index_caps_entries_dropping_oldest`, `index_atomic_save_leaves_no_partial_file`, `resume_args_reject_non_uuid_and_injection`, `account_attribution_uses_index_else_unknown`.
+- [ ] **Step 2: Failing tests (ui):** `quick_start_command_resume_id_quotes_dir_and_validates_uuid`, `session_row_label_sanitizes_control_chars_and_truncates`, `relative_date_label_buckets` (`just now`, `5 min`, `yesterday`, data), `sessions_list_cache_rebuilds_only_on_scan_version`, `unknown_account_requires_account_pick_before_resume`.
+- [ ] **Step 3:** `CARGO_BUILD_JOBS=4 cargo test -p horizon-core claude_sessions` / `-p horizon-ui claude_sessions claude_quick_start` — RED.
+- [ ] **Step 4:** Implementar núcleo → índice → UI. A varredura só dispara ao abrir o modal (e em focus do modal ao mudar de workspace); resultado volta por canal; a UI nunca lê disco por frame.
+- [ ] **Step 5:** GREEN; fmt; `RUSTFLAGS="-D warnings" cargo test --workspace`; clippy ×2; `node ~/.claude/scripts/gate-seguranca.js` (JSONL do usuário é input não confiável: limites de leitura, sanitização do prompt exibido, UUID estrito no comando, índice 0600).
+- [ ] **Step 6:** Verificação real: criar 2 sessões em contas diferentes pelo Horizon, abrir o modal, ver conta atribuída; sessão antiga sem índice → pede conta; resume abre painel com `--resume`. Screenshot por PID em `.superpowers/sdd/2026-11-12-claude-hub/task-24-visual/`.
+- [ ] **Step 7:** Commit `feat(ui): recent Claude sessions per workspace with one-click resume`.
+
+---
+
+### Task 25: Worktree + Claude em 1 clique e limpeza segura (domínio: frontend; tipo: regra-de-negocio (núcleo) + ui; review: seguranca)
+
+**Contexto verificado:** `git_overview` (T18) já lista worktrees com `dirty_count`, `locked`, `prunable`, `is_main`, `is_current` via git2 no poller; T19/T22 deram a linha git/menus na sidebar. Aqui entram **operações** (criar/remover) — sempre em thread de trabalho, nunca na UI, nunca shell-out.
+
+**Files:**
+- Create: `crates/horizon-core/src/git_overview/worktree_ops.rs` (+ `worktree_ops/tests.rs` se > ~500 linhas), `crates/horizon-ui/src/app/worktree_dialog.rs` (modais New/Cleanup)
+- Modify: `git_overview/mod.rs` (declara o módulo; **sem** `lib.rs`), `app/hub_state.rs` (campo `worktree_ui: WorktreeUi`), `app/sidebar.rs` (**dono único na F2**: `SidebarActions` + `apply_sidebar_actions` para as novas ações), `app/sidebar/git_overview/*` (itens de menu na linha git e na linha de worktree; `paint.rs` só se o menu exigir), `app/sidebar/workspace_menu/*` (itens **New worktree + Claude…** e, se T27 já mergeou, **Send to all Claudes…** abrindo `SendToPanelState::open_for_workspace`), `app/lifecycle.rs` (drenar resultados do worker de ops; chamada apenas)
+- Test: inline; `crates/horizon-core/tests/worktree_ops.rs` com repos temporários git2
+
+**Interfaces:**
+- Produces (core): `pub fn plan_worktree_path(main_root: &Path, branch: &str, exists: impl Fn(&Path) -> bool) -> PathBuf` (irmão do repo: `<repo>-<slug(branch)>`, `/`→`-`, sufixo `-2`,`-3` se existir); `pub fn validate_branch_name(name: &str) -> Result<(), WorktreeError>` (`git2::Branch::name_is_valid`, rejeita vazio, prefixo `-`, `..`, controle, > 200); `pub fn create_worktree(repo_root: &Path, req: &CreateRequest) -> Result<Created, WorktreeError>` (`CreateRequest { branch, base: Option<String>, path: PathBuf }`; branch existente não ocupada → checkout dela; existente já ocupada em outro worktree → `BranchCheckedOut{path}`; inexistente → cria de `base` (padrão HEAD) e faz o worktree; destino existente → erro; falha após criar o branch → remove o branch criado por nós, sem deixar lixo); `pub fn classify_cleanup(repo_root: &Path, protected_paths: &[PathBuf]) -> Result<Vec<CleanupCandidate>, WorktreeError>`; `pub struct CleanupCandidate { path, branch, reason: CleanupReason, blockers: Vec<Blocker> }` com `CleanupReason::{Merged, Prunable, Orphan}` (Merged = ponta do branch é ancestral do branch padrão — `origin/HEAD` → `main`/`master` — ou do upstream; Prunable = git2 `is_prunable`; Orphan = registrado mas branch deletado e árvore limpa) e `Blocker::{Dirty, Locked, Main, ProtectedByWorkspace, UnreachableCommits, DefaultBranchUnknown}`; **`safe() == blockers.is_empty()`**; `pub fn remove_worktrees(repo_root: &Path, items: &[PathBuf], delete_merged_branches: bool) -> Vec<RemoveOutcome>` — **reclassifica cada item imediatamente antes de remover** (TOCTOU: dirty/locked entre o diálogo e o clique), recusa caminho que não esteja em `repo.worktrees()` (canonicalizado) ou que seja o principal, usa `WorktreePruneOptions` sem `locked(true)`/`valid(true)` forçados, apaga branch só se `Merged` e a flag está ligada, uma falha não aborta os demais; **nunca** apaga worktree dirty/locked mesmo se o chamador pedir
+- Produces (ui): `WorktreeUi` (estado dos modais, worker via thread + `mpsc`, resultados com cap por frame); `fn open_new_worktree(workspace, branch_hint)`; ação "criar + abrir Claude": após `Created`, abre painel Claude com preset derivado (conta escolhida inline; "Auto" entra com T26) com `cwd` = worktree, opcional "also create workspace" (padrão ligado quando o worktree está fora do cwd do workspace); `HubToasts` para sucesso/erro
+- Consumes: `RepoOverview`/`WorktreeInfo` (T18), `OverviewPoller::refresh_now` (T19) após cada operação, ações "Open Claude here" (T19), `HubToasts` (T27), `SendToPanelState::open_for_workspace` (T27, opcional)
+
+- [ ] **Step 1: Failing tests (core):** `plan_path_is_sibling_with_slugged_branch`, `plan_path_appends_suffix_when_taken`, `validate_branch_rejects_bad_names`, `create_checks_out_existing_branch`, `create_new_branch_from_base`, `create_existing_branch_checked_out_elsewhere_errors`, `create_failure_rolls_back_created_branch`, `classify_marks_merged_branch`, `classify_unmerged_branch_not_candidate`, `classify_blocks_dirty_including_untracked`, `classify_blocks_locked`, `classify_never_lists_main_worktree`, `classify_blocks_protected_by_open_workspace`, `classify_blocks_unreachable_detached_commits`, `classify_prunable_when_dir_missing`, `classify_default_branch_unknown_blocks_merged_reason`, `remove_rechecks_dirty_before_removing`, `remove_refuses_unregistered_path_and_traversal` (`../`, symlink para fora), `remove_keeps_unmerged_branch`, `remove_deletes_merged_branch_only_when_flag`, `remove_partial_failure_continues_others`.
+- [ ] **Step 2: Failing tests (ui):** `new_worktree_form_validation_messages`, `cleanup_selection_excludes_blocked_rows`, `cleanup_confirm_label_counts_selected`, `worktree_result_drain_respects_cap`.
+- [ ] **Step 3:** `CARGO_BUILD_JOBS=4 cargo test -p horizon-core worktree_ops` / `-p horizon-ui worktree_dialog` — RED.
+- [ ] **Step 4:** Implementar núcleo (somente git2) → worker → modais §11 e itens de menu. Cleanup mostra caminhos absolutos exatos e motivo; linhas bloqueadas ficam desabilitadas com o motivo; remover exige o botão destrutivo (sem checkbox pré-marcado para nada que não seja `safe()`; `safe()` marcados por padrão).
+- [ ] **Step 5:** GREEN; fmt; `RUSTFLAGS="-D warnings" cargo test --workspace`; clippy ×2; `node ~/.claude/scripts/gate-seguranca.js` (remoção de diretório: lista fechada de caminhos vindos do `git2`, canonicalização, TOCTOU, nenhum shell).
+- [ ] **Step 6:** Verificação real em repo temporário: criar worktree+Claude, tornar um dirty/outro locked/outro merged, abrir limpeza e confirmar que só o merged limpo é removido. Screenshot por PID em `.superpowers/sdd/2026-11-12-claude-hub/task-25-visual/`.
+- [ ] **Step 7:** Commit `feat(ui): one-click worktree with Claude and safe worktree cleanup`.
+
+---
+
+### Task 26: Conta "Auto" e alertas de uso semanal (domínio: frontend, integracao; tipo: regra-de-negocio (núcleo) + ui)
+
+**Files:**
+- Create: `crates/horizon-core/src/claude_usage/auto_pick.rs`, `crates/horizon-core/src/claude_usage/alerts.rs` (declarados em `claude_usage/mod.rs`, **não** `lib.rs`)
+- Modify: `app/claude_launcher.rs` (linha **Auto** no topo), `app/claude_quick_start.rs` (linha **Auto** no 1º passo; dono único na F3), `app/worktree_dialog.rs` (chip Auto no seletor de conta, T25 já mergeado), `app/hub_state.rs` (campo `alerts: UsageAlertState`), `app/lifecycle.rs` (no ponto onde snapshots de uso já são drenados: `tracker.observe` e `toasts.push`; dono único na F3)
+- Test: inline + `crates/horizon-core/tests/claude_usage_auto.rs`
+
+**Interfaces:**
+- Produces: `pub struct ProfileUsageView { pub name: String, pub state: UsageState, pub weekly_pct: Option<f32>, pub five_hour_pct: Option<f32>, pub resets_at: Option<SystemTime>, pub order: usize }` (projeção do snapshot do T7/T8, sem token); `pub fn pick_auto(views: &[ProfileUsageView]) -> Option<AutoPick>` com `AutoPick { name, remaining_pct: f32, reason: AutoReason }` — maior `100 - weekly_pct`; ignora `Expired`/`Missing`/`NoLogin`/erro; empate → menor `five_hour_pct`, depois ordem do config; sem nenhum dado de uso mas com credencial válida → primeiro perfil logado (`reason: NoUsageData`); nenhum utilizável → `None` (UI desabilita Auto e explica); `pub enum AlertLevel { Warn80, Crit90 }`, `pub struct AlertTracker`, `observe(&mut self, name: &str, weekly_pct: Option<f32>, window_resets_at: Option<SystemTime>) -> Option<AlertLevel>`: dispara **uma vez por cruzamento** (subir de <80 para ≥80 → `Warn80`; de <90 para ≥90 → `Crit90`; 80→90 dispara `Crit90` mesmo se `Warn80` já foi emitido); rearma ao cair abaixo de 75 (histerese) ou quando `window_resets_at` muda (nova janela); primeira observação de um perfil só define a linha de base (sem toast ao abrir o app já acima de 80; os chips já mostram a cor); `None`/estado não-ok não dispara nem rearma; estado puramente em memória
+- UI: Auto resolve **no clique** (reavalia `pick_auto` com o snapshot vigente, nunca um valor velho da linha); a linha mostra `Auto → conta2 · 66% left` (string cacheada por `usage_version`); toast §12 via `HubToasts` (T27) com `conta1 · 80% of weekly limit · resets in 2d 4h` (amarelo 80, vermelho 90); sem som, sem modal
+- Consumes: snapshot/poller (T8/T9), launcher (T5), quick-start (T21/T28), `HubToasts` (T27)
+
+- [ ] **Step 1: Failing tests (core):** `auto_picks_most_remaining_weekly`, `auto_skips_expired_missing_and_no_login`, `auto_tie_breaks_on_five_hour_then_config_order`, `auto_without_usage_data_picks_first_logged_in`, `auto_none_when_nothing_usable`, `auto_ignores_profile_with_weekly_100`, `alert_fires_once_at_80`, `alert_fires_crit_when_jumping_to_90`, `alert_80_then_90_fires_both_once`, `alert_does_not_refire_while_above`, `alert_rearms_below_75`, `alert_rearms_on_new_window`, `alert_first_observation_is_baseline_only`, `alert_ignores_unknown_pct`, `alert_state_is_per_profile`.
+- [ ] **Step 2: Failing tests (ui):** `auto_row_label_formats_remaining_and_reason`, `auto_row_disabled_when_none_usable`, `alert_toast_text_formats_level_and_reset`.
+- [ ] **Step 3:** `CARGO_BUILD_JOBS=4 cargo test -p horizon-core claude_usage_auto auto_pick alerts` / `-p horizon-ui claude_launcher claude_quick_start` — RED.
+- [ ] **Step 4:** Implementar núcleo puro → integrar launcher/quick-start/worktree dialog → alertas no ponto existente de drenagem de snapshots (sem novo poller, sem timer).
+- [ ] **Step 5:** GREEN; fmt; `RUSTFLAGS="-D warnings" cargo test --workspace`; clippy ×2.
+- [ ] **Step 6:** Verificação real com cache de uso forjado (isolated `HOME`): Auto escolhe a conta certa; forçar 82%→91% e ver dois toasts; re-render não repete. Screenshot por PID em `.superpowers/sdd/2026-11-12-claude-hub/task-26-visual/`.
+- [ ] **Step 7:** Commit `feat(ui): Auto Claude account and weekly usage alerts`.
+
+---
+
+### Task 27: Link nível 2 — broadcast, ask/reply e linha visual (domínio: integracao, frontend; tipo: regra-de-negocio; review: seguranca)
+
+**Contexto verificado:** o link atual (T13–T16) é uma linha de requisição → uma linha de resposta por conexão (`link/protocol.rs`, `link/server.rs`, `board/link.rs::handle_link_request`, `link_cli.rs`, `app/link.rs`, `app/link/send_dialog.rs`). `ask` precisa que o servidor **segure a conexão do solicitante** até chegar o `reply`.
+
+**Files:**
+- Modify: `crates/horizon-core/src/link/protocol.rs` (novos requests/respostas), `link/server.rs` (limite de conexões e espera com timeout), `link/resolve.rs` (alvo `AllInWorkspace`), `board/link.rs` (broadcast + cabeçalho de ask; `Board::agent_panels_in_workspace(ws)`), `crates/horizon-ui/src/link_cli.rs` (`ask`, `reply`, `send --all-in-workspace`), `app/link.rs` (tabela de asks pendentes + drenagem), `app/link/send_dialog.rs` (linha "All Claudes in <workspace>"), `app/hub_state.rs` (campos `link_asks: AskTable`, `link_visuals: Vec<LinkVisual>`, `toasts: HubToasts`), `app/workspace.rs` (call site da linha visual na passada de canvas, depois dos painéis; **se só for alcançável por `panels.rs`, devolver NEEDS_CONTEXT e deixar a linha para depois do T21**), `assets/plugins/claude-code/skills/horizon-link/SKILL.md`
+- Create: `crates/horizon-ui/src/app/link/visual.rs` (geometria pura + paint); `crates/horizon-ui/src/app/hub_toast.rs` (fila de toasts do hub, reaproveitada por T23/T24/T25/T26/T28; render em `Order::Tooltip` canto inferior direito, §8)
+- Test: unit + `crates/horizon-core/tests/link_socket.rs` (estende o existente com ask/reply/broadcast)
+
+**Interfaces:**
+- Produces (protocolo, uma linha JSON por mensagem, mesmos limites de 64 KiB e sanitização do T13): `LinkRequest::Send { target: SendTarget, text, enter }` com `SendTarget::{Panel(String), AllInWorkspace}` (o workspace é o do remetente, derivado de `HORIZON_PANEL_ID`; remetente excluído; só painéis de agente — Claude/Codex detectados —; teto de 16 alvos; resposta `Sent { delivered: Vec<String>, skipped: Vec<String> }`); `LinkRequest::Ask { from, target, text, timeout_secs }` (`timeout_secs` padrão 120, **máx. 600**, mín. 5) → resposta final `LinkResponse::Reply { from, text }` ou erro `AskTimeout`, `AskTargetClosed`, `AskCancelled`; `LinkRequest::Reply { from, ask_id, text }` → `Ok` ou `UnknownAsk`/`NotAddressee`/`AskExpired`; mensagem entregue ao alvo: `[ask <id> from <nome>] <pergunta>\n(reply with: horizon link reply <id> "<answer>")` — id = 6 hex estáveis por pedido; só o painel alvo pode responder (checa `from == target`); auto-ask recusado; no máximo 8 asks pendentes por solicitante e 32 no total; conexões simultâneas do servidor limitadas (16) para não esgotar threads; thread de conexão do ask espera `recv_timeout(timeout+2 s)` e escreve erro de timeout; ao fechar o painel alvo ou o solicitante, a UI resolve as pendências (`AskTargetClosed`/`AskCancelled`); varredura de expirados por frame com cap
+- CLI: `horizon link ask <target> "pergunta" [--timeout 120]` (imprime a resposta em stdout, exit 0; timeout/erro em stderr, exit 1/2 distintos), `horizon link reply <ask-id> "resposta"`, `horizon link send --all-in-workspace "texto" [--no-enter]`; `parse_link_args` estendido
+- Skill: quando usar `send` (fire-and-forget) vs `ask` (bloqueia o turno até 120 s — usar para perguntas curtas e objetivas), responder um ask recebido com `horizon link reply` (ao ver `[ask …]` no input), identificar-se com `$HORIZON_PANEL_NAME`, nunca enviar segredos, broadcast só com aviso curto e raro
+- Produces (toast): `HubToasts::push(Toast{ kind: Info|Warn|Error, text, panel: Option<PanelId> })` / `drain_visible(now)` (máx. 3 visíveis, TTL 6 s, dedupe por `(kind, text)`), `paint_toasts` chamado uma vez por frame de `app/root_chrome`-equivalente que já pinta overlays do hub (call site único; dono T27); T27 usa o toast para o resultado do broadcast (`Sent to 3, skipped 1`).
+- UI: `LinkVisual { from: PanelId, to: PanelId, started: Instant, kind: Send|Ask|Reply }`; linha transitória §13 com fade (reaproveita a janela 2.3 s+0.7 s do badge), ask pendente = linha estática até resolver (sem animação contínua; repaint só nas transições); `SendToPanelState::open_for_workspace(ws)` seleciona o alvo "All Claudes"
+- Consumes: protocolo/servidor (T13/T14), diálogo (T16), `Board::handle_link_request`, detecção de agente (`agent_detect`)
+
+- [ ] **Step 1: Failing tests (core):** `parse_ask_clamps_timeout_range`, `ask_message_header_contains_id_and_reply_hint`, `ask_text_is_sanitized_like_send`, `broadcast_excludes_sender_and_non_agent_panels`, `broadcast_caps_at_16_targets`, `broadcast_reports_delivered_and_skipped`, `reply_requires_addressee`, `reply_unknown_or_expired_ask_errors`, `ask_to_self_rejected`, `ask_table_caps_per_asker_and_total`, `closing_target_resolves_pending_ask_with_error`, `expired_asks_are_swept`, `server_limits_concurrent_connections`, integração `link_socket_ask_reply_roundtrip` (cliente A pergunta, UI-loop entrega, cliente B responde, A recebe), `link_socket_ask_times_out_cleanly`.
+- [ ] **Step 2: Failing tests (ui):** `parse_ask_with_timeout_flag`, `parse_reply`, `parse_send_all_in_workspace`, `parse_ask_rejects_timeout_over_600`, `ask_exit_codes_distinguish_timeout`, `plugin_install_horizon_link_skill_mentions_ask_and_reply`, `link_visual_endpoints_clip_to_panel_edges`, `link_visual_alpha_timeline`, `toasts_dedupe_and_cap_three`, `toast_expires_after_ttl`, `send_dialog_all_claudes_row_count`.
+- [ ] **Step 3:** `CARGO_BUILD_JOBS=4 cargo test -p horizon-core link` / `-p horizon-ui link` — RED.
+- [ ] **Step 4:** Implementar protocolo/Board → servidor → CLI/skill → UI. A thread de conexão **só** espera num canal; nenhum acesso ao Board fora da UI.
+- [ ] **Step 5:** GREEN; fmt; `RUSTFLAGS="-D warnings" cargo test --workspace`; clippy ×2; `node ~/.claude/scripts/gate-seguranca.js` (injeção por ask/broadcast, esgotamento de threads/memória, spoof de `from`, vazamento de pendências).
+- [ ] **Step 6:** Verificação real: dois Claudes num workspace; A faz `ask`, B responde, A segue; broadcast para 3; timeout de ask. Screenshot por PID em `.superpowers/sdd/2026-11-12-claude-hub/task-27-visual/`.
+- [ ] **Step 7:** Commit `feat(core): link ask/reply and workspace broadcast with visual link line`.
+
+---
+
+### Task 28: Prompts salvos — config, inserção e Settings (domínio: frontend; tipo: regra-de-negocio (núcleo) + ui)
+
+**Files:**
+- Create: `crates/horizon-core/src/config/prompts.rs` (`SavedPrompt`, validação, merge), `crates/horizon-ui/src/app/prompts.rs` (inserção, estado, helpers puros), `crates/horizon-ui/src/app/settings/prompts_section.rs` (editor reutilizável)
+- Modify: `config.rs` (apenas `mod prompts;`, campo `prompts: Vec<SavedPrompt>` no `Config` e no config de workspace, `#[serde(default, skip_serializing_if = "Vec::is_empty")]`; **dono único na F2, depois de T29**), `board/link.rs` (extrair `pub fn deliver_text(&mut self, panel: PanelId, text: &str, enter: bool) -> Result<(), LinkError>` do caminho de `send`, sem mudar comportamento; os testes do T14 seguem verdes), `app/settings/claude.rs` (seção **Saved prompts** global ao final), `app/settings/workspaces.rs` (seção **Prompts** no editor de cada workspace), `app/actions/command_palette.rs` (entradas dinâmicas **Prompt: <nome>**; dono único na F2), `app/claude_quick_start.rs` (linha/passo **Insert prompt ▸** no popup; dono único na F2), `app/hub_state.rs` (campo `prompts_ui: PromptsUi`)
+- Test: inline + `crates/horizon-core/tests/config_prompts.rs`
+
+**Interfaces:**
+- Produces (core): `pub struct SavedPrompt { pub name: String, pub text: String }`; `pub fn validate_prompts(list: &[SavedPrompt]) -> Vec<PromptIssue>` (nome 1–40 chars sem controle, único sem distinção de caixa por lista, texto 1–8 192 bytes, sem NUL/ESC — newlines permitidos); `pub fn effective_prompts(global: &[SavedPrompt], workspace: &[SavedPrompt]) -> Vec<EffectivePrompt>` (workspace primeiro; mesmo nome do workspace sobrescreve o global; `EffectivePrompt { name, text, scope: Global|Workspace }`); YAML antigo sem `prompts` carrega e re-serializa sem chave nova (S9)
+- Produces (ui): `fn insert_prompt(app, panel, prompt, enter: bool)` → `Board::deliver_text` (mesmo caminho de bracketed paste/sanitização do link; **padrão = sem Enter** para o usuário revisar; Ctrl+Enter / botão "Insert & send" envia); terminal sem bracketed paste e texto multilinha → recusa com toast "This terminal can't paste multi-line text" (não achata linhas em silêncio); alvo = painel focado se for terminal; senão toast "Focus a terminal first"; lista efetiva cacheada por versão do config (sem alocação por frame); editor Settings §14 (sem ComboBox, validação inline, salvar pelo fluxo normal da aba)
+- Consumes: link send path (T14), `HubToasts` (T27), config/Settings (T6/T11)
+
+- [ ] **Step 1: Failing tests (core):** `prompts_default_empty_and_omitted_from_yaml`, `old_yaml_round_trips_without_prompts_key`, `validate_rejects_empty_name_and_duplicate_case_insensitive`, `validate_rejects_oversize_text_and_control_chars`, `effective_workspace_overrides_global_by_name`, `effective_orders_workspace_first`, `deliver_text_matches_link_send_behaviour` (regressão: bracketed paste e `\r`), `deliver_text_closed_panel_errors`.
+- [ ] **Step 2: Failing tests (ui):** `palette_entries_built_once_per_config_version`, `multiline_without_bracketed_paste_is_refused`, `insert_defaults_to_no_enter`, `settings_prompt_editor_add_remove_and_issue_markers`, `target_panel_prefers_focused_terminal`.
+- [ ] **Step 3:** `CARGO_BUILD_JOBS=4 cargo test -p horizon-core prompts link` / `-p horizon-ui prompts claude_quick_start` — RED.
+- [ ] **Step 4:** Implementar núcleo → `deliver_text` → UI/Settings/palette/quick-start.
+- [ ] **Step 5:** GREEN; fmt; `RUSTFLAGS="-D warnings" cargo test --workspace`; clippy ×2.
+- [ ] **Step 6:** Verificação real: criar prompt global e de workspace, inserir via palette e via popup num Claude; editar nas Settings. Screenshot por PID em `.superpowers/sdd/2026-11-12-claude-hub/task-28-visual/`.
+- [ ] **Step 7:** Commit `feat(ui): saved prompts with palette, quick-start and settings editor`.
+
+---
+
+### Task 29: Persistir toggles de UI e auto-hide do minimap (domínio: frontend; tipo: ui — helpers puros TDD)
+
+**Contexto verificado:** `minimap_visible` e `hud_visible` são campos de `HorizonApp` (`app/mod.rs`, inicializados em `true`/`false`) alternados por atalho (`toggle_minimap`, `toggle_hud`) e pelo menu das viewports destacadas (`detached_viewports.rs`); nada é persistido. A sidebar já tem auto-hide (`overlays.sidebar_auto_hide`, `sidebar.rs`, `SidebarAutoHide { revealed, last_hover }`).
+
+**Files:**
+- Modify: `crates/horizon-core/src/runtime_state.rs` (bloco `ui: UiPrefs { minimap_visible: Option<bool>, hud_visible: Option<bool> }`, `serde(default, skip_serializing_if)`; **dono único**), `config.rs` (`overlays.minimap_auto_hide: bool`, default `false`, ao lado de `sidebar_auto_hide`; **dono único na F1**), `app/mod.rs` (inicialização de `minimap_visible`/`hud_visible` a partir do runtime state — edição mínima das linhas de init; **dono único na F1**), `app/detached_viewports.rs` e o handler dos atalhos (todos passam por um único `fn set_minimap_visible(&mut self, v)` / `set_hud_visible`, que marca o runtime state sujo pelo mecanismo de salvamento existente), `app/minimap.rs` (consulta `auto_hide::minimap_alpha_target`), `app/settings/general.rs` (checkbox **Minimap auto-hide**, ao lado do da sidebar; dono único na F1)
+- Create: `crates/horizon-ui/src/app/minimap/auto_hide.rs` (estado + decisão pura)
+- Test: inline; `crates/horizon-core/tests/runtime_state_ui_prefs.rs`
+
+**Interfaces:**
+- Produces: `UiPrefs` (ausente no arquivo → defaults atuais: minimap visível, HUD oculto); `pub(super) struct MinimapAutoHide { revealed: bool, last_hover: Option<Instant> }` e `pub(super) fn should_reveal(enabled: bool, state: &MinimapAutoHide, pointer_in_zone: bool, now: Instant) -> bool` (zona = retângulo do minimap expandido 16 px; some 600 ms depois que o ponteiro sai; sempre visível se desligado ou se está arrastando/interagindo; atalho `toggle_minimap` continua sendo o interruptor mestre — oculto manualmente não revela por hover); repaint só nas transições (`request_repaint_after` até o fim do atraso), nenhum repaint contínuo enquanto oculto
+- Consumes: padrão do `SidebarAutoHide` (copiar a forma, não o código)
+
+- [ ] **Step 1: Failing tests:** `ui_prefs_default_when_missing_in_old_state_file`, `ui_prefs_round_trip`, `ui_prefs_omitted_from_yaml_when_default`, `toggle_minimap_marks_state_dirty` (puro, sobre o setter), `should_reveal_always_true_when_disabled`, `should_reveal_on_hover_zone`, `should_hide_after_600ms_outside_zone`, `manual_hidden_overrides_hover`, `minimap_auto_hide_config_defaults_false_and_old_yaml_loads`.
+- [ ] **Step 2:** `CARGO_BUILD_JOBS=4 cargo test -p horizon-core runtime_state_ui_prefs config` / `-p horizon-ui minimap` — RED.
+- [ ] **Step 3:** Implementar; manter `app/mod.rs` com edição mínima (T29 é o dono nesta wave).
+- [ ] **Step 4:** GREEN; fmt; `RUSTFLAGS="-D warnings" cargo test --workspace`; clippy ×2.
+- [ ] **Step 5:** Verificação real: alternar minimap/HUD, fechar e reabrir o Horizon (isolated `HOME`) e confirmar o estado; ativar auto-hide, ver revelar/ocultar; trace idle sem repaint contínuo. Screenshot por PID em `.superpowers/sdd/2026-11-12-claude-hub/task-29-visual/`.
+- [ ] **Step 6:** Commit `feat(ui): persist minimap/HUD visibility and minimap auto-hide`.
+
+---
+
+### Task 30: Rename de painel — auditoria e nome custom em sidebar/link (domínio: frontend, integracao; tipo: ui + regra-de-negocio pequena)
+
+**Estado verificado:** o rename **já existe**: duplo clique na titlebar (`app/panels.rs` ~714, `show_inline_rename_editor` em `panel_chrome.rs`, buffer `panel_rename_buffer`) → `Board::rename_panel` → `Panel::rename` que marca `has_custom_name`; `display_title()` já distingue nome custom. O que falta é conferir que o nome custom é a fonte nos outros lugares e dar um ponto de entrada na sidebar.
+
+**Files:**
+- Modify: `crates/horizon-core/src/panel.rs` (apenas um accessor `pub fn custom_name(&self) -> Option<&str>` se ainda não houver; edição mínima — o arquivo está acima de 600 linhas), `crates/horizon-core/src/board/link.rs` e `link/resolve.rs` (nome exibido/ordenação por nome atual, não o título de spawn), `crates/horizon-core/src/runtime_state.rs` (**só se** a auditoria mostrar que `has_custom_name`/nome custom não persiste entre launches), `app/sidebar/labels.rs` (T22: confirmar prioridade nome custom > resto; ajuste se necessário), `app/sidebar/rows.rs` + `app/sidebar.rs` (duplo clique numa linha de painel da sidebar inicia o mesmo rename inline — **somente se** duplo clique estiver livre nessa linha; senão item **Rename** no menu de contexto da linha; dono único na F3), `assets/plugins/claude-code/skills/horizon-link/SKILL.md` (nota: o nome pode mudar; `HORIZON_PANEL_ID` é estável; use `horizon link list`)
+- Test: inline + estende `crates/horizon-core/tests/link_socket.rs`
+
+**Interfaces:**
+- Produces: `link list` mostra o nome atual (custom se houver) e resolve `target` por esse nome; nome ambíguo continua erro tipado listando ids; `HORIZON_PANEL_NAME` documentado como "nome no spawn" (env não muda depois); rename vazio/só espaços/> 80 chars/controle → rejeitado sem mudar o nome (testar o caminho existente); rename na sidebar reutiliza `panel_rename_buffer` e `Board::rename_panel` (nenhuma lógica nova de rename)
+- Consumes: T21/T22 (já mergeados), link (T13/T14/T27)
+
+- [ ] **Step 1: Auditoria (registrar no report, sem código):** (a) rename persiste ao reabrir? (b) sidebar usa nome custom? (c) `link list/send` usa nome custom? (d) `Copy panel address` usa nome custom? Cada "não" vira teste abaixo.
+- [ ] **Step 2: Failing tests (conforme a auditoria):** `rename_trims_and_rejects_blank_and_overlong`, `custom_name_survives_runtime_state_round_trip`, `link_list_reports_current_custom_name`, `link_resolves_target_by_custom_name`, `link_ambiguous_custom_name_is_typed_error`, `sidebar_label_prefers_custom_name`, `sidebar_double_click_starts_rename_state` (lógica pura do estado).
+- [ ] **Step 3:** `CARGO_BUILD_JOBS=4 cargo test -p horizon-core rename link` / `-p horizon-ui sidebar::labels` — RED, implementar, GREEN.
+- [ ] **Step 4:** fmt; `RUSTFLAGS="-D warnings" cargo test --workspace`; clippy ×2; verificação real: renomear por duplo clique na titlebar e na sidebar, ver sidebar/`horizon link list`/badge com o nome novo; reabrir. Screenshot por PID em `.superpowers/sdd/2026-11-12-claude-hub/task-30-visual/`.
+- [ ] **Step 5:** Commit `fix(ui): panel custom name is the source for sidebar, link and rename entry points`.
+
+---
+
+### Part F parallel waves
+
+**Dono único por arquivo compartilhado (Parte F):**
+
+| Arquivo | Dono por wave |
+|---|---|
+| `horizon-core/src/lib.rs` | T23 (F2, `pub mod agent_status;`), T24 (F4, `pub mod claude_sessions;`) |
+| `config.rs` | T29 (F1) → T28 (F2) |
+| `runtime_state.rs` | T29 (F1), T30 (F3 só se a auditoria exigir) |
+| `panel.rs`, `terminal.rs`, `terminal/events.rs` | T23 (F2) → T30 (F3, accessor) |
+| `board/link.rs`, `link/*`, `link_cli.rs`, `app/link.rs`, `app/link/send_dialog.rs`, skill horizon-link | T27 (F1) → T28 (F2, só `deliver_text` em `board/link.rs`) → T30 (F3) |
+| `main.rs`, `plugin_install.rs` | T23 (F2) |
+| `app/panel_chrome.rs`, `app/panels.rs` | T23 (F2) (T21 já mergeado) |
+| `app/sidebar.rs`, `app/sidebar/git_overview/*`, `app/sidebar/workspace_menu/*` | T25 (F2) → T24 (F4, menu item) |
+| `app/sidebar/rows.rs`, `labels.rs` | T23 (F2, só dot em `rows.rs`) → T30 (F3) |
+| `app/claude_quick_start.rs`, `app/actions/command_palette.rs` | T28 (F2) → T26 (F3, quick-start) → T24 (F4) |
+| `app/claude_launcher.rs`, `app/worktree_dialog.rs` | T26 (F3; `worktree_dialog.rs` nasce no T25/F2), T24 (F4 launcher) |
+| `app/lifecycle.rs` | T23 (F2, só se necessário) → T26 (F3) → T24 (F4) |
+| `app/mod.rs`, `app/settings/general.rs`, `app/minimap*`, `app/detached_viewports.rs` | T29 (F1) |
+| `app/settings/claude.rs`, `settings/workspaces.rs` | T28 (F2) |
+| `app/workspace.rs` | T27 (F1) |
+| `app/hub_toast.rs` | T27 (F1) |
+| `app/hub_state.rs` | uma linha por task (campo de tipo próprio definido em módulo próprio + init); conflitos triviais resolvidos pelo merger |
+
+**Grafo de dependências:**
+```
+(T21, T22 mergeados) ─┬─ T23 ──┬─ T26 (Auto)
+                      │        └─ T24 (session_id do status)
+                      ├─ T25 ──── T26 (Auto no worktree dialog), T24 (menu do workspace)
+                      └─ T28 ──── T26 (quick-start), T24 (palette/quick-start)
+T27 (independente; cria HubToasts → T23, T24, T25, T26, T28) ── T25 (item "Send to all Claudes", opcional) , T30
+T29 (independente) ── T28 (config.rs)
+T25, T23 ── T30 (sidebar rows/menus)
+```
+
+**Waves (≤ 4 tasks, uma worktree por task, um cargo por worktree, `CARGO_BUILD_JOBS=4`; cada wave só é cortada depois do merge verde da anterior: `RUSTFLAGS="-D warnings" cargo test --workspace`):**
+
+| Wave | Tasks | Por que não colidem |
+|---|---|---|
+| **F1** (pode iniciar enquanto T21/T22 ainda estão em voo) | **T27** ‖ **T29** | T27: `hub_toast.rs`, `link/*`, `board/link.rs`, `link_cli.rs`, `app/link*`, `app/workspace.rs`, skill; T29: `runtime_state.rs`, `config.rs`, `app/mod.rs`, `minimap*`, `settings/general.rs` — nenhum toca titlebar nem sidebar |
+| **F2** (após merge de T21 + T22 + F1) | **T23** ‖ **T25** ‖ **T28** | T23: `lib.rs`, `agent_status*`, terminal/panel, `main.rs`, `plugin_install.rs`, `panel_chrome.rs`/`panels.rs`, `sidebar/rows.rs`, `hub_toast.rs`; T25: `git_overview/worktree_ops*`, `sidebar.rs`, `sidebar/git_overview/*`, `sidebar/workspace_menu/*`, `worktree_dialog.rs`; T28: `config.rs`, `config/prompts.rs`, `settings/{claude,workspaces}.rs`, palette, `claude_quick_start.rs`, `board/link.rs` (`deliver_text`) |
+| **F3** (após merge de F2) | **T26** ‖ **T30** | T26: `claude_usage/{auto_pick,alerts}.rs`, launcher, quick-start, `worktree_dialog.rs`, `lifecycle.rs`; T30: `panel.rs` accessor, `link/resolve.rs`, `sidebar/{rows,labels}.rs`, `sidebar.rs` |
+| **F4** (após merge de F3) | **T24** | `claude_sessions/*`, `lib.rs`, quick-start/launcher/palette/workspace menu/lifecycle (todos livres nesta wave) |
+| **F5** | Smoke ampliado (extensão da Task 17: status, sessões, worktrees, Auto/alertas, ask/reply, prompts, prefs, rename; F8 já coberto) | needs everything |
+
+**Regras:** tasks de uma wave que precisarem de arquivo de outro dono da mesma wave devolvem `NEEDS_CONTEXT`; T27 (F1) define `HubToasts` e o `paint_toasts`; T23/T24/T25/T26/T28 só consomem. Ordem de merge dentro da F2: T23 → T25 → T28.
