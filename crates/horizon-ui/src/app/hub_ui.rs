@@ -146,21 +146,30 @@ pub(crate) fn mini_bar(painter: &Painter, rect: Rect, frac: f32, fill: Color32) 
 // ---------------------------------------------------------------------------
 
 const PILL_HEIGHT: f32 = 18.0;
+const PILL_RADIUS: u8 = 9;
 const PILL_PADDING_X: f32 = 8.0;
 const PILL_FONT_SIZE: f32 = 10.5;
 
-/// Width a pill needs for `text` (height is always 18).
+/// Width a pill needs for `text` (height is always [`PILL_HEIGHT`]).
 #[must_use]
 pub(crate) fn pill_width(painter: &Painter, text: &str) -> f32 {
     let galley = painter.layout_no_wrap(text.to_owned(), FontId::proportional(PILL_FONT_SIZE), Color32::WHITE);
     galley.size().x + PILL_PADDING_X * 2.0
 }
 
-/// Status pill (ok / expired / missing / danger) painted into `rect`.
+/// Rect of a pill whose top-left is `min` and whose text is `text_width` wide
+/// (horizontal padding is added; height is always [`PILL_HEIGHT`]).
+#[must_use]
+pub(crate) fn pill_rect(min: Pos2, text_width: f32) -> Rect {
+    Rect::from_min_size(min, Vec2::new(text_width.max(0.0) + PILL_PADDING_X * 2.0, PILL_HEIGHT))
+}
+
+/// Status pill (ok / expired / missing / danger) painted into `rect`; build
+/// `rect` with [`pill_rect`] so the height stays [`PILL_HEIGHT`].
 pub(crate) fn pill(painter: &Painter, rect: Rect, text: &str, color: Color32) {
     painter.rect(
         rect,
-        CornerRadius::same(9),
+        CornerRadius::same(PILL_RADIUS),
         theme::alpha(color, 36),
         Stroke::new(1.0_f32, theme::alpha(color, 150)),
         StrokeKind::Inside,
@@ -225,12 +234,17 @@ const SWATCH_SIZE: f32 = 22.0;
 
 /// Color swatch (22x22, radius 6). The selection/hover/focus ring is painted
 /// 2 px outside the box (2 px gap + stroke), so leave >= 4 px between swatches.
-pub(crate) fn swatch(ui: &mut Ui, color: Color32, selected: bool) -> Response {
-    let (rect, response) = ui.allocate_exact_size(Vec2::splat(SWATCH_SIZE), Sense::click());
-    response.widget_info(|| WidgetInfo::selected(WidgetType::RadioButton, true, selected, "color swatch"));
+/// `label` (for example "Amber") is the accessible name. In a disabled `Ui`
+/// the swatch is faded and ignores hover and clicks.
+pub(crate) fn swatch(ui: &mut Ui, color: Color32, selected: bool, label: &str) -> Response {
+    let enabled = ui.is_enabled();
+    let sense = if enabled { Sense::click() } else { Sense::hover() };
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(SWATCH_SIZE), sense);
+    response.widget_info(|| WidgetInfo::selected(WidgetType::RadioButton, enabled, selected, label));
     if !ui.is_rect_visible(rect) {
         return response;
     }
+    let hovered = enabled && response.hovered();
     let painter = ui.painter();
     painter.rect_filled(rect, CornerRadius::same(6), color);
     let ring_rect = rect.expand(2.0);
@@ -249,7 +263,7 @@ pub(crate) fn swatch(ui: &mut Ui, color: Color32, selected: bool) -> Response {
             Stroke::new(2.0_f32, theme::FG()),
             StrokeKind::Outside,
         );
-    } else if response.hovered() {
+    } else if hovered {
         painter.rect_stroke(
             ring_rect,
             ring_radius,
@@ -286,7 +300,10 @@ const BUTTON_PADDING_X: f32 = 16.0;
 const BUTTON_MIN_WIDTH: f32 = 64.0;
 const BUTTON_RADIUS: u8 = 8;
 
-fn button_response(ui: &mut Ui, label: &str, height: f32, font: &FontId, enabled: bool) -> (Response, Rect) {
+/// Allocates a button. `enabled` is the caller's flag; a disabled `Ui` also
+/// disables it. Returns the response, rect and the effective enabled state.
+fn button_response(ui: &mut Ui, label: &str, height: f32, font: &FontId, enabled: bool) -> (Response, Rect, bool) {
+    let enabled = enabled && ui.is_enabled();
     let text_width = ui
         .painter()
         .layout_no_wrap(label.to_owned(), font.clone(), Color32::WHITE)
@@ -296,14 +313,14 @@ fn button_response(ui: &mut Ui, label: &str, height: f32, font: &FontId, enabled
     let sense = if enabled { Sense::click() } else { Sense::hover() };
     let (rect, response) = ui.allocate_exact_size(size, sense);
     response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, enabled, label));
-    (response, rect)
+    (response, rect, enabled)
 }
 
 /// Primary call-to-action: amber fill, height 30. `enabled == false` paints
 /// the disabled look and the returned response never reports clicks.
 pub(crate) fn primary_button(ui: &mut Ui, label: &str, enabled: bool) -> Response {
     let font = FontId::proportional(12.0);
-    let (response, rect) = button_response(ui, label, 30.0, &font, enabled);
+    let (response, rect, enabled) = button_response(ui, label, 30.0, &font, enabled);
     if !ui.is_rect_visible(rect) {
         return response;
     }
@@ -318,17 +335,17 @@ pub(crate) fn primary_button(ui: &mut Ui, label: &str, enabled: bool) -> Respons
     };
     let painter = ui.painter();
     painter.rect_filled(rect, CornerRadius::same(BUTTON_RADIUS), fill);
-    // `strong` text in egui is approximated by the heavier theme color; the
-    // font stack has no bold face to switch to.
+    // The font stack has no bold face, so the label uses the regular 12 pt weight.
     painter.text(rect.center(), Align2::CENTER_CENTER, label, font, text_color);
     paint_focus_ring(painter, &response, rect, BUTTON_RADIUS);
     response
 }
 
-/// Secondary button: chrome fill with subtle border, height 28.
+/// Secondary button: chrome fill with subtle border, height 28. In a disabled
+/// `Ui` it is dimmed and never reports hover or clicks.
 pub(crate) fn secondary_button(ui: &mut Ui, label: &str) -> Response {
     let font = FontId::proportional(12.0);
-    let (response, rect) = button_response(ui, label, 28.0, &font, true);
+    let (response, rect, enabled) = button_response(ui, label, 28.0, &font, true);
     if !ui.is_rect_visible(rect) {
         return response;
     }
@@ -340,11 +357,12 @@ pub(crate) fn secondary_button(ui: &mut Ui, label: &str) -> Response {
     } else {
         widgets.inactive
     };
-    let (fill, stroke) = if response.hovered() || response.is_pointer_button_down_on() {
+    let (fill, stroke) = if enabled && (response.hovered() || response.is_pointer_button_down_on()) {
         (visuals.weak_bg_fill, visuals.bg_stroke)
     } else {
         (theme::PANEL_BG_ALT(), Stroke::new(1.0_f32, theme::BORDER_SUBTLE()))
     };
+    let text_color = if enabled { theme::FG() } else { theme::FG_DIM() };
     let painter = ui.painter();
     painter.rect(
         rect,
@@ -353,7 +371,7 @@ pub(crate) fn secondary_button(ui: &mut Ui, label: &str) -> Response {
         stroke,
         StrokeKind::Inside,
     );
-    painter.text(rect.center(), Align2::CENTER_CENTER, label, font, theme::FG());
+    painter.text(rect.center(), Align2::CENTER_CENTER, label, font, text_color);
     paint_focus_ring(painter, &response, rect, BUTTON_RADIUS);
     response
 }
@@ -375,18 +393,28 @@ const ICON_BUTTON_SIZE: f32 = 26.0;
 
 /// 26x26 icon button; `tooltip` doubles as the accessible label.
 pub(crate) fn icon_button(ui: &mut Ui, icon: IconKind, tooltip: &str) -> Response {
-    let (rect, response) = ui.allocate_exact_size(Vec2::splat(ICON_BUTTON_SIZE), Sense::click());
-    response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, tooltip));
-    let response = response.on_hover_text(tooltip);
+    icon_button_enabled(ui, icon, tooltip, true)
+}
+
+/// [`icon_button`] with an explicit enabled flag (for example the first row's
+/// Up and the last row's Down). Disabled buttons are dimmed, show the tooltip
+/// but have no hover fill and never report clicks; a disabled `Ui` behaves the same.
+pub(crate) fn icon_button_enabled(ui: &mut Ui, icon: IconKind, tooltip: &str, enabled: bool) -> Response {
+    let enabled = enabled && ui.is_enabled();
+    let sense = if enabled { Sense::click() } else { Sense::hover() };
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(ICON_BUTTON_SIZE), sense);
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, enabled, tooltip));
+    let response = response.on_hover_text(tooltip).on_disabled_hover_text(tooltip);
     if !ui.is_rect_visible(rect) {
         return response;
     }
-    let hovered = response.hovered() || response.is_pointer_button_down_on();
+    let hovered = enabled && (response.hovered() || response.is_pointer_button_down_on());
     let painter = ui.painter();
     if hovered {
         painter.rect_filled(rect, CornerRadius::same(BUTTON_RADIUS), theme::PANEL_BG_ALT());
     }
     let color = match (icon, hovered) {
+        _ if !enabled => theme::alpha(theme::FG_DIM(), 90),
         (IconKind::Remove, true) => theme::BTN_CLOSE(),
         (_, true) => theme::FG(),
         (_, false) => theme::FG_SOFT(),
@@ -455,37 +483,130 @@ pub(crate) fn modal_frame(ctx: &egui::Context) -> Frame {
         .inner_margin(Margin::ZERO)
 }
 
-/// Shows a centered modal of `width` over a viewport scrim. Returns `true`
-/// when the user asked to close it (click outside the modal, or Esc); the
-/// caller owns the "open" state and drops it on `true`.
-pub(crate) fn show_modal(ctx: &egui::Context, id: egui::Id, width: f32, add_contents: impl FnOnce(&mut Ui)) -> bool {
+/// Horizontal viewport margin kept free on each side of a modal (48 px total).
+const MODAL_VIEWPORT_MARGIN: f32 = 48.0;
+
+/// Where a modal sits inside the viewport.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum ModalPlacement {
+    /// Centered both ways.
+    Center,
+    /// Horizontally centered, top edge at this fraction of the viewport
+    /// height (the Claude launcher uses `0.18`).
+    TopFraction(f32),
+}
+
+/// Result of one [`show_modal`] frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ModalOutcome {
+    /// The user asked to close (click on the scrim, or Esc with no popup open).
+    pub(crate) dismissed: bool,
+    /// First frame since the modal opened; callers may seed state here.
+    pub(crate) first_frame: bool,
+}
+
+/// Modal width clamped so at least 48 px of viewport stays free: `min(width, viewport_width - 48)`.
+#[must_use]
+pub(crate) fn modal_width(width: f32, viewport_width: f32) -> f32 {
+    width.min(viewport_width - MODAL_VIEWPORT_MARGIN).max(0.0)
+}
+
+/// Distance from the viewport top to the modal top for `placement`, or `None`
+/// when the modal is vertically centered.
+#[must_use]
+pub(crate) fn modal_top_offset(placement: ModalPlacement, viewport_height: f32) -> Option<f32> {
+    match placement {
+        ModalPlacement::Center => None,
+        ModalPlacement::TopFraction(fraction) => {
+            let fraction = if fraction.is_nan() {
+                0.0
+            } else {
+                fraction.clamp(0.0, 1.0)
+            };
+            Some(viewport_height * fraction)
+        }
+    }
+}
+
+/// `true` when the modal was not drawn in the previous frame (just opened).
+#[must_use]
+fn modal_is_first_frame(last_frame: Option<u64>, now: u64) -> bool {
+    last_frame.is_none_or(|last| now.saturating_sub(last) > 1)
+}
+
+/// Shows a modal over a viewport scrim, above the toolbar and sidebar
+/// (`Order::Debug`, like the command palette and directory picker). The scrim
+/// swallows pointer input; a click on it, or Esc when no popup inside the
+/// modal is open, sets [`ModalOutcome::dismissed`]. The caller owns the "open"
+/// state and drops it on `dismissed`.
+///
+/// Keyboard focus: on the first frame `initial_focus` (a widget id inside
+/// the modal, such as a search field) is focused, otherwise a focus sink
+/// covering the modal. While open, focus is pulled back to the sink whenever
+/// nothing is focused, so keystrokes never fall through to a terminal behind
+/// it (terminals only take keys when no other widget has focus).
+///
+/// Note: `egui` popups (`ComboBox`) use `Order::Foreground` and would render
+/// below this modal, so use inline selectors inside it.
+pub(crate) fn show_modal(
+    ctx: &egui::Context,
+    id: egui::Id,
+    width: f32,
+    placement: ModalPlacement,
+    initial_focus: Option<egui::Id>,
+    add_contents: impl FnOnce(&mut Ui),
+) -> ModalOutcome {
     let screen = ctx.content_rect();
-    let mut dismissed = false;
+    let frame_nr = ctx.cumulative_frame_nr();
+    let last_frame_key = id.with("last_frame");
+    let first_frame = modal_is_first_frame(ctx.data(|data| data.get_temp::<u64>(last_frame_key)), frame_nr);
+    ctx.data_mut(|data| data.insert_temp(last_frame_key, frame_nr));
+    // Read before the contents run: a popup closes itself on Esc while they draw.
+    let popup_open = egui::Popup::is_any_open(ctx);
+    let mut scrim_clicked = false;
 
     egui::Area::new(id.with("scrim"))
-        .order(egui::Order::Foreground)
+        .order(egui::Order::Debug)
         .fixed_pos(screen.min)
+        .constrain(false)
+        .interactable(true)
         .show(ctx, |ui| {
             ui.painter().rect_filled(screen, CornerRadius::ZERO, theme::scrim());
-            if ui.allocate_rect(screen, Sense::click()).clicked() {
-                dismissed = true;
-            }
+            scrim_clicked = ui.allocate_rect(screen, Sense::click()).clicked();
         });
 
-    egui::Area::new(id.with("modal"))
-        .order(egui::Order::Tooltip)
-        .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+    let (anchor, offset) = match modal_top_offset(placement, screen.height()) {
+        Some(top) => (Align2::CENTER_TOP, Vec2::new(0.0, top)),
+        None => (Align2::CENTER_CENTER, Vec2::ZERO),
+    };
+    let sink = id.with("focus_sink");
+    let modal_width = modal_width(width, screen.width());
+    let modal = egui::Area::new(id.with("modal"))
+        .order(egui::Order::Debug)
+        .anchor(anchor, offset)
         .show(ctx, |ui| {
-            modal_frame(ctx).show(ui, |ui| {
-                ui.set_width(width);
+            let framed = modal_frame(ctx).show(ui, |ui| {
+                ui.set_width(modal_width);
                 add_contents(ui);
             });
+            ui.interact(framed.response.rect, sink, Sense::focusable_noninteractive());
         });
+    ctx.move_to_top(modal.response.layer_id);
 
-    if ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Escape)) {
+    if first_frame {
+        ctx.memory_mut(|memory| memory.request_focus(initial_focus.unwrap_or(sink)));
+    } else if !ctx.wants_keyboard_input() {
+        ctx.memory_mut(|memory| memory.request_focus(sink));
+    }
+
+    let pointer_inside = ctx
+        .input(|input| input.pointer.interact_pos())
+        .is_some_and(|pos| modal.response.rect.contains(pos));
+    let mut dismissed = scrim_clicked && !first_frame && !pointer_inside;
+    if !popup_open && ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Escape)) {
         dismissed = true;
     }
-    dismissed
+    ModalOutcome { dismissed, first_frame }
 }
 
 #[cfg(test)]
@@ -578,5 +699,48 @@ mod tests {
         for (i, a) in accents.iter().enumerate() {
             assert!(accents.iter().skip(i + 1).all(|b| a != b));
         }
+    }
+
+    #[test]
+    fn modal_width_clamps_to_viewport_minus_margin() {
+        assert_width(modal_width(480.0, 1280.0), 480.0);
+        assert_width(modal_width(480.0, 500.0), 452.0);
+        assert_width(modal_width(480.0, 528.0), 480.0);
+        assert_width(modal_width(480.0, 30.0), 0.0);
+    }
+
+    #[test]
+    fn modal_top_offset_is_fraction_of_viewport_height() {
+        assert_eq!(modal_top_offset(ModalPlacement::Center, 800.0), None);
+        assert_width(
+            modal_top_offset(ModalPlacement::TopFraction(0.18), 800.0).unwrap_or(-1.0),
+            144.0,
+        );
+        assert_width(
+            modal_top_offset(ModalPlacement::TopFraction(2.0), 800.0).unwrap_or(-1.0),
+            800.0,
+        );
+        assert_width(
+            modal_top_offset(ModalPlacement::TopFraction(f32::NAN), 800.0).unwrap_or(-1.0),
+            0.0,
+        );
+    }
+
+    #[test]
+    fn modal_first_frame_detects_gaps() {
+        assert!(modal_is_first_frame(None, 5));
+        assert!(!modal_is_first_frame(Some(4), 5));
+        assert!(!modal_is_first_frame(Some(5), 5));
+        assert!(modal_is_first_frame(Some(2), 5));
+    }
+
+    #[test]
+    fn pill_rect_enforces_height_and_adds_padding() {
+        let rect = pill_rect(Pos2::new(10.0, 20.0), 30.0);
+        assert_width(rect.height(), PILL_HEIGHT);
+        assert_width(rect.height(), 18.0);
+        assert_width(rect.width(), 30.0 + PILL_PADDING_X * 2.0);
+        assert_eq!(rect.min, Pos2::new(10.0, 20.0));
+        assert_width(pill_rect(Pos2::ZERO, -5.0).width(), PILL_PADDING_X * 2.0);
     }
 }
