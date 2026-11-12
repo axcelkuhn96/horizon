@@ -868,7 +868,7 @@ mod tests {
     fn row_usage_without_a_snapshot_reads_dashes_and_draws_no_bars() {
         let usage = RowUsage::new(None);
 
-        assert_eq!(usage.lines.map(|line| line.label), ["5h", "7d"]);
+        assert_eq!(usage.lines.each_ref().map(|line| line.label), ["5h", "7d"]);
         assert!(
             usage
                 .lines

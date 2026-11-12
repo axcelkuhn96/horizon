@@ -480,7 +480,7 @@ mod tests {
     fn delete_workspace_ignores_an_unknown_workspace() {
         let mut app = test_app();
         let first = app.board.create_workspace("a");
-        app.board.create_workspace("b");
+        let _ = app.board.create_workspace("b");
 
         app.delete_workspace(horizon_core::WorkspaceId(9_999));
 
