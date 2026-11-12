@@ -792,12 +792,18 @@ fn panel_history_badge_rect(titlebar_rect: Rect, close_rect: Rect) -> Rect {
     )
 }
 
-/// X where the quick-start strip ends for a panel whose controls start at `controls` (mic or close).
-pub(super) fn quick_start_strip_right(titlebar_rect: Rect, controls: Rect, has_history_meter: bool) -> f32 {
+/// X where the quick-start strip ends for a panel whose controls start at `controls` (mic or
+/// close). Without a history meter the strip stops left of the collapse caret too.
+pub(super) fn quick_start_strip_right(
+    titlebar_rect: Rect,
+    controls: Rect,
+    collapse: Rect,
+    has_history_meter: bool,
+) -> f32 {
     quick_start::strip_right(
         panel_history_badge_rect(titlebar_rect, controls),
         has_history_meter,
-        controls,
+        controls.min.x.min(collapse.min.x),
     )
 }
 
@@ -857,7 +863,7 @@ mod tests {
 
     use super::{
         BADGE_STACK_GAP, badge_stack_offset, focus_ring_stroke, panel_border_stroke, panel_fill, panel_title_color,
-        panel_titlebar_fill, title_focus_indicator_rect,
+        panel_titlebar_fill, quick_start_strip_right, title_focus_indicator_rect,
     };
 
     #[test]
@@ -890,5 +896,20 @@ mod tests {
         assert!(titlebar_rect.contains(indicator.max - indicator.size() * 0.01));
         assert!(indicator.width() > 0.0);
         assert!(indicator.height() > 0.0);
+    }
+
+    #[test]
+    fn quick_start_strip_without_a_history_meter_stops_left_of_the_collapse_caret() {
+        let titlebar = Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(600.0, 34.0));
+        let close = Rect::from_center_size(Pos2::new(582.0, 17.0), egui::Vec2::splat(16.0));
+        let collapse = Rect::from_center_size(Pos2::new(560.0, 17.0), egui::Vec2::splat(16.0));
+        let mic = Rect::from_center_size(Pos2::new(538.0, 17.0), egui::Vec2::splat(16.0));
+
+        let without_mic = quick_start_strip_right(titlebar, close, collapse, false);
+        let with_mic = quick_start_strip_right(titlebar, mic, collapse, false);
+
+        assert!(without_mic <= collapse.min.x - 8.0 + f32::EPSILON);
+        assert!(with_mic <= mic.min.x - 8.0 + f32::EPSILON);
+        assert!(quick_start_strip_right(titlebar, close, collapse, true) < close.min.x);
     }
 }

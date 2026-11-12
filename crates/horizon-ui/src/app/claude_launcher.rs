@@ -105,7 +105,7 @@ fn initial_selection(profiles: &[String], preferred: Option<&str>) -> usize {
 
 /// Derived profile presets are Claude presets carrying `CLAUDE_CONFIG_DIR`;
 /// the built-in base preset (`Claude Code` / `cc`) is not a profile.
-fn is_profile_preset(preset: &PresetConfig) -> bool {
+pub(super) fn is_profile_preset(preset: &PresetConfig) -> bool {
     preset.kind == PanelKind::Claude && preset.env.contains_key("CLAUDE_CONFIG_DIR")
 }
 
@@ -649,15 +649,15 @@ fn paint_row(painter: &Painter, rect: Rect, index: usize, row: &mut LauncherRow,
 /// severity color. Without data both read as an em dash and no bar is drawn; an expired or
 /// missing login keeps its last known value on faded bars.
 fn paint_usage_column(painter: &Painter, rect: Rect, usage: &RowUsage) {
+    // Line index and vertical offset; the lone 7d line is centered.
+    const BOTH: [(usize, f32); 2] = [(0, -10.0), (1, 10.0)];
+    const SEVEN_ONLY: [(usize, f32); 1] = [(1, 0.0)];
     let group_width = USAGE_LABEL_WIDTH + USAGE_BAR_SIZE.x + USAGE_GAP + USAGE_PCT_WIDTH;
     let left = rect.right() - ROW_PADDING_X - group_width;
     let mut bar_painter = painter.clone();
     if usage.problem.is_some() {
         bar_painter.multiply_opacity(UNUSABLE_BAR_OPACITY);
     }
-    // Line index and vertical offset; the lone 7d line is centered.
-    const BOTH: [(usize, f32); 2] = [(0, -10.0), (1, 10.0)];
-    const SEVEN_ONLY: [(usize, f32); 1] = [(1, 0.0)];
     let slots: &[(usize, f32)] = if usage.show_five_hour { &BOTH } else { &SEVEN_ONLY };
     for (index, offset) in slots {
         let Some(line) = usage.lines.get(*index) else {

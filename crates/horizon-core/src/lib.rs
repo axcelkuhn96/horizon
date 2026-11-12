@@ -84,6 +84,8 @@ pub use session_store::{
 };
 pub use shortcuts::{AppShortcuts, ShortcutBinding, ShortcutKey, ShortcutModifiers};
 pub use ssh::{DiscoveredSshHost, SshConnection, SshConnectionStatus, discover_ssh_hosts};
+#[cfg(target_os = "linux")]
+pub use terminal::shell_pid_behind_wrapper;
 pub use terminal::{AgentNotification, ClickTarget, Terminal, open_url};
 pub use transcript::PanelTranscript;
 pub use usage_dashboard::UsageDashboard;

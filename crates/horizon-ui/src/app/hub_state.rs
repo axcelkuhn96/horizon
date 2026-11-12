@@ -38,7 +38,7 @@ pub(super) struct HubState {
     pub(super) git: GitSidebarState,
     /// Panel-link server, receive badges and the send-to-panel dialog.
     pub(super) link: LinkUiState,
-    /// Titlebar "Claude" quick-start popup and the busy probes behind its button.
+    /// Titlebar "Claude" quick-start strip and the busy probes behind its button.
     pub(super) quick_start: QuickStartUi,
 }
 

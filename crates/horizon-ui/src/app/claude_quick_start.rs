@@ -1,26 +1,25 @@
 //! Claude quick-start: the "Claude" button in a shell panel's titlebar. It expands inline, in the
 //! titlebar row, into one chip per profile and then `New` / `Continue` / `Resume…`, and types one
-//! command line into THIS panel's PTY. The pure pieces live here (command line, enablement, stage
-//! machine) and in [`layout`] (widths); state and wiring are in [`strip`], drawing in [`paint`].
+//! command line into THIS panel's PTY. The pure pieces live here (modes, enablement, stage
+//! machine) and in [`command`] (the command line) and [`layout`] (widths); state is in [`state`],
+//! item placement in [`placement`], per-frame interaction in [`strip`], the start itself in
+//! [`actions`] and drawing in [`paint`].
 //! Visual spec: `docs/design/claude-hub-ui.md` §0.
 
-use std::path::Path;
+use horizon_core::PanelKind;
 
-use horizon_core::agent_detect::default_claude_config_dir;
-use horizon_core::{PanelKind, PresetConfig};
-
-use super::session::shell_single_quote;
-
+mod actions;
+mod command;
 mod layout;
 mod paint;
+mod placement;
+mod state;
 mod strip;
 pub(super) mod titlebar;
 
 pub(super) use paint::paint_strip;
-pub(super) use strip::{QuickStartUi, StripArgs};
-
-const CONFIG_DIR_ENV: &str = "CLAUDE_CONFIG_DIR";
-const DEFAULT_BINARY: &str = "claude";
+pub(super) use state::QuickStartUi;
+pub(super) use strip::StripArgs;
 
 /// How the session starts inside the shell.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -67,39 +66,6 @@ impl QuickStartMode {
     }
 }
 
-/// Word as the shell should read it: bare when it only holds safe characters, else single-quoted.
-/// `None` when it cannot be quoted safely (control character).
-fn shell_word(word: &str) -> Option<String> {
-    let bare = !word.is_empty()
-        && word.chars().all(|c| {
-            c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | '=' | ':' | ',' | '@' | '%' | '+')
-        });
-    if bare {
-        Some(word.to_owned())
-    } else {
-        shell_single_quote(word)
-    }
-}
-
-/// The command line that starts Claude for the derived profile `preset` in `mode`: the
-/// `CLAUDE_CONFIG_DIR` prefix (only outside the default `~/.claude`), the preset's own binary and
-/// args, then the mode flag. `None` when the dir, binary or an arg cannot be quoted safely.
-#[must_use]
-pub(super) fn quick_start_command(preset: &PresetConfig, mode: QuickStartMode, home: &Path) -> Option<String> {
-    let mut words = Vec::new();
-    if let Some(dir) = preset.env.get(CONFIG_DIR_ENV)
-        && Path::new(dir) != default_claude_config_dir(home)
-    {
-        words.push(format!("{CONFIG_DIR_ENV}={}", shell_single_quote(dir)?));
-    }
-    words.push(shell_word(preset.command.as_deref().unwrap_or(DEFAULT_BINARY))?);
-    for arg in &preset.args {
-        words.push(shell_word(arg)?);
-    }
-    words.extend(mode.flag().map(str::to_owned));
-    Some(words.join(" "))
-}
-
 /// Whether the titlebar button is drawn at all: local shell panels, once a profile exists.
 #[must_use]
 pub(super) fn quick_start_visible(kind: PanelKind, is_ssh: bool, profile_count: usize) -> bool {
@@ -110,6 +76,69 @@ pub(super) fn quick_start_visible(kind: PanelKind, is_ssh: bool, profile_count: 
 #[must_use]
 pub(super) fn quick_start_enabled(kind: PanelKind, is_ssh: bool, busy: bool) -> bool {
     kind == PanelKind::Shell && !is_ssh && !busy
+}
+
+/// Whether the collapsed button can be used, and if not, why.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Availability {
+    Ready,
+    /// A foreground program holds the terminal.
+    Busy,
+    /// The shell process is gone.
+    Exited,
+}
+
+impl Availability {
+    #[must_use]
+    pub(super) fn of(kind: PanelKind, is_ssh: bool, busy: bool, exited: bool) -> Self {
+        if exited {
+            Self::Exited
+        } else if quick_start_enabled(kind, is_ssh, busy) {
+            Self::Ready
+        } else {
+            Self::Busy
+        }
+    }
+
+    #[must_use]
+    pub(super) fn enabled(self) -> bool {
+        self == Self::Ready
+    }
+
+    #[must_use]
+    pub(super) fn tooltip(self) -> &'static str {
+        match self {
+            Self::Ready => titlebar::READY_TOOLTIP,
+            Self::Busy => titlebar::BUSY_TOOLTIP,
+            Self::Exited => titlebar::EXITED_TOOLTIP,
+        }
+    }
+}
+
+/// Why a start was refused after the user asked for it; shown briefly in the titlebar.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum StartFailure {
+    /// The profile has no derived Claude preset any more.
+    NoPreset,
+    Busy,
+    Exited,
+    /// The preset's directory, binary or an argument holds a control character.
+    Unquotable,
+    /// The link write into the panel failed.
+    WriteFailed,
+}
+
+impl StartFailure {
+    #[must_use]
+    pub(super) fn message(self) -> &'static str {
+        match self {
+            Self::NoPreset => "No Claude preset for this profile",
+            Self::Busy => "Busy \u{2014} finish the running command first",
+            Self::Exited => "Shell exited \u{2014} nothing to type into",
+            Self::Unquotable => "The profile command can't be typed safely",
+            Self::WriteFailed => "Could not write to this terminal",
+        }
+    }
 }
 
 /// What the inline strip shows.
@@ -151,8 +180,7 @@ impl Stage {
         match (self, event) {
             (_, StripEvent::Dismiss) => (Self::Collapsed, None),
             (Self::Collapsed, StripEvent::Toggle) if profiles > 0 => (Self::Profiles, None),
-            (Self::Collapsed, _) => (Self::Collapsed, None),
-            (_, StripEvent::Toggle) => (Self::Collapsed, None),
+            (Self::Collapsed, _) | (_, StripEvent::Toggle) => (Self::Collapsed, None),
             (stage, StripEvent::Pick(index)) => {
                 if index < profiles {
                     (Self::Modes { profile: index }, None)
@@ -173,116 +201,7 @@ impl Stage {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-    use std::path::Path;
-
-    use horizon_core::{PanelKind, PanelResume, PresetConfig};
-
     use super::*;
-
-    const HOME: &str = "/home/u";
-
-    fn preset(dir: Option<&str>, command: Option<&str>, args: &[&str]) -> PresetConfig {
-        PresetConfig {
-            name: "Claude \u{b7} conta2".to_owned(),
-            alias: Some("conta2".to_owned()),
-            kind: PanelKind::Claude,
-            command: command.map(str::to_owned),
-            args: args.iter().map(|arg| (*arg).to_owned()).collect(),
-            resume: PanelResume::Fresh,
-            ssh_connection: None,
-            env: dir
-                .map(|dir| BTreeMap::from([(CONFIG_DIR_ENV.to_owned(), dir.to_owned())]))
-                .unwrap_or_default(),
-        }
-    }
-
-    fn command(preset: &PresetConfig, mode: QuickStartMode) -> Option<String> {
-        quick_start_command(preset, mode, Path::new(HOME))
-    }
-
-    #[test]
-    fn other_profile_gets_a_quoted_config_dir_prefix_and_the_preset_args() {
-        let preset = preset(
-            Some("/home/u/.claude-conta2"),
-            Some("claude"),
-            &["--dangerously-skip-permissions"],
-        );
-
-        assert_eq!(
-            command(&preset, QuickStartMode::Continue).as_deref(),
-            Some("CLAUDE_CONFIG_DIR='/home/u/.claude-conta2' claude --dangerously-skip-permissions --continue")
-        );
-    }
-
-    #[test]
-    fn default_config_dir_omits_the_prefix_even_with_a_trailing_slash() {
-        for dir in ["/home/u/.claude", "/home/u/.claude/"] {
-            let preset = preset(Some(dir), Some("claude"), &[]);
-
-            assert_eq!(
-                command(&preset, QuickStartMode::New).as_deref(),
-                Some("claude"),
-                "{dir}"
-            );
-        }
-        assert_eq!(
-            command(&preset(None, None, &[]), QuickStartMode::New).as_deref(),
-            Some("claude")
-        );
-    }
-
-    #[test]
-    fn modes_add_exactly_their_own_flag_last() {
-        let preset = preset(None, Some("claude"), &["--model", "opus"]);
-
-        assert_eq!(
-            command(&preset, QuickStartMode::New).as_deref(),
-            Some("claude --model opus")
-        );
-        assert_eq!(
-            command(&preset, QuickStartMode::Continue).as_deref(),
-            Some("claude --model opus --continue")
-        );
-        assert_eq!(
-            command(&preset, QuickStartMode::Resume).as_deref(),
-            Some("claude --model opus --resume")
-        );
-    }
-
-    #[test]
-    fn hostile_config_dir_stays_inside_the_quotes() {
-        let preset = preset(Some("/tmp/it's $(reboot);x"), Some("claude"), &[]);
-
-        assert_eq!(
-            command(&preset, QuickStartMode::New).as_deref(),
-            Some("CLAUDE_CONFIG_DIR='/tmp/it'\\''s $(reboot);x' claude")
-        );
-    }
-
-    #[test]
-    fn control_characters_in_dir_binary_or_args_refuse_the_command() {
-        assert_eq!(
-            command(&preset(Some("/tmp/a\nrm -rf /"), None, &[]), QuickStartMode::New),
-            None
-        );
-        assert_eq!(command(&preset(None, Some("claude\r"), &[]), QuickStartMode::New), None);
-        assert_eq!(command(&preset(None, None, &["--x\n"]), QuickStartMode::New), None);
-    }
-
-    #[test]
-    fn awkward_binary_and_args_are_quoted_not_dropped() {
-        let preset = preset(
-            None,
-            Some("/opt/my tools/claude"),
-            &["--append-system-prompt", "be brief; ok", ""],
-        );
-
-        assert_eq!(
-            command(&preset, QuickStartMode::New).as_deref(),
-            Some("'/opt/my tools/claude' --append-system-prompt 'be brief; ok' ''")
-        );
-    }
 
     #[test]
     fn button_shows_only_on_local_shells_with_a_profile() {
@@ -383,5 +302,50 @@ mod tests {
             .collect();
 
         assert_eq!(labels, ["New", "Continue", "Resume\u{2026}"]);
+    }
+
+    #[test]
+    fn availability_tells_exited_from_busy() {
+        assert_eq!(
+            Availability::of(PanelKind::Shell, false, false, false),
+            Availability::Ready
+        );
+        assert_eq!(
+            Availability::of(PanelKind::Shell, false, true, false),
+            Availability::Busy
+        );
+        assert_eq!(
+            Availability::of(PanelKind::Shell, false, false, true),
+            Availability::Exited
+        );
+        assert_eq!(
+            Availability::of(PanelKind::Shell, false, true, true),
+            Availability::Exited
+        );
+        assert_eq!(
+            Availability::of(PanelKind::Shell, true, false, false),
+            Availability::Busy
+        );
+        assert!(Availability::Ready.enabled());
+        assert!(!Availability::Busy.enabled() && !Availability::Exited.enabled());
+        assert!(Availability::Exited.tooltip().starts_with("Shell exited"));
+        assert!(Availability::Busy.tooltip().starts_with("Busy"));
+    }
+
+    #[test]
+    fn every_failure_has_its_own_short_message() {
+        let all = [
+            StartFailure::NoPreset,
+            StartFailure::Busy,
+            StartFailure::Exited,
+            StartFailure::Unquotable,
+            StartFailure::WriteFailed,
+        ];
+        let mut messages: Vec<_> = all.iter().map(|failure| failure.message()).collect();
+        messages.sort_unstable();
+        messages.dedup();
+
+        assert_eq!(messages.len(), all.len());
+        assert!(messages.iter().all(|message| message.len() < 48));
     }
 }

@@ -14,7 +14,6 @@ use super::super::terminal_widget::{
 };
 use super::super::theme;
 use super::super::usage_widget::UsageDashboardView;
-use super::claude_quick_start::titlebar::STRIP_GAP;
 use super::claude_quick_start::{StripArgs, paint_strip};
 use super::link::LinkBadgeView;
 pub(super) use super::panel_chrome::{
@@ -362,6 +361,10 @@ impl HorizonApp {
         self.panel_render_order
             .sort_by_key(|(panel_id, _)| Some(*panel_id) == focused);
 
+        self.hub
+            .quick_start
+            .drop_closed(self.board.panels.len(), |panel_id| self.board.panel(panel_id).is_some());
+
         let canvas_rect = self.canvas_rect(ctx);
         let mut panels_to_close = Vec::new();
 
@@ -543,9 +546,11 @@ impl HorizonApp {
                         right: quick_start_strip_right(
                             rects.titlebar,
                             if mic_eligible { rects.mic } else { rects.close },
+                            rects.collapse,
                             snapshot.scrollback_limit > 0,
                         ),
                         interactive,
+                        hovered: ui.rect_contains_pointer(rects.titlebar),
                     },
                 );
                 if quick_start.as_ref().is_some_and(|strip| strip.clicked) {
@@ -639,12 +644,7 @@ impl HorizonApp {
                             rects.titlebar,
                             // The rename editor must stop left of the mic
                             // control when one is shown.
-                            {
-                                let controls = if mic_eligible { rects.mic } else { rects.close };
-                                quick_start.as_ref().map_or(controls, |strip| {
-                                    controls.translate(Vec2::new(-(strip.rect.width() + STRIP_GAP), 0.0))
-                                })
-                            },
+                            if mic_eligible { rects.mic } else { rects.close },
                             snapshot.workspace_accent.is_some(),
                         ),
                         &mut self.panel_rename_buffer,

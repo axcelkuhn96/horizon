@@ -21,9 +21,10 @@ const MIN_STRIP_ROOM: f32 = 150.0;
 /// How long a busy probe stays valid; /proc is not read per frame.
 const BUSY_TTL: Duration = Duration::from_millis(1000);
 
-/// Shown tooltip of a disabled button.
-pub(in crate::app) const BUSY_TOOLTIP: &str = "Busy \u{2014} finish the running command first";
-pub(in crate::app) const READY_TOOLTIP: &str = "Start Claude in this terminal";
+/// Tooltips of the collapsed button, by availability.
+pub(super) const BUSY_TOOLTIP: &str = "Busy \u{2014} finish the running command first";
+pub(super) const EXITED_TOOLTIP: &str = "Shell exited \u{2014} nothing to type into";
+pub(super) const READY_TOOLTIP: &str = "Start Claude in this terminal";
 
 /// `true` when a panel this wide has room for the button.
 #[must_use]
@@ -31,14 +32,14 @@ pub(in crate::app) fn panel_is_wide_enough(panel_width: f32) -> bool {
     panel_width >= MIN_PANEL_WIDTH
 }
 
-/// X of the strip's right edge: just left of the history meter (or of the controls when there is
-/// none).
+/// X of the strip's right edge: just left of the history meter, or of the leftmost control (mic,
+/// collapse caret, close) when there is none; `controls_left` is that control's left edge.
 #[must_use]
-pub(in crate::app) fn strip_right(history_badge: Rect, has_history_meter: bool, controls: Rect) -> f32 {
+pub(in crate::app) fn strip_right(history_badge: Rect, has_history_meter: bool, controls_left: f32) -> f32 {
     if has_history_meter {
         history_badge.min.x - STRIP_GAP
     } else {
-        controls.min.x - 8.0
+        controls_left - 8.0
     }
 }
 
@@ -67,20 +68,33 @@ pub(super) fn paint_asterisk(painter: &Painter, center: Pos2, color: egui::Color
     }
 }
 
-/// Busy probes per panel, refreshed at most once per [`BUSY_TTL`].
+/// Busy probes per panel, refreshed at most once per [`BUSY_TTL`] and only for panels that ask.
 #[derive(Default)]
 pub(in crate::app) struct BusyCache {
     probes: HashMap<PanelId, (Instant, bool)>,
+    /// Panel count at the last eviction sweep.
+    swept_for: usize,
 }
 
 impl BusyCache {
-    /// Whether something other than the shell holds the terminal's foreground; `probe` runs
-    /// only when the cached answer is older than the TTL.
-    pub(in crate::app) fn is_busy(&mut self, panel_id: PanelId, now: Instant, probe: impl FnOnce() -> bool) -> bool {
-        if let Some((at, busy)) = self.probes.get(&panel_id)
-            && now.saturating_duration_since(*at) < BUSY_TTL
+    /// Whether something other than the shell holds the terminal's foreground. A fresh answer is
+    /// reused; a stale one is re-probed only when `may_probe` (the panel is hovered or its strip
+    /// is open), otherwise the last known answer stands (`false` when there is none).
+    pub(in crate::app) fn is_busy(
+        &mut self,
+        panel_id: PanelId,
+        now: Instant,
+        may_probe: bool,
+        probe: impl FnOnce() -> bool,
+    ) -> bool {
+        let cached = self.probes.get(&panel_id).copied();
+        if let Some((at, busy)) = cached
+            && now.saturating_duration_since(at) < BUSY_TTL
         {
-            return *busy;
+            return busy;
+        }
+        if !may_probe {
+            return cached.is_some_and(|(_, busy)| busy);
         }
         let busy = probe();
         self.probes.insert(panel_id, (now, busy));
@@ -91,13 +105,28 @@ impl BusyCache {
     pub(in crate::app) fn forget(&mut self, panel_id: PanelId) {
         self.probes.remove(&panel_id);
     }
+
+    /// Drops the probes of panels that were closed; sweeps only when the panel count moved.
+    pub(super) fn evict_closed(&mut self, panel_count: usize, live: impl Fn(PanelId) -> bool) {
+        if self.swept_for == panel_count {
+            return;
+        }
+        self.swept_for = panel_count;
+        self.probes.retain(|panel_id, _| live(*panel_id));
+    }
+
+    #[cfg(test)]
+    pub(super) fn len(&self) -> usize {
+        self.probes.len()
+    }
 }
 
 /// `true` when `/proc/<pid>/stat` says a job other than the shell owns the terminal: the
 /// terminal's foreground process group (`tpgid`) differs from the shell's own group (`pgrp`).
 /// Shells without a controlling terminal (`tpgid` -1 or 0) never count as busy.
+#[cfg(any(target_os = "linux", test))]
 #[must_use]
-pub(super) fn foreground_job_running(stat: &str) -> bool {
+fn foreground_job_running(stat: &str) -> bool {
     // `comm` sits in parentheses and may itself contain spaces and parentheses.
     let Some((_, after_comm)) = stat.rsplit_once(')') else {
         return false;
@@ -121,15 +150,7 @@ pub(in crate::app) fn shell_is_busy(child_pid: i32) -> bool {
         return false;
     };
     // With transcript capture the PTY child is a `script` wrapper; its child is the shell.
-    let wrapped = std::fs::read_to_string(format!("/proc/{pid}/comm")).is_ok_and(|comm| comm.trim_end() == "script");
-    let shell = if wrapped {
-        std::fs::read_to_string(format!("/proc/{pid}/task/{pid}/children"))
-            .ok()
-            .and_then(|children| children.split_whitespace().find_map(|token| token.parse::<u32>().ok()))
-            .unwrap_or(pid)
-    } else {
-        pid
-    };
+    let shell = horizon_core::shell_pid_behind_wrapper(pid);
     std::fs::read_to_string(format!("/proc/{shell}/stat")).is_ok_and(|stat| foreground_job_running(&stat))
 }
 
@@ -180,7 +201,7 @@ mod tests {
         let calls = Cell::new(0);
         let start = Instant::now();
         let mut ask = |at: Instant, answer: bool| {
-            cache.is_busy(PanelId(1), at, || {
+            cache.is_busy(PanelId(1), at, true, || {
                 calls.set(calls.get() + 1);
                 answer
             })
@@ -194,14 +215,48 @@ mod tests {
     }
 
     #[test]
+    fn a_panel_that_is_not_hovered_or_open_is_never_probed() {
+        let mut cache = BusyCache::default();
+        let start = Instant::now();
+
+        assert!(!cache.is_busy(PanelId(1), start, false, || panic!("probed an idle panel")));
+        assert_eq!(cache.len(), 0);
+        assert!(cache.is_busy(PanelId(1), start, true, || true));
+        assert!(
+            cache.is_busy(PanelId(1), start + BUSY_TTL * 5, false, || panic!(
+                "probed an idle panel"
+            )),
+            "the last known answer stands"
+        );
+    }
+
+    #[test]
     fn forgetting_a_panel_forces_a_fresh_probe() {
         let mut cache = BusyCache::default();
         let now = Instant::now();
-        assert!(cache.is_busy(PanelId(1), now, || true));
+        assert!(cache.is_busy(PanelId(1), now, true, || true));
 
         cache.forget(PanelId(1));
 
-        assert!(!cache.is_busy(PanelId(1), now, || false));
+        assert!(!cache.is_busy(PanelId(1), now, true, || false));
+    }
+
+    #[test]
+    fn probes_of_closed_panels_are_swept_when_the_panel_count_moves() {
+        let mut cache = BusyCache::default();
+        let now = Instant::now();
+        for id in 1..=3 {
+            cache.is_busy(PanelId(id), now, true, || false);
+        }
+
+        cache.evict_closed(3, |id| id != PanelId(2));
+        assert_eq!(cache.len(), 2);
+
+        cache.is_busy(PanelId(2), now, true, || false);
+        cache.evict_closed(3, |id| id != PanelId(2));
+        assert_eq!(cache.len(), 3, "no sweep while the count is unchanged");
+        cache.evict_closed(2, |id| id != PanelId(2));
+        assert_eq!(cache.len(), 2);
     }
 
     #[test]
@@ -210,7 +265,7 @@ mod tests {
         let history = Rect::from_min_size(Pos2::new(400.0, 7.0), Vec2::new(96.0, 20.0));
         let controls = Rect::from_min_size(Pos2::new(560.0, 9.0), Vec2::splat(16.0));
 
-        let right = strip_right(history, true, controls);
+        let right = strip_right(history, true, controls.min.x);
         assert!((right - (history.min.x - STRIP_GAP)).abs() < 1e-4);
         let rect = strip_rect(titlebar, right, 200.0);
         assert!((rect.max.x - right).abs() < 1e-4);
@@ -218,7 +273,7 @@ mod tests {
         assert!((rect.center().y - titlebar.center().y).abs() < 1e-4);
         assert!(titlebar.contains_rect(rect));
 
-        let without = strip_right(history, false, controls);
+        let without = strip_right(history, false, controls.min.x);
         assert!((without - (controls.min.x - 8.0)).abs() < 1e-4);
     }
 

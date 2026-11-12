@@ -1,12 +1,15 @@
 //! Drawing of the quick-start strip: chips in the family of the history meter (tinted fill,
 //! subtle stroke), the profile accent on the dot or star, dimmed when a login is unusable.
 
-use egui::{Align2, Color32, CornerRadius, FontId, Painter, Pos2, Rect, Stroke, StrokeKind, Vec2};
+use std::sync::Arc;
+
+use egui::{Color32, CornerRadius, Painter, Pos2, Rect, Stroke, StrokeKind, Vec2};
 
 use crate::theme;
 
 use super::layout::{CHIP_PAD, DOT, DOT_GAP, ID_GAP, LEAD_CHROME, MODE_PAD, STAR_WIDTH};
-use super::strip::{ItemKind, StripView, ViewItem};
+use super::placement::ItemKind;
+use super::strip::{NOTICE_PAD, NoticeView, StripView, ViewItem};
 use super::titlebar::paint_asterisk;
 
 const RADIUS: u8 = 7;
@@ -18,13 +21,39 @@ const DIM_OPACITY: f32 = 0.55;
 
 /// Paints the whole strip, on top of the titlebar.
 pub(in crate::app) fn paint_strip(painter: &Painter, view: &StripView) {
-    let mut painter = painter.clone();
+    let mut faded = painter.clone();
     if !view.enabled {
-        painter.multiply_opacity(DISABLED_OPACITY);
+        faded.multiply_opacity(DISABLED_OPACITY);
     }
-    for item in &view.items {
-        paint_item(&painter, item);
+    for item in view.items.as_slice() {
+        paint_item(&faded, item);
     }
+    if let Some(notice) = &view.notice {
+        paint_notice(painter, notice);
+    }
+}
+
+/// Why the last start did not run: a small chip left of the strip, over the title.
+fn paint_notice(painter: &Painter, notice: &NoticeView) {
+    painter.rect_filled(
+        notice.rect,
+        CornerRadius::same(RADIUS),
+        theme::alpha(theme::BG_ELEVATED(), 245),
+    );
+    painter.rect_stroke(
+        notice.rect,
+        CornerRadius::same(RADIUS),
+        Stroke::new(1.0_f32, theme::alpha(theme::PALETTE_YELLOW(), 200)),
+        StrokeKind::Outside,
+    );
+    painter.galley(
+        Pos2::new(
+            notice.rect.left() + NOTICE_PAD,
+            notice.rect.center().y - notice.text.size().y * 0.5,
+        ),
+        Arc::clone(&notice.text),
+        theme::FG(),
+    );
 }
 
 fn paint_item(painter: &Painter, item: &ViewItem) {
@@ -96,13 +125,13 @@ fn paint_launch(painter: &Painter, item: &ViewItem) {
         theme::ACCENT(),
         STAR_RADIUS,
     );
-    painter.text(
-        Pos2::new(rect.left() + 22.0, center_y),
-        Align2::LEFT_CENTER,
-        "Claude",
-        FontId::proportional(10.5),
-        text_color(item),
-    );
+    if let Some(caption) = &item.text {
+        painter.galley(
+            Pos2::new(rect.left() + 22.0, center_y - caption.size().y * 0.5),
+            Arc::clone(caption),
+            text_color(item),
+        );
+    }
     // Left-pointing chevron: the strip opens toward the title, anchored at the history meter.
     let tip = Pos2::new(rect.right() - 11.0, center_y);
     let stroke = Stroke::new(1.3_f32, theme::FG_DIM());
@@ -124,7 +153,7 @@ fn paint_chip(painter: &Painter, item: &ViewItem) {
     if let Some(name) = &item.text {
         painter.galley(
             Pos2::new(x, center_y - name.size().y * 0.5),
-            std::sync::Arc::clone(name),
+            Arc::clone(name),
             text_color(item),
         );
         x += name.size().x + ID_GAP;
@@ -132,7 +161,7 @@ fn paint_chip(painter: &Painter, item: &ViewItem) {
     if let Some(id) = &item.id {
         painter.galley(
             Pos2::new(x, center_y - id.size().y * 0.5),
-            std::sync::Arc::clone(id),
+            Arc::clone(id),
             theme::FG_DIM(),
         );
     }
@@ -152,7 +181,7 @@ fn paint_back(painter: &Painter, item: &ViewItem) {
     if let Some(name) = &item.text {
         painter.galley(
             Pos2::new(rect.left() + LEAD_CHROME - CHIP_PAD, center_y - name.size().y * 0.5),
-            std::sync::Arc::clone(name),
+            Arc::clone(name),
             theme::FG(),
         );
     }
@@ -183,7 +212,7 @@ fn paint_mode(painter: &Painter, item: &ViewItem) {
             item.rect.left() + MODE_PAD.min((item.rect.width() - text.size().x) * 0.5).max(0.0),
             item.rect.center().y - text.size().y * 0.5,
         );
-        painter.galley(pos, std::sync::Arc::clone(text), theme::FG());
+        painter.galley(pos, Arc::clone(text), theme::FG());
     }
 }
 
@@ -213,6 +242,6 @@ fn paint_close(painter: &Painter, item: &ViewItem) {
 fn paint_more(painter: &Painter, item: &ViewItem) {
     if let Some(text) = &item.text {
         let rect = Rect::from_center_size(item.rect.center(), text.size());
-        painter.galley(rect.min, std::sync::Arc::clone(text), theme::FG_DIM());
+        painter.galley(rect.min, Arc::clone(text), theme::FG_DIM());
     }
 }
