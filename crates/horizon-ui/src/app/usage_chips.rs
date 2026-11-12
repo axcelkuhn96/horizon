@@ -107,7 +107,40 @@ pub(super) fn window_text(window: Option<&UsageWindow>) -> String {
     }
 }
 
+/// Which of the 5h / 7d windows a profile shows. A window the API answered
+/// without a percentage (a plan with no 5h limit returns `five_hour: null`) does
+/// not exist for that account and is hidden entirely; `—` stays only for a
+/// profile that was never fetched.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct ShownWindows {
+    pub(super) five: bool,
+    pub(super) seven: bool,
+}
+
+impl ShownWindows {
+    #[must_use]
+    pub(super) fn of(usage: Option<&ProfileUsage>) -> Self {
+        let Some(usage) = usage else {
+            return Self {
+                five: true,
+                seven: true,
+            };
+        };
+        let exists = |window: &UsageWindow| usage.fetched_at_ms.is_none() || window.percent.is_some();
+        Self {
+            five: exists(&usage.five_hour),
+            seven: exists(&usage.seven_day),
+        }
+    }
+
+    #[must_use]
+    pub(super) fn shows(self, five_hour: bool) -> bool {
+        if five_hour { self.five } else { self.seven }
+    }
+}
+
 /// `("claude2 · gutosjc", "5h 37%  7d 12%")` — identity and usage halves of a chip label.
+/// The usage half is empty when the profile has no window to show.
 #[must_use]
 fn chip_label_parts(name: &str, usage: Option<&ProfileUsage>, compact: bool) -> (String, String) {
     let id_max = if compact { IDENT_MAX_COMPACT } else { IDENT_MAX_FULL };
@@ -115,28 +148,18 @@ fn chip_label_parts(name: &str, usage: Option<&ProfileUsage>, compact: bool) -> 
         Some(id) => format!("{name} \u{b7} {id}"),
         None => name.to_owned(),
     };
-    let tail = match usage {
-        None => {
-            if compact {
-                "7d \u{2014}".to_owned()
-            } else {
-                "5h \u{2014}  7d \u{2014}".to_owned()
-            }
-        }
-        Some(u) => {
-            let seven = match u.state {
-                UsageState::Expired => "expired".to_owned(),
-                UsageState::Missing => "no login".to_owned(),
-                UsageState::Ok | UsageState::Stale => format!("7d {}", window_text(Some(&u.seven_day))),
-            };
-            if compact {
-                seven
-            } else {
-                format!("5h {}  {seven}", window_text(Some(&u.five_hour)))
-            }
-        }
-    };
-    (head, tail)
+    let shown = ShownWindows::of(usage);
+    let mut parts: Vec<String> = Vec::new();
+    if !compact && shown.five {
+        parts.push(format!("5h {}", window_text(usage.map(|u| &u.five_hour))));
+    }
+    match usage.map(|u| u.state) {
+        Some(UsageState::Expired) => parts.push("expired".to_owned()),
+        Some(UsageState::Missing) => parts.push("no login".to_owned()),
+        _ if shown.seven => parts.push(format!("7d {}", window_text(usage.map(|u| &u.seven_day)))),
+        _ => {}
+    }
+    (head, parts.join("  "))
 }
 
 /// One-line chip text, for accessibility and the overflow menu:
@@ -145,7 +168,11 @@ fn chip_label_parts(name: &str, usage: Option<&ProfileUsage>, compact: bool) -> 
 #[must_use]
 pub(super) fn chip_label(usage: &ProfileUsage, compact: bool) -> String {
     let (head, tail) = chip_label_parts(&usage.name, Some(usage), compact);
-    format!("{head}  {tail}")
+    if tail.is_empty() {
+        head
+    } else {
+        format!("{head}  {tail}")
+    }
 }
 
 /// How a chip presents its profile.
@@ -199,24 +226,27 @@ fn count_as_f32(count: usize) -> f32 {
 }
 
 /// Full chip: dot, name, id, 5h group and 7d group (or a status pill in place of 7d).
+/// A hidden window takes no space.
 #[must_use]
-fn full_chip_width(name_w: f32, id_w: f32, pill_w: Option<f32>) -> f32 {
-    CHIP_PAD
-        + DOT_DIAMETER
-        + DOT_GAP
-        + name_w
-        + id_w
-        + SECTION_GAP
-        + GROUP_WIDTH_FULL
-        + SECTION_GAP
-        + pill_w.unwrap_or(GROUP_WIDTH_FULL)
-        + CHIP_PAD
+fn full_chip_width(name_w: f32, id_w: f32, pill_w: Option<f32>, shown: ShownWindows) -> f32 {
+    let mut width = CHIP_PAD + DOT_DIAMETER + DOT_GAP + name_w + id_w + CHIP_PAD;
+    if shown.five {
+        width += SECTION_GAP + GROUP_WIDTH_FULL;
+    }
+    if pill_w.is_some() || shown.seven {
+        width += SECTION_GAP + pill_w.unwrap_or(GROUP_WIDTH_FULL);
+    }
+    width
 }
 
 /// Compact chip: dot, name, id, then only the 7d group (or the status pill).
 #[must_use]
-fn compact_chip_width(name_w: f32, id_w: f32, pill_w: Option<f32>) -> f32 {
-    CHIP_PAD + DOT_DIAMETER + DOT_GAP + name_w + id_w + SECTION_GAP + pill_w.unwrap_or(GROUP_WIDTH_COMPACT) + CHIP_PAD
+fn compact_chip_width(name_w: f32, id_w: f32, pill_w: Option<f32>, shown: ShownWindows) -> f32 {
+    let mut width = CHIP_PAD + DOT_DIAMETER + DOT_GAP + name_w + id_w + CHIP_PAD;
+    if pill_w.is_some() || shown.seven {
+        width += SECTION_GAP + pill_w.unwrap_or(GROUP_WIDTH_COMPACT);
+    }
+    width
 }
 
 /// Widths of every chip in both presentations, in profile order. Empty means
@@ -430,14 +460,18 @@ fn build_cache(painter: &Painter, entries: &[ChipEntry], slots: &[usize], key: (
         let id_compact = id_galley(painter, entry.id(true));
         let pill_width = entry.pill_text().map(|text| hub_ui::pill_width(painter, text));
         let width_of = |galley: &Option<Arc<Galley>>| galley.as_ref().map_or(0.0, |g| g.size().x);
-        cache
-            .widths
-            .full
-            .push(full_chip_width(name_full.size().x, width_of(&id_full), pill_width));
+        let shown = ShownWindows::of(entry.usage.as_ref());
+        cache.widths.full.push(full_chip_width(
+            name_full.size().x,
+            width_of(&id_full),
+            pill_width,
+            shown,
+        ));
         cache.widths.compact.push(compact_chip_width(
             name_compact.size().x,
             width_of(&id_compact),
             pill_width,
+            shown,
         ));
         let usage = entry.usage.as_ref();
         let (label_five, pct_five) = window_galleys(painter, "5h", usage.map(|u| &u.five_hour));

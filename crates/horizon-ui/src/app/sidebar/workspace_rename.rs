@@ -9,7 +9,9 @@ use std::time::{Duration, Instant};
 use egui::{Context, CornerRadius, FontId, Rect, Ui, Vec2};
 use horizon_core::WorkspaceId;
 
+use super::auto_hide::{RENAME_PIN_IDLE, RenamePin, rename_pin_step};
 use crate::app::panels::show_inline_rename_editor;
+use crate::app::util;
 use crate::app::{HorizonApp, RenameEditAction};
 use crate::theme;
 
@@ -42,11 +44,13 @@ impl HorizonApp {
         let now = Instant::now();
         let Some(visible) = label_visible else {
             self.hub.rename_label_missing_since = None;
+            self.sidebar_auto_hide.rename_pin_anchor = None;
             return;
         };
         let missing = update_label_missing_since(self.hub.rename_label_missing_since, visible, now);
         self.hub.rename_label_missing_since = missing;
         let Some(since) = missing else {
+            self.sidebar_auto_hide.rename_pin_anchor = None;
             return;
         };
         if label_wait_elapsed(missing, now) {
@@ -55,9 +59,38 @@ impl HorizonApp {
             if !self.sidebar_visible {
                 self.clear_workspace_rename();
                 self.hub.rename_label_missing_since = None;
+            } else if self.template_config.overlays.sidebar_auto_hide {
+                // Without auto-hide the sidebar is always open: nothing to unpin.
+                self.limit_sidebar_rename_pin(ctx, now);
             }
         } else {
             ctx.request_repaint_after(LABEL_WAIT.saturating_sub(now.saturating_duration_since(since)));
+        }
+    }
+
+    /// The sidebar hosts the rename and keeps itself open for it; that pin ends with the rename
+    /// or, if nobody finishes it, after [`RENAME_PIN_IDLE`] without pointer or typing activity.
+    fn limit_sidebar_rename_pin(&mut self, ctx: &Context, now: Instant) {
+        let sidebar_edge = self.reserved_sidebar_width(util::viewport_local_rect(ctx).width());
+        let activity = ctx.input(|input| {
+            let pointer_on_sidebar = input.pointer.interact_pos().is_some_and(|pos| pos.x <= sidebar_edge);
+            let typing = input
+                .events
+                .iter()
+                .any(|event| matches!(event, egui::Event::Key { .. } | egui::Event::Text(_)));
+            pointer_on_sidebar || typing
+        });
+        match rename_pin_step(self.sidebar_auto_hide.rename_pin_anchor, activity, now) {
+            RenamePin::Hold(anchor) => {
+                self.sidebar_auto_hide.rename_pin_anchor = Some(anchor);
+                // No input arrives while idle: wake up when the limit would be reached.
+                ctx.request_repaint_after(RENAME_PIN_IDLE.saturating_sub(now.saturating_duration_since(anchor)));
+            }
+            RenamePin::Abandon => {
+                self.clear_workspace_rename();
+                self.sidebar_auto_hide.rename_pin_anchor = None;
+                self.hub.rename_label_missing_since = None;
+            }
         }
     }
 

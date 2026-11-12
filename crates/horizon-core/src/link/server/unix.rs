@@ -143,6 +143,10 @@ fn is_stale(path: &Path) -> bool {
 }
 
 /// Removes `<pid>.sock` files of dead instances from `dir`.
+///
+/// This is the only cleanup for an instance killed by `SIGTERM`/`SIGKILL`: Horizon installs no
+/// signal handler (no signal crate, `forbid(unsafe_code)`), so [`LinkServer`]'s `Drop` never
+/// runs there and the next start sweeps the leftover.
 fn sweep_stale_sockets(dir: &Path) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
@@ -414,6 +418,27 @@ mod tests {
         fs::write(&path, b"not a socket").expect("write file");
         assert!(LinkServer::start(path.clone()).is_err());
         assert!(path.exists(), "regular file must be left alone");
+    }
+
+    #[test]
+    fn start_sweeps_sockets_left_by_dead_instances_only() {
+        let (_guard, path) = temp_socket("6.sock");
+        let dir = path.parent().expect("parent").to_path_buf();
+        fs::create_dir_all(&dir).expect("mkdir");
+        // A killed instance leaves its socket behind: the listener is gone, the file stays.
+        drop(UnixListener::bind(dir.join("99999.sock")).expect("bind dead"));
+        let live = UnixListener::bind(dir.join("88888.sock")).expect("bind live");
+        // Not `<pid>.sock`: left alone even when nobody listens.
+        drop(UnixListener::bind(dir.join("notes.sock")).expect("bind other"));
+        fs::write(dir.join("77777.sock"), b"regular file").expect("write file");
+
+        let _server = LinkServer::start(path).expect("start");
+
+        assert!(!dir.join("99999.sock").exists(), "dead pid socket is swept");
+        assert!(dir.join("88888.sock").exists(), "live socket is kept");
+        assert!(dir.join("notes.sock").exists(), "non-pid names are kept");
+        assert!(dir.join("77777.sock").exists(), "regular files are kept");
+        drop(live);
     }
 
     #[test]

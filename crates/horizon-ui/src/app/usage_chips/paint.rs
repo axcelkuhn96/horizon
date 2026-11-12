@@ -12,7 +12,7 @@ use horizon_core::claude_usage::{ProfileUsage, UsageState, UsageWindow, remainin
 use super::{
     BAR_WIDTH_COMPACT, BAR_WIDTH_FULL, CHIP_GAP, CHIP_HEIGHT, CHIP_PAD, ChipEntry, ChipLayout, ChipStatus, ChipsPlan,
     ClaudeUsageState, DOT_DIAMETER, DOT_GAP, GROUP_WIDTH_FULL, LABEL_GAP, LABEL_WIDTH, PCT_WIDTH, SECTION_GAP,
-    api_severity, chip_label, chip_label_parts, chip_status, severity_for, time,
+    ShownWindows, api_severity, chip_label, chip_label_parts, chip_status, severity_for, time,
 };
 use crate::app::hub_ui::{self, Severity};
 use crate::theme;
@@ -234,15 +234,17 @@ fn paint_chip(painter: &egui::Painter, rect: Rect, entry: &ChipEntry, layout: &C
         );
         x += id.size().x;
     }
-    x += SECTION_GAP;
 
     let usage = entry.usage.as_ref();
-    if !look.compact {
+    let shown = ShownWindows::of(usage);
+    if !look.compact && shown.five {
+        x += SECTION_GAP;
         paint_group(painter, Pos2::new(x, cy), layout, usage, true, look);
-        x += GROUP_WIDTH_FULL + SECTION_GAP;
+        x += GROUP_WIDTH_FULL;
     }
     match (entry.pill_text(), layout.pill_width) {
         (Some(text), Some(width)) => {
+            x += SECTION_GAP;
             let color = if look.status == ChipStatus::Expired {
                 theme::PALETTE_YELLOW()
             } else {
@@ -251,7 +253,11 @@ fn paint_chip(painter: &egui::Painter, rect: Rect, entry: &ChipEntry, layout: &C
             let pill = hub_ui::pill_rect(Pos2::new(x, cy - 9.0), width);
             hub_ui::pill(painter, pill, text, color);
         }
-        _ => paint_group(painter, Pos2::new(x, cy), layout, usage, false, look),
+        _ if shown.seven => {
+            x += SECTION_GAP;
+            paint_group(painter, Pos2::new(x, cy), layout, usage, false, look);
+        }
+        _ => {}
     }
 }
 
@@ -383,7 +389,11 @@ fn tooltip_body(
     separator(ui);
 
     let usage = entry.usage.as_ref();
+    let shown = ShownWindows::of(usage);
     for (label, five_hour) in [("5h", true), ("7d", false)] {
+        if !shown.shows(five_hour) {
+            continue;
+        }
         let window = usage.map(|u| if five_hour { &u.five_hour } else { &u.seven_day });
         let reset = if five_hour {
             &entry.reset_five
@@ -393,7 +403,9 @@ fn tooltip_body(
         let api = usage.and_then(|u| api_severity(u, five_hour));
         window_rows(ui, label, window, api, reset.as_ref(), now_ms);
     }
-    separator(ui);
+    if shown.five || shown.seven {
+        separator(ui);
+    }
 
     if let Some(tokens) = tokens_today {
         tokens_row(ui, tokens);

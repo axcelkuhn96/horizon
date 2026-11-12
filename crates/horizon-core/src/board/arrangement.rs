@@ -1,6 +1,6 @@
 use crate::layout::{
     TILE_GAP, WORKSPACE_GAP, WS_COLLISION_GAP, WS_EMPTY_FRAME_SIZE, WS_FRAME_PAD, WS_FRAME_TOP_EXTRA, WS_INNER_PAD,
-    ceil_sqrt_usize, tiled_panel_position, usize_to_f32, workspace_slot_width,
+    ceil_sqrt_usize, first_free_tile_slot, tiled_panel_position, usize_to_f32, workspace_slot_width,
 };
 use crate::panel::{DEFAULT_PANEL_SIZE, PanelId};
 use crate::workspace::{Workspace, WorkspaceId};
@@ -288,9 +288,16 @@ impl Board {
         [right_edge, 40.0]
     }
 
-    pub(super) fn default_panel_position(&self, workspace: WorkspaceId) -> [f32; 2] {
+    /// Free tile for a new panel of `size` in `workspace`; `exclude` is a panel already listed in
+    /// the workspace that is being (re)placed and must not block its own slot.
+    pub(super) fn default_panel_position(
+        &self,
+        workspace: WorkspaceId,
+        size: [f32; 2],
+        exclude: Option<PanelId>,
+    ) -> [f32; 2] {
         if let Some(ws) = self.workspace(workspace) {
-            return self.first_free_tile_position(ws);
+            return self.first_free_tile_position(ws, size, exclude);
         }
         tiled_panel_position([0.0, 0.0], 0)
     }
@@ -421,24 +428,16 @@ impl Board {
         }
     }
 
-    fn first_free_tile_position(&self, workspace: &Workspace) -> [f32; 2] {
-        let occupied: Vec<[f32; 2]> = workspace
+    fn first_free_tile_position(&self, workspace: &Workspace, size: [f32; 2], exclude: Option<PanelId>) -> [f32; 2] {
+        let occupied: Vec<([f32; 2], [f32; 2])> = workspace
             .panels
             .iter()
+            .filter(|id| Some(**id) != exclude)
             .filter_map(|id| self.panel(*id))
-            .map(|p| p.layout.position)
+            .map(|p| (p.layout.position, p.layout.size))
             .collect();
 
-        let origin = workspace.position;
-        let search_limit = occupied.len();
-        for index in 0..=search_limit {
-            let candidate = tiled_panel_position(origin, index);
-            if !position_occupied(&occupied, candidate) {
-                return candidate;
-            }
-        }
-
-        tiled_panel_position(origin, search_limit)
+        first_free_tile_slot(workspace.position, size, &occupied)
     }
 
     /// Returns the visual frame rect `[min_x, min_y, max_x, max_y]` for a
@@ -522,12 +521,6 @@ fn grid_panel_size_from_content(content: [f32; 2], cols: usize, rows: usize) -> 
     let w = ((content[0] - (cols_f - 1.0) * TILE_GAP) / cols_f).max(DEFAULT_PANEL_SIZE[0]);
     let h = ((content[1] - (rows_f - 1.0) * TILE_GAP) / rows_f).max(DEFAULT_PANEL_SIZE[1]);
     [w, h]
-}
-
-fn position_occupied(positions: &[[f32; 2]], candidate: [f32; 2]) -> bool {
-    positions
-        .iter()
-        .any(|pos| (pos[0] - candidate[0]).abs() < 1.0 && (pos[1] - candidate[1]).abs() < 1.0)
 }
 
 #[derive(Clone, Copy)]
