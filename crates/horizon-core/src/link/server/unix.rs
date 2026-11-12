@@ -3,7 +3,7 @@ use std::io::{self, Read, Write};
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -20,7 +20,14 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
 const REPLY_POLL: Duration = Duration::from_millis(50);
+/// Connections serving a request at once. Connections parked on an `ask` do not count
+/// (see [`MAX_HELD_ASKS`]), so waiting asks cannot starve `list`/`send`/`read`.
 const MAX_CONNECTIONS: usize = 16;
+/// Extra connections that may sit waiting for an ask reply (matches the ask table's cap).
+const MAX_HELD_ASKS: usize = crate::link::MAX_ASKS_TOTAL;
+/// Slack past an ask's own timeout before its connection gives up by itself, so the UI's
+/// timeout error normally wins.
+const ASK_WAIT_SLACK: Duration = Duration::from_secs(2);
 const DRAIN_LIMIT: usize = 4 * MAX_REQUEST_BYTES;
 /// Whole-drain deadline after the answer is written, so a client that keeps sending
 /// cannot hold a connection slot (nor block shutdown).
@@ -168,6 +175,7 @@ fn accept_loop(
     waker: Option<&Waker>,
 ) {
     let mut workers: Vec<JoinHandle<()>> = Vec::new();
+    let held = Arc::new(AtomicUsize::new(0));
     while !stop.load(Ordering::Relaxed) {
         let (finished, running): (Vec<_>, Vec<_>) = workers.into_iter().partition(JoinHandle::is_finished);
         workers = running;
@@ -179,7 +187,10 @@ fn accept_loop(
                 if stream.set_nonblocking(false).is_err() {
                     continue;
                 }
-                if workers.len() >= MAX_CONNECTIONS {
+                let parked = held.load(Ordering::Acquire);
+                if workers.len().saturating_sub(parked) >= MAX_CONNECTIONS
+                    || workers.len() >= MAX_CONNECTIONS + MAX_HELD_ASKS
+                {
                     let busy = error_response(&LinkError::BadRequest("server busy".to_owned()));
                     write_response(&mut stream, &busy);
                     continue;
@@ -187,9 +198,10 @@ fn accept_loop(
                 let sender = sender.clone();
                 let stop = Arc::clone(stop);
                 let waker = waker.cloned();
+                let held = Arc::clone(&held);
                 match thread::Builder::new()
                     .name("horizon-link-conn".to_owned())
-                    .spawn(move || handle_connection(stream, &sender, &stop, waker.as_ref()))
+                    .spawn(move || handle_connection(stream, &sender, &stop, waker.as_ref(), &held))
                 {
                     Ok(worker) => workers.push(worker),
                     Err(error) => tracing::warn!("link: cannot spawn connection thread: {error}"),
@@ -219,11 +231,12 @@ fn handle_connection(
     sender: &mpsc::Sender<PendingRequest>,
     stop: &AtomicBool,
     waker: Option<&Waker>,
+    held: &AtomicUsize,
 ) {
     let response = match read_request_line(&mut stream, stop) {
         Ok(None) => return,
         Ok(Some(line)) => match parse_request_line(&line) {
-            Ok(request) => forward(request, sender, stop, waker),
+            Ok(request) => forward(request, sender, stop, waker, held),
             Err(error) => error_response(&error),
         },
         Err(error) => error_response(&error),
@@ -280,13 +293,49 @@ fn read_request_line(stream: &mut UnixStream, stop: &AtomicBool) -> Result<Optio
     Ok((terminated || !line.is_empty()).then_some(line))
 }
 
+/// Counts a connection as parked on an ask for as long as it lives.
+struct HeldGuard<'a>(Option<&'a AtomicUsize>);
+
+impl<'a> HeldGuard<'a> {
+    fn new(held: &'a AtomicUsize, parked: bool) -> Self {
+        if parked {
+            held.fetch_add(1, Ordering::AcqRel);
+        }
+        Self(parked.then_some(held))
+    }
+}
+
+impl Drop for HeldGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(held) = self.0 {
+            held.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+}
+
+/// How long the connection waits for the UI's answer: a short bound for ordinary requests,
+/// the ask's own timeout (plus slack) for an `ask`, which the UI answers only on reply.
+fn reply_wait(request: &crate::link::LinkRequest) -> Duration {
+    match request {
+        crate::link::LinkRequest::Ask { timeout_secs, .. } => Duration::from_secs(*timeout_secs) + ASK_WAIT_SLACK,
+        _ => REPLY_TIMEOUT,
+    }
+}
+
 /// Hands the request to the UI thread and waits (bounded) for its answer.
 fn forward(
     request: crate::link::LinkRequest,
     sender: &mpsc::Sender<PendingRequest>,
     stop: &AtomicBool,
     waker: Option<&Waker>,
+    held: &AtomicUsize,
 ) -> LinkResponse {
+    let wait = reply_wait(&request);
+    let ask_secs = match &request {
+        crate::link::LinkRequest::Ask { timeout_secs, .. } => Some(*timeout_secs),
+        _ => None,
+    };
+    let _parked = HeldGuard::new(held, matches!(request, crate::link::LinkRequest::Ask { .. }));
     let (reply, answer) = mpsc::channel();
     let abandoned = Arc::new(AtomicBool::new(false));
     let pending = PendingRequest {
@@ -300,7 +349,7 @@ fn forward(
     if let Some(waker) = waker {
         waker();
     }
-    let deadline = Instant::now() + REPLY_TIMEOUT;
+    let deadline = Instant::now() + wait;
     while Instant::now() < deadline && !stop.load(Ordering::Relaxed) {
         match answer.recv_timeout(REPLY_POLL) {
             Ok(response) => return response,
@@ -310,7 +359,10 @@ fn forward(
     }
     // The client is about to be told "no answer": the UI side must not run it later.
     abandoned.store(true, Ordering::Release);
-    error_response(&LinkError::Io("no answer from Horizon".to_owned()))
+    match ask_secs {
+        Some(secs) => error_response(&LinkError::AskTimeout(secs)),
+        None => error_response(&LinkError::Io("no answer from Horizon".to_owned())),
+    }
 }
 
 fn write_response(stream: &mut UnixStream, response: &LinkResponse) {
@@ -610,6 +662,84 @@ mod tests {
             other @ LinkResponse::Ok(_) => panic!("expected busy error, got {other:?}"),
         }
         drop(holders);
+    }
+
+    #[test]
+    fn server_limits_concurrent_connections_but_parked_asks_do_not_count() {
+        let (_guard, path) = temp_socket("ask-cap.sock");
+        let server = LinkServer::start(path.clone()).expect("start");
+        let ask_path = path.clone();
+        let ask = thread::spawn(move || {
+            exchange(
+                &ask_path,
+                b"{\"v\":1,\"op\":\"ask\",\"from\":\"1\",\"target\":\"2\",\"text\":\"q\",\"timeout_secs\":5}\n",
+            )
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let pending = loop {
+            if let Some(pending) = server.try_recv() {
+                break pending;
+            }
+            assert!(Instant::now() < deadline, "ask never arrived");
+            thread::sleep(Duration::from_millis(5));
+        };
+        // The ask is parked: MAX_CONNECTIONS idle holders still all get a slot.
+        let holders: Vec<UnixStream> = (0..MAX_CONNECTIONS)
+            .map(|_| UnixStream::connect(&path).expect("connect"))
+            .collect();
+        thread::sleep(Duration::from_millis(200));
+        // The last holder was accepted: it got no "busy" line.
+        let mut last = holders.last().expect("holder").try_clone().expect("clone");
+        last.set_read_timeout(Some(Duration::from_millis(300)))
+            .expect("timeout");
+        let mut byte = [0_u8; 1];
+        let read = io::Read::read(&mut last, &mut byte);
+        assert!(
+            matches!(&read, Err(error) if matches!(error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut)),
+            "the holder behind a parked ask was refused: {read:?}"
+        );
+        let extra = UnixStream::connect(&path).expect("connect");
+        extra.set_read_timeout(Some(Duration::from_secs(2))).expect("timeout");
+        let mut reply = String::new();
+        std::io::BufRead::read_line(&mut BufReader::new(&extra), &mut reply).expect("busy reply");
+        assert!(reply.contains("server busy"), "{reply}");
+        drop(holders);
+        pending
+            .reply
+            .send(LinkResponse::Ok(LinkOk::Text("done".to_owned())))
+            .expect("answer");
+        assert_eq!(
+            ask.join().expect("ask client"),
+            LinkResponse::Ok(LinkOk::Text("done".to_owned()))
+        );
+    }
+
+    #[test]
+    fn ask_connection_that_gets_no_answer_reports_a_timeout() {
+        let (_guard, path) = temp_socket("ask-timeout.sock");
+        let server = LinkServer::start(path.clone()).expect("start");
+        let line = b"{\"v\":1,\"op\":\"ask\",\"from\":\"1\",\"target\":\"2\",\"text\":\"q\",\"timeout_secs\":5}\n";
+        let client_path = path.clone();
+        let client = thread::spawn(move || exchange(&client_path, line));
+        let started = Instant::now();
+        let response = client.join().expect("client");
+        assert!(
+            matches!(
+                response,
+                LinkResponse::Err {
+                    code: LinkErrorCode::AskTimeout,
+                    ..
+                }
+            ),
+            "{response:?}"
+        );
+        assert!(
+            started.elapsed() >= Duration::from_secs(6),
+            "waited only {:?}",
+            started.elapsed()
+        );
+        let pending = server.try_recv().expect("the ask reached the UI side");
+        assert!(pending.is_abandoned());
     }
 
     #[test]

@@ -3,10 +3,12 @@
 use std::time::Instant;
 
 use horizon_core::WorkspaceId;
+use horizon_core::link::AskTable;
 
 use super::claude_launcher::ClaudeLauncherState;
+use super::hub_toast::HubToasts;
 use super::hub_ui;
-use super::link::LinkUiState;
+use super::link::{LinkUiState, LinkVisual};
 use super::sidebar::GitSidebarState;
 use super::usage_chips::ClaudeUsageState;
 
@@ -37,6 +39,12 @@ pub(super) struct HubState {
     pub(super) git: GitSidebarState,
     /// Panel-link server, receive badges and the send-to-panel dialog.
     pub(super) link: LinkUiState,
+    /// Asks waiting for a reply; their connections are held by the link server.
+    pub(super) link_asks: AskTable,
+    /// Recent messages drawn as a line between the two panels.
+    pub(super) link_visuals: Vec<LinkVisual>,
+    /// Toasts of the hub features (link results, agent status, usage alerts).
+    pub(super) toasts: HubToasts,
 }
 
 impl HubState {

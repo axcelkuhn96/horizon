@@ -9,17 +9,37 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use horizon_core::link::{
-    DEFAULT_READ_LINES, LINK_PROTOCOL_VERSION, LinkOk, LinkRequest, LinkResponse, MAX_REQUEST_BYTES, PanelInfo,
-    RequestEnvelope, strip_escapes,
+    ASK_DEFAULT_TIMEOUT_SECS, ASK_MAX_TIMEOUT_SECS, ASK_MIN_TIMEOUT_SECS, DEFAULT_READ_LINES, LINK_PROTOCOL_VERSION,
+    LinkErrorCode, LinkOk, LinkRequest, LinkResponse, MAX_REQUEST_BYTES, PanelInfo, RequestEnvelope, SendTarget,
+    strip_escapes,
 };
 
-const USAGE: &str = "usage:\n  horizon link list\n  horizon link send <target> <text>... [--no-enter]\n  horizon link read <target> [--lines N]";
+const USAGE: &str = "usage:\n  horizon link list\n  horizon link send <target> <text>... [--no-enter]\n  horizon link send --all-in-workspace <text>... [--no-enter]\n  horizon link ask <target> <question>... [--timeout 120]\n  horizon link reply <ask-id> <answer>...\n  horizon link read <target> [--lines N]";
+
+/// Exit code of a failed `ask` that got no answer in time (other failures exit 1).
+const EXIT_ASK_TIMEOUT: u8 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum LinkCommand {
     List,
-    Send { target: String, text: String, enter: bool },
-    Read { target: String, lines: usize },
+    Send {
+        target: SendTarget,
+        text: String,
+        enter: bool,
+    },
+    Read {
+        target: String,
+        lines: usize,
+    },
+    Ask {
+        target: String,
+        text: String,
+        timeout_secs: u64,
+    },
+    Reply {
+        ask_id: String,
+        text: String,
+    },
 }
 
 /// Parses the arguments that follow `horizon link`.
@@ -31,6 +51,8 @@ pub(crate) fn parse_link_args(args: &[String]) -> Result<LinkCommand, String> {
         "list" if rest.is_empty() => Ok(LinkCommand::List),
         "list" => Err(format!("'list' takes no arguments\n{USAGE}")),
         "send" => parse_send(rest),
+        "ask" => parse_ask(rest),
+        "reply" => parse_reply(rest),
         "read" => parse_read(rest),
         other => Err(format!("unknown subcommand '{other}'\n{USAGE}")),
     }
@@ -38,6 +60,7 @@ pub(crate) fn parse_link_args(args: &[String]) -> Result<LinkCommand, String> {
 
 fn parse_send(args: &[String]) -> Result<LinkCommand, String> {
     let mut enter = true;
+    let mut all_in_workspace = false;
     let mut words: Vec<&str> = Vec::new();
     let mut literal = false;
     for arg in args {
@@ -47,11 +70,23 @@ fn parse_send(args: &[String]) -> Result<LinkCommand, String> {
             literal = true;
         } else if arg == "--no-enter" {
             enter = false;
+        } else if arg == "--all-in-workspace" {
+            all_in_workspace = true;
         } else if arg.starts_with("--") {
             return Err(format!("unknown option '{arg}'\n{USAGE}"));
         } else {
             words.push(arg);
         }
+    }
+    if all_in_workspace {
+        if words.is_empty() {
+            return Err(format!("'send --all-in-workspace' needs a text\n{USAGE}"));
+        }
+        return Ok(LinkCommand::Send {
+            target: SendTarget::AllInWorkspace,
+            text: words.join(" "),
+            enter,
+        });
     }
     let Some((target, text)) = words.split_first() else {
         return Err(format!("'send' needs a target and a text\n{USAGE}"));
@@ -60,9 +95,78 @@ fn parse_send(args: &[String]) -> Result<LinkCommand, String> {
         return Err(format!("'send' needs a text\n{USAGE}"));
     }
     Ok(LinkCommand::Send {
-        target: (*target).to_owned(),
+        target: SendTarget::panel(*target),
         text: text.join(" "),
         enter,
+    })
+}
+
+fn parse_ask(args: &[String]) -> Result<LinkCommand, String> {
+    let mut timeout_secs = ASK_DEFAULT_TIMEOUT_SECS;
+    let mut words: Vec<&str> = Vec::new();
+    let mut literal = false;
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if literal {
+            words.push(arg);
+        } else if arg == "--" {
+            literal = true;
+        } else if arg == "--timeout" {
+            let value = iter
+                .next()
+                .ok_or_else(|| format!("'--timeout' needs a number of seconds\n{USAGE}"))?;
+            timeout_secs = value
+                .parse::<u64>()
+                .ok()
+                .filter(|secs| (ASK_MIN_TIMEOUT_SECS..=ASK_MAX_TIMEOUT_SECS).contains(secs))
+                .ok_or_else(|| {
+                    format!("'--timeout' must be between {ASK_MIN_TIMEOUT_SECS} and {ASK_MAX_TIMEOUT_SECS} seconds, got '{value}'")
+                })?;
+        } else if arg.starts_with("--") {
+            return Err(format!("unknown option '{arg}'\n{USAGE}"));
+        } else {
+            words.push(arg);
+        }
+    }
+    let Some((target, text)) = words.split_first() else {
+        return Err(format!("'ask' needs a target and a question\n{USAGE}"));
+    };
+    if text.is_empty() {
+        return Err(format!("'ask' needs a question\n{USAGE}"));
+    }
+    Ok(LinkCommand::Ask {
+        target: (*target).to_owned(),
+        text: text.join(" "),
+        timeout_secs,
+    })
+}
+
+fn parse_reply(args: &[String]) -> Result<LinkCommand, String> {
+    let mut words: Vec<&str> = Vec::new();
+    let mut literal = false;
+    for arg in args {
+        if literal {
+            words.push(arg);
+        } else if arg == "--" {
+            literal = true;
+        } else if arg.starts_with("--") {
+            return Err(format!("unknown option '{arg}'\n{USAGE}"));
+        } else {
+            words.push(arg);
+        }
+    }
+    let Some((ask_id, text)) = words.split_first() else {
+        return Err(format!("'reply' needs an ask id and an answer\n{USAGE}"));
+    };
+    if text.is_empty() {
+        return Err(format!("'reply' needs an answer\n{USAGE}"));
+    }
+    if !ask_id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(format!("'{ask_id}' is not an ask id (the id in `[ask <id> from ...]`)"));
+    }
+    Ok(LinkCommand::Reply {
+        ask_id: (*ask_id).to_owned(),
+        text: text.join(" "),
     })
 }
 
@@ -114,9 +218,22 @@ fn sender_name(value: Option<&OsStr>) -> Option<String> {
     (!name.is_empty()).then_some(name)
 }
 
+/// This panel's id (`HORIZON_PANEL_ID`): digits, letters and dashes only, capped; `None`
+/// when unset or empty.
+fn panel_id(value: Option<&OsStr>) -> Option<String> {
+    let id: String = value?
+        .to_string_lossy()
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '-' || *ch == '_')
+        .take(MAX_SENDER_CHARS)
+        .collect();
+    (!id.is_empty()).then_some(id)
+}
+
 /// Serializes the command into one newline-terminated request line. `from` names the sending
-/// panel and travels with `send` only.
-fn request_line(command: &LinkCommand, from: Option<&str>) -> Result<String, String> {
+/// panel (badge label) and travels with `send` only; `panel_id` identifies it for the
+/// requests that need to know who is talking (`ask`, `reply`, a workspace broadcast).
+fn request_line(command: &LinkCommand, from: Option<&str>, panel_id: Option<&str>) -> Result<String, String> {
     let request = match command {
         LinkCommand::List => LinkRequest::List,
         LinkCommand::Send { target, text, enter } => LinkRequest::Send {
@@ -124,6 +241,22 @@ fn request_line(command: &LinkCommand, from: Option<&str>) -> Result<String, Str
             text: text.clone(),
             enter: *enter,
             from: from.map(str::to_owned),
+            from_id: panel_id.map(str::to_owned),
+        },
+        LinkCommand::Ask {
+            target,
+            text,
+            timeout_secs,
+        } => LinkRequest::Ask {
+            from: require_panel_id(panel_id)?,
+            target: target.clone(),
+            text: text.clone(),
+            timeout_secs: *timeout_secs,
+        },
+        LinkCommand::Reply { ask_id, text } => LinkRequest::Reply {
+            from: require_panel_id(panel_id)?,
+            ask_id: ask_id.clone(),
+            text: text.clone(),
         },
         LinkCommand::Read { target, lines } => LinkRequest::Read {
             target: target.clone(),
@@ -140,6 +273,12 @@ fn request_line(command: &LinkCommand, from: Option<&str>) -> Result<String, Str
     }
     line.push('\n');
     Ok(line)
+}
+
+fn require_panel_id(panel_id: Option<&str>) -> Result<String, String> {
+    panel_id
+        .map(str::to_owned)
+        .ok_or_else(|| "HORIZON_PANEL_ID is not set; run inside a Horizon terminal".to_owned())
 }
 
 fn terminal_safe(text: &str) -> String {
@@ -200,20 +339,50 @@ fn format_panels(panels: &[PanelInfo]) -> String {
 fn render(response: LinkResponse) -> Result<String, String> {
     match response {
         LinkResponse::Ok(LinkOk::Panels(panels)) => Ok(format_panels(&panels)),
-        LinkResponse::Ok(LinkOk::Sent) => Ok(String::new()),
-        LinkResponse::Ok(LinkOk::Text(text)) => Ok(output_safe(&text)),
+        LinkResponse::Ok(LinkOk::Sent { delivered, skipped }) if delivered.len() == 1 && skipped.is_empty() => {
+            Ok(String::new())
+        }
+        LinkResponse::Ok(LinkOk::Sent { delivered, skipped }) => Ok(if skipped.is_empty() {
+            format!("sent to {}", delivered.len())
+        } else {
+            format!("sent to {}, skipped {}", delivered.len(), skipped.len())
+        }),
+        LinkResponse::Ok(LinkOk::Text(text) | LinkOk::Reply { text, .. }) => Ok(output_safe(&text)),
         LinkResponse::Err { message, .. } => Err(output_safe(&message)),
     }
 }
 
+/// Process exit code for a failed response: 2 when an `ask` timed out, 1 otherwise.
+fn failure_exit_code(response: &LinkResponse) -> u8 {
+    match response {
+        LinkResponse::Err {
+            code: LinkErrorCode::AskTimeout,
+            ..
+        } => EXIT_ASK_TIMEOUT,
+        _ => 1,
+    }
+}
+
+/// A failed command: the message for stderr and the exit code.
+#[derive(Debug, PartialEq, Eq)]
+struct Failure {
+    message: String,
+    exit: u8,
+}
+
+impl From<String> for Failure {
+    fn from(message: String) -> Self {
+        Self { message, exit: 1 }
+    }
+}
+
 #[cfg(unix)]
-fn exchange(socket: &std::path::Path, line: &str) -> Result<LinkResponse, String> {
+fn exchange(socket: &std::path::Path, line: &str, wait: std::time::Duration) -> Result<LinkResponse, String> {
     use std::io::{BufRead, BufReader, Read};
     use std::os::unix::net::UnixStream;
     use std::time::Duration;
 
     const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
-    const IO_TIMEOUT: Duration = Duration::from_secs(10);
     const MAX_RESPONSE_BYTES: u64 = 8 * 1024 * 1024;
 
     // std has no connect timeout for unix sockets: connect on a helper thread and wait for it.
@@ -227,8 +396,8 @@ fn exchange(socket: &std::path::Path, line: &str) -> Result<LinkResponse, String
         .map_err(|_| "timed out connecting to Horizon".to_owned())?
         .map_err(|error| format!("cannot connect to Horizon ({error}); is the instance still running?"))?;
     stream
-        .set_read_timeout(Some(IO_TIMEOUT))
-        .and_then(|()| stream.set_write_timeout(Some(IO_TIMEOUT)))
+        .set_read_timeout(Some(wait))
+        .and_then(|()| stream.set_write_timeout(Some(Duration::from_secs(10))))
         .map_err(|error| format!("cannot configure connection: {error}"))?;
     stream
         .write_all(line.as_bytes())
@@ -246,19 +415,32 @@ fn exchange(socket: &std::path::Path, line: &str) -> Result<LinkResponse, String
 }
 
 #[cfg(not(unix))]
-fn exchange(_socket: &std::path::Path, _line: &str) -> Result<LinkResponse, String> {
+fn exchange(_socket: &std::path::Path, _line: &str, _wait: std::time::Duration) -> Result<LinkResponse, String> {
     Err("link is not supported on this platform".to_owned())
 }
 
-fn execute(args: &[String]) -> Result<String, String> {
+/// How long to wait for the answer: a short bound for ordinary commands; an `ask` waits for
+/// its own timeout plus room for the server's slack.
+fn response_wait(command: &LinkCommand) -> std::time::Duration {
+    const ORDINARY: std::time::Duration = std::time::Duration::from_secs(10);
+    match command {
+        LinkCommand::Ask { timeout_secs, .. } => std::time::Duration::from_secs(*timeout_secs) + ORDINARY,
+        _ => ORDINARY,
+    }
+}
+
+fn execute(args: &[String]) -> Result<String, Failure> {
     if !cfg!(unix) {
-        return Err("link is not supported on this platform".to_owned());
+        return Err("link is not supported on this platform".to_owned().into());
     }
     let command = parse_link_args(args)?;
     let socket = socket_path_from(std::env::var_os("HORIZON_SOCKET"))?;
     let from = sender_name(std::env::var_os("HORIZON_PANEL_NAME").as_deref());
-    let line = request_line(&command, from.as_deref())?;
-    render(exchange(&socket, &line)?)
+    let id = panel_id(std::env::var_os("HORIZON_PANEL_ID").as_deref());
+    let line = request_line(&command, from.as_deref(), id.as_deref())?;
+    let response = exchange(&socket, &line, response_wait(&command))?;
+    let exit = failure_exit_code(&response);
+    render(response).map_err(|message| Failure { message, exit })
 }
 
 /// Entry point for `horizon link <args>` (`args` excludes the program name and `link`).
@@ -275,9 +457,9 @@ pub(crate) fn run(args: &[String]) -> ExitCode {
                 Err(_) => ExitCode::FAILURE,
             }
         }
-        Err(message) => {
-            eprintln!("horizon link: {message}");
-            ExitCode::FAILURE
+        Err(failure) => {
+            eprintln!("horizon link: {}", failure.message);
+            ExitCode::from(failure.exit)
         }
     }
 }
@@ -286,9 +468,12 @@ pub(crate) fn run(args: &[String]) -> ExitCode {
 mod tests {
     use std::ffi::OsString;
 
-    use horizon_core::link::{LinkOk, LinkResponse, PanelInfo};
+    use horizon_core::link::{LinkErrorCode, LinkOk, LinkResponse, PanelInfo, SendTarget};
 
-    use super::{LinkCommand, format_panels, parse_link_args, request_line, sender_name, socket_path_from};
+    use super::{
+        EXIT_ASK_TIMEOUT, LinkCommand, failure_exit_code, format_panels, panel_id, parse_link_args, request_line,
+        sender_name, socket_path_from,
+    };
 
     fn args(items: &[&str]) -> Vec<String> {
         items.iter().map(|item| (*item).to_owned()).collect()
@@ -305,7 +490,7 @@ mod tests {
         assert_eq!(
             parse_link_args(&args(&["send", "backend", "hello", "there", "--no-enter"])),
             Ok(LinkCommand::Send {
-                target: "backend".to_owned(),
+                target: SendTarget::panel("backend"),
                 text: "hello there".to_owned(),
                 enter: false,
             })
@@ -313,7 +498,7 @@ mod tests {
         assert_eq!(
             parse_link_args(&args(&["send", "7", "run the tests"])),
             Ok(LinkCommand::Send {
-                target: "7".to_owned(),
+                target: SendTarget::panel("7"),
                 text: "run the tests".to_owned(),
                 enter: true,
             })
@@ -332,7 +517,7 @@ mod tests {
         assert_eq!(
             parse_link_args(&args(&["send", "a", "--", "--no-enter", "is", "text"])),
             Ok(LinkCommand::Send {
-                target: "a".to_owned(),
+                target: SendTarget::panel("a"),
                 text: "--no-enter is text".to_owned(),
                 enter: true,
             })
@@ -344,7 +529,7 @@ mod tests {
         assert_eq!(
             parse_link_args(&args(&["send", "a", "--", "--fix the bug"])),
             Ok(LinkCommand::Send {
-                target: "a".to_owned(),
+                target: SendTarget::panel("a"),
                 text: "--fix the bug".to_owned(),
                 enter: true,
             })
@@ -413,10 +598,11 @@ mod tests {
     fn request_line_is_one_json_line_with_version() {
         let line = request_line(
             &LinkCommand::Send {
-                target: "a".to_owned(),
+                target: SendTarget::panel("a"),
                 text: "x\ny".to_owned(),
                 enter: true,
             },
+            None,
             None,
         )
         .expect("line");
@@ -425,7 +611,7 @@ mod tests {
             "{\"v\":1,\"op\":\"send\",\"target\":\"a\",\"text\":\"x\\ny\",\"enter\":true}\n"
         );
         assert_eq!(
-            request_line(&LinkCommand::List, Some("ignored")).expect("line"),
+            request_line(&LinkCommand::List, Some("ignored"), Some("3")).expect("line"),
             "{\"v\":1,\"op\":\"list\"}\n"
         );
     }
@@ -433,12 +619,12 @@ mod tests {
     #[test]
     fn request_line_carries_the_sender_name_on_send_only() {
         let send = LinkCommand::Send {
-            target: "a".to_owned(),
+            target: SendTarget::panel("a"),
             text: "hi".to_owned(),
             enter: false,
         };
         assert_eq!(
-            request_line(&send, Some("backend")).expect("line"),
+            request_line(&send, Some("backend"), None).expect("line"),
             "{\"v\":1,\"op\":\"send\",\"target\":\"a\",\"text\":\"hi\",\"enter\":false,\"from\":\"backend\"}\n"
         );
         assert_eq!(
@@ -447,7 +633,8 @@ mod tests {
                     target: "a".to_owned(),
                     lines: 5
                 },
-                Some("backend")
+                Some("backend"),
+                Some("3")
             )
             .expect("line"),
             "{\"v\":1,\"op\":\"read\",\"target\":\"a\",\"lines\":5}\n"
@@ -474,10 +661,11 @@ mod tests {
     fn request_line_rejects_oversized_text() {
         let error = request_line(
             &LinkCommand::Send {
-                target: "a".to_owned(),
+                target: SendTarget::panel("a"),
                 text: "x".repeat(horizon_core::link::MAX_REQUEST_BYTES),
                 enter: true,
             },
+            None,
             None,
         )
         .expect_err("too large");
@@ -524,12 +712,171 @@ mod tests {
             super::render(LinkResponse::Ok(LinkOk::Text("a\nb".to_owned()))),
             Ok("a\nb".to_owned())
         );
-        assert_eq!(super::render(LinkResponse::Ok(LinkOk::Sent)), Ok(String::new()));
+        assert_eq!(super::render(LinkResponse::Ok(LinkOk::sent_to("1"))), Ok(String::new()));
         let error = super::render(LinkResponse::Err {
             code: horizon_core::link::LinkErrorCode::NotFound,
             message: "no panel matches 'x'".to_owned(),
         })
         .expect_err("err");
         assert_eq!(error, "no panel matches 'x'");
+    }
+
+    #[test]
+    fn parse_ask_with_timeout_flag() {
+        assert_eq!(
+            parse_link_args(&args(&["ask", "backend", "what", "port?"])),
+            Ok(LinkCommand::Ask {
+                target: "backend".to_owned(),
+                text: "what port?".to_owned(),
+                timeout_secs: 120,
+            })
+        );
+        assert_eq!(
+            parse_link_args(&args(&["ask", "backend", "ok?", "--timeout", "30"])),
+            Ok(LinkCommand::Ask {
+                target: "backend".to_owned(),
+                text: "ok?".to_owned(),
+                timeout_secs: 30,
+            })
+        );
+        assert!(parse_link_args(&args(&["ask", "backend"])).is_err());
+        assert!(parse_link_args(&args(&["ask"])).is_err());
+        assert!(parse_link_args(&args(&["ask", "backend", "q", "--timeout"])).is_err());
+        assert!(parse_link_args(&args(&["ask", "backend", "q", "--timeout", "abc"])).is_err());
+    }
+
+    #[test]
+    fn parse_ask_rejects_timeout_over_600() {
+        assert!(parse_link_args(&args(&["ask", "a", "q", "--timeout", "601"])).is_err());
+        assert!(parse_link_args(&args(&["ask", "a", "q", "--timeout", "4"])).is_err());
+        assert!(parse_link_args(&args(&["ask", "a", "q", "--timeout", "600"])).is_ok());
+        assert!(parse_link_args(&args(&["ask", "a", "q", "--timeout", "5"])).is_ok());
+    }
+
+    #[test]
+    fn parse_reply() {
+        assert_eq!(
+            parse_link_args(&args(&["reply", "a1b2c3", "port", "is", "8080"])),
+            Ok(LinkCommand::Reply {
+                ask_id: "a1b2c3".to_owned(),
+                text: "port is 8080".to_owned(),
+            })
+        );
+        assert!(parse_link_args(&args(&["reply", "a1b2c3"])).is_err());
+        assert!(parse_link_args(&args(&["reply"])).is_err());
+        assert!(parse_link_args(&args(&["reply", "not-an-id", "x"])).is_err());
+        assert_eq!(
+            parse_link_args(&args(&["reply", "a1b2c3", "--", "--no"])),
+            Ok(LinkCommand::Reply {
+                ask_id: "a1b2c3".to_owned(),
+                text: "--no".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_send_all_in_workspace() {
+        assert_eq!(
+            parse_link_args(&args(&["send", "--all-in-workspace", "heads", "up"])),
+            Ok(LinkCommand::Send {
+                target: SendTarget::AllInWorkspace,
+                text: "heads up".to_owned(),
+                enter: true,
+            })
+        );
+        assert_eq!(
+            parse_link_args(&args(&["send", "heads up", "--no-enter", "--all-in-workspace"])),
+            Ok(LinkCommand::Send {
+                target: SendTarget::AllInWorkspace,
+                text: "heads up".to_owned(),
+                enter: false,
+            })
+        );
+        assert!(parse_link_args(&args(&["send", "--all-in-workspace"])).is_err());
+    }
+
+    #[test]
+    fn ask_reply_and_broadcast_request_lines_carry_the_panel_id() {
+        let ask = LinkCommand::Ask {
+            target: "b".to_owned(),
+            text: "q".to_owned(),
+            timeout_secs: 30,
+        };
+        assert_eq!(
+            request_line(&ask, Some("name"), Some("7")).expect("line"),
+            "{\"v\":1,\"op\":\"ask\",\"from\":\"7\",\"target\":\"b\",\"text\":\"q\",\"timeout_secs\":30}\n"
+        );
+        let error = request_line(&ask, Some("name"), None).expect_err("needs a panel id");
+        assert!(error.contains("HORIZON_PANEL_ID"), "{error}");
+        let reply = LinkCommand::Reply {
+            ask_id: "a1b2c3".to_owned(),
+            text: "a".to_owned(),
+        };
+        assert_eq!(
+            request_line(&reply, None, Some("9")).expect("line"),
+            "{\"v\":1,\"op\":\"reply\",\"from\":\"9\",\"ask_id\":\"a1b2c3\",\"text\":\"a\"}\n"
+        );
+        let broadcast = LinkCommand::Send {
+            target: SendTarget::AllInWorkspace,
+            text: "hi".to_owned(),
+            enter: true,
+        };
+        assert_eq!(
+            request_line(&broadcast, Some("n"), Some("4")).expect("line"),
+            "{\"v\":1,\"op\":\"send\",\"target\":{\"scope\":\"workspace\"},\"text\":\"hi\",\"enter\":true,\"from\":\"n\",\"from_id\":\"4\"}\n"
+        );
+    }
+
+    #[test]
+    fn panel_id_keeps_only_safe_characters() {
+        use std::ffi::OsStr;
+
+        assert_eq!(panel_id(None), None);
+        assert_eq!(panel_id(Some(OsStr::new(""))), None);
+        assert_eq!(panel_id(Some(OsStr::new("a1-b_2"))), Some("a1-b_2".to_owned()));
+        assert_eq!(
+            panel_id(Some(OsStr::new("a\u{1b}[31m b\"c"))),
+            Some("a31mbc".to_owned())
+        );
+    }
+
+    #[test]
+    fn ask_exit_codes_distinguish_timeout() {
+        let err = |code| LinkResponse::Err {
+            code,
+            message: String::new(),
+        };
+        assert_eq!(failure_exit_code(&err(LinkErrorCode::AskTimeout)), EXIT_ASK_TIMEOUT);
+        assert_eq!(failure_exit_code(&err(LinkErrorCode::NotFound)), 1);
+        assert_eq!(failure_exit_code(&err(LinkErrorCode::AskTargetClosed)), 1);
+        assert_ne!(EXIT_ASK_TIMEOUT, 1);
+    }
+
+    #[test]
+    fn ask_reply_text_and_broadcast_summary_render() {
+        assert_eq!(
+            super::render(LinkResponse::Ok(LinkOk::Reply {
+                from: "b".to_owned(),
+                text: "8080\u{1b}[2J".to_owned(),
+            })),
+            Ok("8080".to_owned())
+        );
+        let broadcast = |delivered: usize, skipped: usize| {
+            super::render(LinkResponse::Ok(LinkOk::Sent {
+                delivered: vec!["x".to_owned(); delivered],
+                skipped: vec!["y".to_owned(); skipped],
+            }))
+        };
+        assert_eq!(broadcast(3, 0), Ok("sent to 3".to_owned()));
+        assert_eq!(broadcast(3, 1), Ok("sent to 3, skipped 1".to_owned()));
+        assert_eq!(broadcast(1, 0), Ok(String::new()));
+    }
+
+    #[test]
+    fn plugin_install_horizon_link_skill_mentions_ask_and_reply() {
+        let skill = include_str!("../../../assets/plugins/claude-code/skills/horizon-link/SKILL.md");
+        for needle in ["link ask", "link reply", "--all-in-workspace", "[ask "] {
+            assert!(skill.contains(needle), "the horizon-link skill must mention {needle:?}");
+        }
     }
 }

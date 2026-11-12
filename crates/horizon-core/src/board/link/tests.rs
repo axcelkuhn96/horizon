@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use crate::link::{LinkErrorCode, LinkOk, LinkRequest, LinkResponse};
+use crate::link::{LinkErrorCode, LinkOk, LinkRequest, LinkResponse, SendTarget};
 use crate::panel::{PanelId, PanelKind, PanelOptions};
 use crate::runtime_state::{PanelState, RuntimeState, WorkspaceState};
 
@@ -56,10 +56,11 @@ fn sink_script(file: &Path, bracketed: bool) -> String {
 
 fn send(board: &mut Board, target: &str, text: &str, enter: bool) -> LinkResponse {
     board.handle_link_request(LinkRequest::Send {
-        target: target.to_owned(),
+        target: SendTarget::panel(target),
         text: text.to_owned(),
         enter,
         from: None,
+        from_id: None,
     })
 }
 
@@ -77,7 +78,7 @@ fn board_send_writes_text_and_cr_to_target() {
 
     assert_eq!(
         send(&mut board, "sink", "echo hi", true),
-        LinkResponse::Ok(LinkOk::Sent)
+        LinkResponse::Ok(LinkOk::sent_to(&panel_local_id(&board, id)))
     );
     assert!(file_equals(&file, "echo hi\r"), "{:?}", std::fs::read(&file));
 }
@@ -93,7 +94,7 @@ fn board_send_no_enter_omits_cr() {
 
     assert_eq!(
         send(&mut board, &local_id, "partial", false),
-        LinkResponse::Ok(LinkOk::Sent)
+        LinkResponse::Ok(LinkOk::sent_to(&panel_local_id(&board, id)))
     );
     assert!(file_equals(&file, "partial"), "{:?}", std::fs::read(&file));
 }
@@ -144,7 +145,7 @@ fn board_send_refuses_multiline_without_enter_when_paste_is_not_bracketed() {
     // A single line still goes through.
     assert_eq!(
         send(&mut board, "sink", "one line", false),
-        LinkResponse::Ok(LinkOk::Sent)
+        LinkResponse::Ok(LinkOk::sent_to(&panel_local_id(&board, id)))
     );
     assert!(file_equals(&file, "one line"), "{:?}", std::fs::read(&file));
 }
@@ -159,7 +160,7 @@ fn board_send_allows_multiline_without_enter_under_bracketed_paste() {
 
     assert_eq!(
         send(&mut board, "sink", "line1\nline2", false),
-        LinkResponse::Ok(LinkOk::Sent)
+        LinkResponse::Ok(LinkOk::sent_to(&panel_local_id(&board, id)))
     );
     assert!(
         file_equals(&file, "\u{1b}[200~line1\nline2\u{1b}[201~"),
@@ -310,4 +311,475 @@ fn board_list_strips_escapes_from_names() {
     };
     assert_eq!(panels[0].name, "title");
     assert_eq!(panels[0].workspace, "wsname");
+}
+
+// --- workspace broadcast and ask/reply ---------------------------------------
+
+use std::sync::mpsc;
+
+use crate::WorkspaceId;
+use crate::link::{AskTable, LinkEffectKind, MAX_ASKS_PER_ASKER};
+
+/// An executable script standing in for an agent CLI: whatever arguments the launcher
+/// adds are ignored.
+fn agent_script(dir: &Path, name: &str, body: &str) -> String {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join(name);
+    std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write script");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    path.display().to_string()
+}
+
+fn agent_panel(board: &mut Board, workspace: WorkspaceId, name: &str, script: &str) -> PanelId {
+    board
+        .create_panel(
+            PanelOptions {
+                name: Some(name.to_owned()),
+                kind: PanelKind::Claude,
+                command: Some(script.to_owned()),
+                ..PanelOptions::default()
+            },
+            workspace,
+        )
+        .expect("agent panel should spawn")
+}
+
+fn sink_agent(board: &mut Board, workspace: WorkspaceId, dir: &Path, name: &str) -> (PanelId, std::path::PathBuf) {
+    let file = dir.join(format!("{name}.in"));
+    let script = agent_script(dir, &format!("{name}.sh"), &sink_script(&file, true));
+    let id = agent_panel(board, workspace, name, &script);
+    assert!(screen_contains(board, id, "ready"), "{name} never became ready");
+    (id, file)
+}
+
+fn broadcast(board: &mut Board, from_id: Option<String>, text: &str) -> LinkResponse {
+    board.handle_link_request(LinkRequest::Send {
+        target: SendTarget::AllInWorkspace,
+        text: text.to_owned(),
+        enter: true,
+        from: None,
+        from_id,
+    })
+}
+
+#[test]
+fn broadcast_excludes_sender_and_non_agent_panels() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut board = Board::new();
+    let workspace = board.ensure_workspace();
+    let (sender, sender_file) = sink_agent(&mut board, workspace, dir.path(), "sender");
+    let (first, first_file) = sink_agent(&mut board, workspace, dir.path(), "first");
+    let (second, second_file) = sink_agent(&mut board, workspace, dir.path(), "second");
+    let shell = command_panel(&mut board, "shell", "exec cat");
+    let other_workspace = board.create_workspace("other");
+    let (_elsewhere, elsewhere_file) = sink_agent(&mut board, other_workspace, dir.path(), "elsewhere");
+
+    let response = {
+        let from_id = panel_local_id(&board, sender);
+        broadcast(&mut board, Some(from_id), "heads up")
+    };
+
+    let expected = |ids: &[PanelId]| ids.iter().map(|id| panel_local_id(&board, *id)).collect::<Vec<_>>();
+    assert_eq!(
+        response,
+        LinkResponse::Ok(LinkOk::Sent {
+            delivered: expected(&[first, second]),
+            skipped: expected(&[shell]),
+        })
+    );
+    let bracketed = "\u{1b}[200~heads up\u{1b}[201~\r";
+    assert!(file_equals(&first_file, bracketed));
+    assert!(file_equals(&second_file, bracketed));
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(
+        std::fs::read(&sender_file).unwrap_or_default().is_empty(),
+        "sender got its own broadcast"
+    );
+    assert!(
+        std::fs::read(&elsewhere_file).unwrap_or_default().is_empty(),
+        "other workspace got it"
+    );
+    board.shutdown_terminal_panels();
+}
+
+#[test]
+fn broadcast_caps_at_16_targets() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut board = Board::new();
+    let workspace = board.ensure_workspace();
+    let script = agent_script(dir.path(), "idle.sh", "exec cat >/dev/null");
+    let sender = agent_panel(&mut board, workspace, "sender", &script);
+    for index in 0..18 {
+        agent_panel(&mut board, workspace, &format!("peer{index}"), &script);
+    }
+
+    let response = {
+        let from_id = panel_local_id(&board, sender);
+        broadcast(&mut board, Some(from_id), "x")
+    };
+
+    let LinkResponse::Ok(LinkOk::Sent { delivered, skipped }) = response else {
+        panic!("expected sent, got {response:?}");
+    };
+    assert_eq!(delivered.len(), super::ask::MAX_BROADCAST_TARGETS);
+    assert_eq!(skipped.len(), 2);
+    board.shutdown_terminal_panels();
+}
+
+#[test]
+fn broadcast_reports_delivered_and_skipped() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut board = Board::new();
+    let workspace = board.ensure_workspace();
+    let idle = agent_script(dir.path(), "idle.sh", "exec cat >/dev/null");
+    let sender = agent_panel(&mut board, workspace, "sender", &idle);
+    let live = agent_panel(&mut board, workspace, "live", &idle);
+    let dead_script = agent_script(dir.path(), "dead.sh", "exit 0");
+    let dead = agent_panel(&mut board, workspace, "dead", &dead_script);
+    assert!(wait_until(|| {
+        let panel = board.panel_mut(dead).expect("panel");
+        let _ = panel.process_output();
+        panel.child_exited()
+    }));
+
+    let response = {
+        let from_id = panel_local_id(&board, sender);
+        broadcast(&mut board, Some(from_id), "x")
+    };
+
+    assert_eq!(
+        response,
+        LinkResponse::Ok(LinkOk::Sent {
+            delivered: vec![panel_local_id(&board, live)],
+            skipped: vec![panel_local_id(&board, dead)],
+        })
+    );
+    // Without a sender (or alone in the workspace) there is nobody to broadcast to.
+    for from_id in [None, Some("nope".to_owned())] {
+        assert!(matches!(
+            broadcast(&mut board, from_id, "x"),
+            LinkResponse::Err {
+                code: LinkErrorCode::BadRequest,
+                ..
+            }
+        ));
+    }
+    board.shutdown_terminal_panels();
+}
+
+#[test]
+fn broadcast_without_another_agent_is_not_found() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut board = Board::new();
+    let workspace = board.ensure_workspace();
+    let idle = agent_script(dir.path(), "idle.sh", "exec cat >/dev/null");
+    let sender = agent_panel(&mut board, workspace, "sender", &idle);
+    let _shell = command_panel(&mut board, "shell", "exec cat");
+
+    assert!(matches!(
+        {
+            let from_id = panel_local_id(&board, sender);
+            broadcast(&mut board, Some(from_id), "x")
+        },
+        LinkResponse::Err {
+            code: LinkErrorCode::NotFound,
+            ..
+        }
+    ));
+    board.shutdown_terminal_panels();
+}
+
+struct AskSetup {
+    board: Board,
+    asks: AskTable,
+    asker: PanelId,
+    target: PanelId,
+    target_file: std::path::PathBuf,
+    _dir: tempfile::TempDir,
+}
+
+fn ask_setup() -> AskSetup {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut board = Board::new();
+    let workspace = board.ensure_workspace();
+    let (asker, _) = sink_agent(&mut board, workspace, dir.path(), "asker");
+    let (target, target_file) = sink_agent(&mut board, workspace, dir.path(), "target");
+    AskSetup {
+        board,
+        asks: AskTable::default(),
+        asker,
+        target,
+        target_file,
+        _dir: dir,
+    }
+}
+
+fn serve(
+    setup: &mut AskSetup,
+    request: LinkRequest,
+) -> (mpsc::Receiver<LinkResponse>, Option<crate::link::LinkEffect>) {
+    let (sender, receiver) = mpsc::channel();
+    let effect = setup
+        .board
+        .serve_link(&mut setup.asks, request, &sender, std::time::Instant::now());
+    (receiver, effect)
+}
+
+fn ask_request(setup: &AskSetup, from: PanelId, target: &str, text: &str) -> LinkRequest {
+    LinkRequest::Ask {
+        from: panel_local_id(&setup.board, from),
+        target: target.to_owned(),
+        text: text.to_owned(),
+        timeout_secs: 30,
+    }
+}
+
+#[test]
+fn ask_text_is_sanitized_like_send() {
+    let mut setup = ask_setup();
+    let request = ask_request(&setup, setup.asker, "target", "what\u{1b}[31m port\u{7}?");
+
+    let (receiver, effect) = serve(&mut setup, request);
+
+    assert!(receiver.try_recv().is_err(), "an accepted ask is answered later");
+    let effect = effect.expect("effect");
+    assert_eq!(effect.kind, LinkEffectKind::Ask);
+    assert_eq!(effect.from, Some(setup.asker));
+    assert_eq!(effect.to, vec![setup.target]);
+    assert_eq!(setup.asks.waiting_on(setup.asker), Some(setup.target));
+    let written = |expected: &str| {
+        wait_until(|| std::fs::read_to_string(&setup.target_file).is_ok_and(|text| text.contains(expected)))
+    };
+    assert!(written("what[31m port?"), "{:?}", std::fs::read(&setup.target_file));
+    let text = std::fs::read_to_string(&setup.target_file).expect("read");
+    assert!(text.starts_with("\u{1b}[200~[ask "), "{text:?}");
+    assert!(
+        text.contains(" from asker] what[31m port?\n(reply with: horizon link reply "),
+        "{text:?}"
+    );
+    assert!(text.ends_with("\"<answer>\")\u{1b}[201~\r"), "{text:?}");
+    assert!(!text.contains('\u{7}'));
+    setup.board.shutdown_terminal_panels();
+}
+
+fn pending_ask_id(setup: &AskSetup) -> String {
+    assert!(wait_until(
+        || std::fs::read_to_string(&setup.target_file).is_ok_and(|t| t.contains("(reply with"))
+    ));
+    let text = std::fs::read_to_string(&setup.target_file).expect("read");
+    let start = text.find("[ask ").expect("header") + 5;
+    text[start..start + 6].to_owned()
+}
+
+#[test]
+fn reply_requires_addressee_and_reaches_the_asker() {
+    let mut setup = ask_setup();
+    let request = ask_request(&setup, setup.asker, "target", "ready?");
+    let (asker_answer, _) = serve(&mut setup, request);
+    let id = pending_ask_id(&setup);
+    let reply_from = |setup: &AskSetup, panel: PanelId, text: &str| LinkRequest::Reply {
+        from: panel_local_id(&setup.board, panel),
+        ask_id: id.clone(),
+        text: text.to_owned(),
+    };
+
+    // The asker (or anyone else) cannot answer its own question.
+    let request = reply_from(&setup, setup.asker, "self-answer");
+    let (response, effect) = serve(&mut setup, request);
+    assert!(matches!(
+        response.try_recv(),
+        Ok(LinkResponse::Err {
+            code: LinkErrorCode::NotAddressee,
+            ..
+        })
+    ));
+    assert!(effect.is_none());
+    assert!(asker_answer.try_recv().is_err());
+
+    let request = reply_from(&setup, setup.target, "yes\u{1b}[2J");
+    let (response, effect) = serve(&mut setup, request);
+    assert!(matches!(response.try_recv(), Ok(LinkResponse::Ok(LinkOk::Sent { .. }))));
+    let effect = effect.expect("effect");
+    assert_eq!(effect.kind, LinkEffectKind::Reply);
+    assert_eq!(effect.from, Some(setup.target));
+    assert_eq!(effect.to, vec![setup.asker]);
+    assert_eq!(
+        asker_answer.try_recv().ok(),
+        Some(LinkResponse::Ok(LinkOk::Reply {
+            from: "target".to_owned(),
+            text: "yes".to_owned(),
+        }))
+    );
+    setup.board.shutdown_terminal_panels();
+}
+
+#[test]
+fn reply_unknown_or_resolved_ask_errors_through_the_board() {
+    let mut setup = ask_setup();
+    let reply = |setup: &AskSetup, id: &str| LinkRequest::Reply {
+        from: panel_local_id(&setup.board, setup.target),
+        ask_id: id.to_owned(),
+        text: "a".to_owned(),
+    };
+    let request = reply(&setup, "abcdef");
+    let (response, _) = serve(&mut setup, request);
+    assert!(matches!(
+        response.try_recv(),
+        Ok(LinkResponse::Err {
+            code: LinkErrorCode::UnknownAsk,
+            ..
+        })
+    ));
+    setup.board.shutdown_terminal_panels();
+}
+
+#[test]
+fn ask_to_self_rejected() {
+    let mut setup = ask_setup();
+    let request = ask_request(&setup, setup.asker, "asker", "me?");
+    let (response, effect) = serve(&mut setup, request);
+    assert!(matches!(
+        response.try_recv(),
+        Ok(LinkResponse::Err {
+            code: LinkErrorCode::BadRequest,
+            ..
+        })
+    ));
+    assert!(effect.is_none());
+    assert!(setup.asks.is_empty());
+    setup.board.shutdown_terminal_panels();
+}
+
+#[test]
+fn ask_to_a_shell_or_from_an_unknown_panel_is_rejected_without_writing() {
+    let mut setup = ask_setup();
+    let shell = command_panel(&mut setup.board, "shell", "exec cat");
+    let request = ask_request(&setup, setup.asker, &panel_local_id(&setup.board, shell), "rm -rf?");
+    let (response, _) = serve(&mut setup, request);
+    assert!(matches!(
+        response.try_recv(),
+        Ok(LinkResponse::Err {
+            code: LinkErrorCode::BadRequest,
+            ..
+        })
+    ));
+    let forged = LinkRequest::Ask {
+        from: "does-not-exist".to_owned(),
+        target: "target".to_owned(),
+        text: "hi".to_owned(),
+        timeout_secs: 30,
+    };
+    let (response, _) = serve(&mut setup, forged);
+    assert!(matches!(
+        response.try_recv(),
+        Ok(LinkResponse::Err {
+            code: LinkErrorCode::BadRequest,
+            ..
+        })
+    ));
+    assert!(setup.asks.is_empty());
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(std::fs::read(&setup.target_file).unwrap_or_default().is_empty());
+    setup.board.shutdown_terminal_panels();
+}
+
+#[test]
+fn ask_over_the_per_asker_cap_is_refused() {
+    let mut setup = ask_setup();
+    let mut waiting = Vec::new();
+    for _ in 0..MAX_ASKS_PER_ASKER {
+        let request = ask_request(&setup, setup.asker, "target", "q");
+        let (receiver, effect) = serve(&mut setup, request);
+        assert!(effect.is_some());
+        waiting.push(receiver);
+    }
+    let request = ask_request(&setup, setup.asker, "target", "one too many");
+    let (response, effect) = serve(&mut setup, request);
+    assert!(effect.is_none());
+    assert!(matches!(
+        response.try_recv(),
+        Ok(LinkResponse::Err {
+            code: LinkErrorCode::BadRequest,
+            ..
+        })
+    ));
+    setup.board.shutdown_terminal_panels();
+}
+
+#[test]
+fn closing_target_resolves_pending_ask_with_error() {
+    let mut setup = ask_setup();
+    let request = ask_request(&setup, setup.asker, "target", "still there?");
+    let (answer, _) = serve(&mut setup, request);
+    assert_eq!(setup.asks.len(), 1);
+
+    setup.board.close_panel(setup.target);
+    let ended = setup
+        .board
+        .resolve_link_asks(&mut setup.asks, std::time::Instant::now());
+
+    assert_eq!(ended.len(), 1);
+    assert!(matches!(
+        answer.try_recv(),
+        Ok(LinkResponse::Err {
+            code: LinkErrorCode::AskTargetClosed,
+            ..
+        })
+    ));
+    assert!(setup.asks.is_empty());
+    setup.board.shutdown_terminal_panels();
+}
+
+#[test]
+fn closing_the_asker_cancels_its_pending_ask() {
+    let mut setup = ask_setup();
+    let request = ask_request(&setup, setup.asker, "target", "hello?");
+    let (answer, _) = serve(&mut setup, request);
+
+    setup.board.close_panel(setup.asker);
+    setup
+        .board
+        .resolve_link_asks(&mut setup.asks, std::time::Instant::now());
+
+    assert!(matches!(
+        answer.try_recv(),
+        Ok(LinkResponse::Err {
+            code: LinkErrorCode::AskCancelled,
+            ..
+        })
+    ));
+    setup.board.shutdown_terminal_panels();
+}
+
+#[test]
+fn an_ask_past_its_deadline_times_out_in_the_sweep() {
+    let mut setup = ask_setup();
+    let request = ask_request(&setup, setup.asker, "target", "slow?");
+    let (answer, _) = serve(&mut setup, request);
+
+    let late = std::time::Instant::now() + Duration::from_secs(31);
+    let ended = setup.board.resolve_link_asks(&mut setup.asks, late);
+
+    assert_eq!(ended.len(), 1);
+    assert!(matches!(
+        answer.try_recv(),
+        Ok(LinkResponse::Err {
+            code: LinkErrorCode::AskTimeout,
+            ..
+        })
+    ));
+    setup.board.shutdown_terminal_panels();
+}
+
+#[test]
+fn agent_panels_in_workspace_lists_live_agent_terminals_only() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut board = Board::new();
+    let workspace = board.ensure_workspace();
+    let idle = agent_script(dir.path(), "idle.sh", "exec cat >/dev/null");
+    let agent = agent_panel(&mut board, workspace, "agent", &idle);
+    let _shell = command_panel(&mut board, "shell", "exec cat");
+
+    assert_eq!(board.agent_panels_in_workspace(workspace), vec![agent]);
+    board.shutdown_terminal_panels();
 }
