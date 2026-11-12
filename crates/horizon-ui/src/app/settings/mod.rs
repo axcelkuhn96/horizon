@@ -391,16 +391,10 @@ fn render_gui_tab(
 
 /// Moves the editor to `tab`. Leaving the YAML tab re-parses the buffer into
 /// `editing_config` so GUI tabs never work from a stale copy; if the YAML does
-/// not parse, the editor stays on the YAML tab and shows the parse error.
+/// not parse, the GUI tabs show their "unable to parse" state.
 fn switch_tab(editor: &mut SettingsEditor, tab: SettingsTab) {
     if editor.active_tab == SettingsTab::Yaml && tab != SettingsTab::Yaml {
-        match Config::from_yaml(&editor.buffer) {
-            Ok(config) => editor.editing_config = Some(config),
-            Err(error) => {
-                editor.status = SettingsStatus::Error(error.to_string());
-                return;
-            }
-        }
+        editor.editing_config = Config::from_yaml(&editor.buffer).ok();
     }
     editor.active_tab = tab;
 }
@@ -491,11 +485,11 @@ mod tests {
     }
 
     #[test]
-    fn invalid_yaml_keeps_the_user_on_the_yaml_tab_with_the_parse_error() {
+    fn invalid_yaml_still_switches_tab_and_clears_the_editing_config() {
         let mut editor = editor("window: [unclosed", SettingsTab::Yaml);
         switch_tab(&mut editor, SettingsTab::Claude);
-        assert!(editor.active_tab == SettingsTab::Yaml);
-        assert!(matches!(editor.status, SettingsStatus::Error(_)));
+        assert!(editor.active_tab == SettingsTab::Claude);
+        assert!(editor.editing_config.is_none());
     }
 
     #[test]
