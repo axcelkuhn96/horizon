@@ -14,6 +14,7 @@ use super::super::terminal_widget::{
 };
 use super::super::theme;
 use super::super::usage_widget::UsageDashboardView;
+use super::link::LinkBadgeView;
 pub(super) use super::panel_chrome::{
     MicControl, PanelChrome, paint_panel_chrome, panel_kind_icon, panel_title_content_rect, show_inline_rename_editor,
 };
@@ -43,6 +44,7 @@ struct PanelSnapshot {
     attention_badge: Option<(AttentionSeverity, String)>,
     ssh_status: Option<SshConnectionStatus>,
     process_exit_label: Option<String>,
+    link_badge: Option<LinkBadgeView>,
     collapsed: bool,
 }
 
@@ -423,6 +425,7 @@ impl HorizonApp {
                 attention_badge,
                 ssh_status: panel.ssh_status(),
                 process_exit_label: panel.process_exit_label(),
+                link_badge: self.link_badge_view(panel_id),
                 collapsed: panel.collapsed,
             })
         })
@@ -591,6 +594,7 @@ impl HorizonApp {
                         attention_badge: snapshot.attention_badge.as_ref(),
                         ssh_status: snapshot.ssh_status,
                         process_exit_label: snapshot.process_exit_label.as_deref(),
+                        link_badge: snapshot.link_badge.as_ref(),
                         mic: mic_response.as_ref().map(|mic| MicControl {
                             rect: rects.mic,
                             hovered: mic.enabled && (mic.response.hovered() || mic.response.has_focus()),
@@ -780,6 +784,7 @@ impl HorizonApp {
                     ui.close();
                 }
             }
+            self.show_link_menu_entries(ui, panel_id);
         });
     }
 

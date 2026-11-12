@@ -144,8 +144,12 @@ impl<'a> TerminalView<'a> {
         let other_widget_has_focus = ui
             .memory(egui::Memory::focused)
             .is_some_and(|focused| focused != interaction.body.id);
-        let has_terminal_focus =
-            window_focused && (interaction.body.has_focus() || (is_active_panel && !other_widget_has_focus));
+        // A hub modal makes the layers below it non-interactive; the terminal must
+        // not count as focused (nor forward keys) while one is open.
+        let layer_interactive = ui.ctx().memory(|memory| memory.allows_interaction(ui.layer_id()));
+        let has_terminal_focus = window_focused
+            && layer_interactive
+            && (interaction.body.has_focus() || (is_active_panel && !other_widget_has_focus));
         self.panel.set_focused(has_terminal_focus);
 
         if interactive && has_terminal_focus {

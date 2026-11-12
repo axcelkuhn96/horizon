@@ -330,6 +330,9 @@ impl HorizonApp {
         cc.egui_ctx.set_fonts(configure_fonts());
         let mut board = Board::new();
         board.attention_enabled = config.features.attention_feed;
+        // Started before any session is restored so restored panels get HORIZON_SOCKET.
+        let link_server = link::start_link_server();
+        board.set_link_socket(link_server.as_ref().map(|server| server.path().to_path_buf()));
         let resolved_theme = theme::resolve_theme(config.appearance.theme, cc.egui_ctx.system_theme());
         theme::set_theme(resolved_theme);
 
@@ -349,6 +352,7 @@ impl HorizonApp {
             action_commands_cache,
         };
         let mut app = Self::initial_state(config, bootstrap);
+        app.hub.link.set_server(link_server);
 
         match startup {
             StartupDecision::Open { session, .. } => app.activate_persistent_session(&session),

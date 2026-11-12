@@ -190,6 +190,7 @@ impl HorizonApp {
         }
 
         let started = Instant::now();
+        self.shutdown_link();
 
         let save_started = Instant::now();
         self.auto_save_runtime_state();
@@ -283,6 +284,7 @@ impl HorizonApp {
 
         let started = Instant::now();
         self.exit_cleanup_complete = true;
+        self.shutdown_link();
 
         let save_started = Instant::now();
         self.auto_save_runtime_state();
@@ -948,6 +950,8 @@ impl HorizonApp {
         self.render_dir_picker(ctx);
         self.render_command_palette(ctx);
         self.render_claude_launcher(ctx);
+        self.render_send_to_panel(ctx);
+        self.poll_link(ctx);
         self.render_remote_hosts_overlay(ctx);
         self.render_session_manager(ctx);
         self.render_ssh_upload_flow(ctx);

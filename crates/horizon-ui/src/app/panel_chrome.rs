@@ -4,6 +4,7 @@ use horizon_core::{AttentionSeverity, PanelId, PanelKind, SshConnectionStatus, a
 use crate::theme;
 
 use super::RenameEditAction;
+use super::link::{LinkBadgeView, paint_link_badge};
 use super::speech::MicState;
 use super::util::{format_compact_count, usize_to_f32};
 
@@ -27,6 +28,8 @@ pub(super) struct PanelChrome<'a> {
     pub attention_badge: Option<&'a (AttentionSeverity, String)>,
     pub ssh_status: Option<SshConnectionStatus>,
     pub process_exit_label: Option<&'a str>,
+    /// "Message received" badge, shown for 3 s after a panel-link delivery.
+    pub link_badge: Option<&'a LinkBadgeView>,
     /// Speech mic control; `None` when speech input is not enabled.
     pub mic: Option<MicControl>,
 }
@@ -252,6 +255,10 @@ pub(super) fn paint_panel_chrome(ui: &mut egui::Ui, chrome: PanelChrome<'_>) {
             );
         }
 
+        if let Some(view) = chrome.link_badge {
+            paint_link_badge_stacked(&painter, &chrome, view);
+        }
+
         if chrome.scrollback_limit > 0 {
             paint_history_meter(
                 ui,
@@ -439,7 +446,39 @@ fn title_right_boundary(chrome: &PanelChrome<'_>) -> f32 {
         // Attention badge sits left of the history meter; reserve ~110px.
         right -= 110.0;
     }
+    if chrome.link_badge.is_some() {
+        // Link badge sits left of the status badges; reserve ~120px.
+        right -= 120.0;
+    }
     right
+}
+
+/// Gap between stacked titlebar badges.
+const BADGE_STACK_GAP: f32 = 6.0;
+
+/// Link badge in the SSH/exit badge slot, stacked to their left when present.
+fn paint_link_badge_stacked(painter: &egui::Painter, chrome: &PanelChrome<'_>, view: &LinkBadgeView) {
+    let anchor = chrome.controls_anchor();
+    let right_edge = if chrome.scrollback_limit > 0 {
+        panel_history_badge_rect(chrome.titlebar_rect, anchor).min.x - 6.0
+    } else {
+        anchor.min.x - 8.0
+    };
+    let font = egui::FontId::proportional(10.0);
+    let status_labels = chrome
+        .ssh_status
+        .map(SshConnectionStatus::label)
+        .into_iter()
+        .chain(chrome.process_exit_label);
+    let mut taken = 0.0;
+    for label in status_labels {
+        let width = painter
+            .layout_no_wrap(label.to_string(), font.clone(), Color32::PLACEHOLDER)
+            .size()
+            .x;
+        taken += width + 16.0 + BADGE_STACK_GAP;
+    }
+    paint_link_badge(painter, chrome.titlebar_rect, right_edge, taken, view);
 }
 
 #[profiling::function]
