@@ -101,8 +101,10 @@ impl Board {
             opts.cwd.clone_from(&ws.cwd);
         }
 
-        let layout_position = opts.position.unwrap_or_else(|| self.default_panel_position(workspace));
         let layout_size = opts.size.unwrap_or(DEFAULT_PANEL_SIZE);
+        let layout_position = opts
+            .position
+            .unwrap_or_else(|| self.default_panel_position(workspace, layout_size, None));
         let mut panel = spawn_panel(id, workspace, opts)?;
         panel.move_to(layout_position);
         panel.resize_layout(layout_size);
@@ -240,7 +242,10 @@ impl Board {
         if let Some(layout) = target_layout {
             self.apply_workspace_layout(workspace_id, layout);
         } else {
-            let new_position = self.default_panel_position(workspace_id);
+            let size = self
+                .panel(panel_id)
+                .map_or(DEFAULT_PANEL_SIZE, |panel| panel.layout.size);
+            let new_position = self.default_panel_position(workspace_id, size, Some(panel_id));
             if let Some(panel) = self.panel_mut(panel_id) {
                 panel.move_to(new_position);
             }
