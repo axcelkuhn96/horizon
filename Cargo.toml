@@ -43,6 +43,8 @@ git2 = { version = "0.21", default-features = false }
 regex = "1.12.4"
 ignore = "0.4"
 arboard = "3.6.1"
+# Blocking HTTP client for the single Claude usage GET: rustls (no OpenSSL), no async runtime.
+ureq = { version = "3.5.2", default-features = false, features = ["rustls"] }
 png = "0.18.1"
 tokio = { version = "1.52.3", features = ["rt", "macros"] }
 surge-core = { git = "https://github.com/fintermobilityas/surge.git", tag = "v1.0.0-beta.52", package = "surge-core" }

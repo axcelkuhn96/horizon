@@ -393,6 +393,7 @@ pub struct ShortcutsConfig {
     pub focus_panel_up: String,
     pub focus_panel_down: String,
     pub toggle_scroll_pan: String,
+    pub claude_launcher: String,
 }
 
 impl Default for ShortcutsConfig {
@@ -422,6 +423,7 @@ impl Default for ShortcutsConfig {
             focus_panel_up: "Ctrl+Shift+Up".to_string(),
             focus_panel_down: "Ctrl+Shift+Down".to_string(),
             toggle_scroll_pan: "Ctrl+Shift+P".to_string(),
+            claude_launcher: "Ctrl+Shift+L".to_string(),
         }
     }
 }
@@ -461,6 +463,7 @@ impl ShortcutsConfig {
             focus_panel_up: parse_shortcut("focus_panel_up", &self.focus_panel_up)?,
             focus_panel_down: parse_shortcut("focus_panel_down", &self.focus_panel_down)?,
             toggle_scroll_pan: parse_shortcut("toggle_scroll_pan", &self.toggle_scroll_pan)?,
+            claude_launcher: parse_shortcut("claude_launcher", &self.claude_launcher)?,
         };
 
         validate_distinct_shortcuts([
@@ -488,6 +491,7 @@ impl ShortcutsConfig {
             ("focus_panel_up", shortcuts.focus_panel_up),
             ("focus_panel_down", shortcuts.focus_panel_down),
             ("toggle_scroll_pan", shortcuts.toggle_scroll_pan),
+            ("claude_launcher", shortcuts.claude_launcher),
         ])?;
 
         Ok(shortcuts)
@@ -1072,6 +1076,32 @@ mod tests {
 
         let message = error.to_string();
         assert!(message.contains("toggle_scroll_pan"));
+        assert!(message.contains("duplicate shortcut") || message.contains("conflicts with"));
+        assert!(matches!(error, crate::Error::Config(_)));
+    }
+
+    #[test]
+    fn claude_launcher_default_string_parses_to_ctrl_shift_l() {
+        use crate::shortcuts::{ShortcutBinding, ShortcutKey, ShortcutModifiers};
+
+        let defaults = super::ShortcutsConfig::default();
+
+        assert_eq!(defaults.claude_launcher, "Ctrl+Shift+L");
+        assert_eq!(
+            ShortcutBinding::parse(&defaults.claude_launcher).expect("claude_launcher should parse"),
+            ShortcutBinding::new(ShortcutModifiers::PRIMARY_SHIFT, ShortcutKey::Letter('L'))
+        );
+        let resolved = defaults.resolve().expect("default shortcuts should resolve");
+        assert_eq!(resolved.claude_launcher, crate::AppShortcuts::default().claude_launcher);
+    }
+
+    #[test]
+    fn claude_launcher_shortcut_colliding_with_existing_is_rejected() {
+        let error = Config::from_yaml("shortcuts:\n  claude_launcher: Ctrl+Shift+K\n")
+            .expect_err("config should reject claude_launcher shortcut colliding with command_palette");
+
+        let message = error.to_string();
+        assert!(message.contains("claude_launcher"));
         assert!(message.contains("duplicate shortcut") || message.contains("conflicts with"));
         assert!(matches!(error, crate::Error::Config(_)));
     }

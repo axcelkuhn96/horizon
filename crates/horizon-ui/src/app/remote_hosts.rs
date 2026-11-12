@@ -16,6 +16,7 @@ impl HorizonApp {
         if self.remote_hosts_overlay.is_some() {
             self.dismiss_remote_hosts_overlay(ctx);
         } else {
+            self.hub.claude_launcher = None;
             self.remote_hosts_overlay = Some(RemoteHostsOverlay::new());
             self.maybe_start_remote_hosts_refresh();
         }

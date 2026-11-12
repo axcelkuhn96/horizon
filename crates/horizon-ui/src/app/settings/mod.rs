@@ -1,5 +1,7 @@
 mod bar;
 mod claude;
+#[allow(unused_imports, reason = "used by the Claude launcher empty state after merge")]
+pub(crate) use claude::select_claude_tab;
 mod general;
 mod presets;
 mod shortcuts;
@@ -69,7 +71,6 @@ pub(super) struct SettingsEditor {
     pub(super) status: SettingsStatus,
     active_tab: SettingsTab,
     editing_config: Option<Config>,
-    #[expect(dead_code, reason = "wired in Task 6")]
     claude_tab: claude::ClaudeTabState,
     #[expect(dead_code, reason = "wired in Task 11")]
     workspaces_tab: workspaces::WorkspacesTabState,
@@ -279,6 +280,7 @@ impl HorizonApp {
         self.action_commands_cache =
             crate::command_registry::action_commands(&self.shortcuts, util::primary_shortcut_label());
         self.presets = config.resolved_presets();
+        self.hub.invalidate_launcher_rows();
         self.board.attention_enabled = config.features.attention_feed;
         if self.appearance_theme != config.appearance.theme {
             self.appearance_theme = config.appearance.theme;

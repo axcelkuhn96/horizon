@@ -21,7 +21,6 @@ const MAX_ACCOUNT_BYTES: u64 = 8 * 1024 * 1024;
 pub struct AccessToken(String);
 
 impl AccessToken {
-    #[allow(dead_code)] // consumed by the usage API client (Task 8)
     pub(crate) fn expose(&self) -> &str {
         &self.0
     }

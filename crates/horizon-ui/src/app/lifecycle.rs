@@ -945,6 +945,7 @@ impl HorizonApp {
         self.cancel_unattended_recording();
         self.render_dir_picker(ctx);
         self.render_command_palette(ctx);
+        self.render_claude_launcher(ctx);
         self.render_remote_hosts_overlay(ctx);
         self.render_session_manager(ctx);
         self.render_ssh_upload_flow(ctx);
