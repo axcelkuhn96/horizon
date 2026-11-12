@@ -12,17 +12,18 @@ use std::f32::consts::{FRAC_PI_2, TAU};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use egui::{Align2, Color32, FontId, Frame, Galley, Margin, Painter, Pos2, Rect, Sense, Stroke, Ui, Vec2};
+use egui::{
+    Align2, Color32, CursorIcon, FontId, Frame, Galley, Margin, Painter, Pos2, Rect, Sense, Stroke, StrokeKind, Ui,
+    Vec2,
+};
+use horizon_core::agent_detect::default_claude_config_dir;
 use horizon_core::claude_usage::{ProfileUsage, UsageState, remaining_percent};
-use horizon_core::{ClaudeProfile, PanelId, PanelKind, default_claude_config_dir, expand_config_dir};
+use horizon_core::{ClaudeProfile, PanelId, PanelKind, claude_config_dir_for_env, expand_config_dir};
 
 use super::usage_chips::{format_relative, now_unix_ms};
 use super::util::usize_to_f32;
 use super::{HorizonApp, hub_ui};
 use crate::theme;
-
-/// Variable the launcher sets for a non-default account.
-const CONFIG_DIR_ENV: &str = "CLAUDE_CONFIG_DIR";
 
 /// Room the ring takes at the left of the badge.
 const RING_SLOT: f32 = 16.0;
@@ -180,6 +181,52 @@ fn used_label(used: f32) -> u32 {
     100 - remaining_percent(used)
 }
 
+/// What the login of the account allows, as the tooltip and the screen-reader label tell it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum AccountStatus {
+    Active,
+    Stale,
+    Expired,
+    NoLogin,
+    /// No usage snapshot for the account yet.
+    Unknown,
+}
+
+impl AccountStatus {
+    fn of(usage: Option<UsageState>) -> Self {
+        match usage {
+            Some(UsageState::Ok) => Self::Active,
+            Some(UsageState::Stale) => Self::Stale,
+            Some(UsageState::Expired) => Self::Expired,
+            Some(UsageState::Missing) => Self::NoLogin,
+            None => Self::Unknown,
+        }
+    }
+
+    /// Text of the pill in the tooltip header; none while the status is unknown.
+    fn pill(self) -> Option<(&'static str, Color32)> {
+        match self {
+            Self::Active => Some(("active", theme::PALETTE_GREEN())),
+            Self::Stale => Some(("stale", theme::PALETTE_YELLOW())),
+            Self::Expired => Some(("expired", theme::PALETTE_RED())),
+            Self::NoLogin => Some(("no login", theme::PALETTE_RED())),
+            Self::Unknown => None,
+        }
+    }
+
+    /// `conta2, 34% of weekly quota remaining`; an unusable login is told instead of a quota.
+    fn accessible(self, name: &str, used_seven: Option<f32>) -> String {
+        match (self, used_seven) {
+            (Self::Expired, _) => format!("{name}, login expired"),
+            (Self::NoLogin, _) => format!("{name}, not logged in"),
+            (_, Some(used)) if remaining_pct(Some(used)).is_some() => {
+                format!("{name}, {}% of weekly quota remaining", remaining_percent(used))
+            }
+            _ => format!("{name}, weekly quota unknown"),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tooltip
 // ---------------------------------------------------------------------------
@@ -187,6 +234,7 @@ fn used_label(used: f32) -> u32 {
 /// What the tooltip says, formatted into text only while it is open.
 pub(super) struct TooltipInfo {
     name: String,
+    status: AccountStatus,
     email: Option<String>,
     used_seven: Option<f32>,
     used_five: Option<f32>,
@@ -319,15 +367,9 @@ pub(super) fn build_layout(painter: &Painter, inputs: &LayoutInputs<'_>) -> Badg
     let state = inputs
         .usage
         .map_or(BadgeState::Dim, |usage| badge_state(usage.state, remaining));
-    let login_unusable = inputs
-        .usage
-        .is_some_and(|usage| matches!(usage.state, UsageState::Expired | UsageState::Missing));
-    let accessible = match used_seven {
-        Some(used) if remaining.is_some() => {
-            format!("{name}, {}% of weekly quota remaining", remaining_percent(used))
-        }
-        _ => format!("{name}, weekly quota unknown"),
-    };
+    let status = AccountStatus::of(inputs.usage.map(|usage| usage.state));
+    let login_unusable = matches!(status, AccountStatus::Expired | AccountStatus::NoLogin);
+    let accessible = status.accessible(name, used_seven);
     BadgeLayout {
         name: hub_ui::elided(painter, name, FontId::proportional(NAME_FONT_SIZE), NAME_MAX_WIDTH),
         ring: RingGeometry::new(state, remaining, inputs.pixels_per_point),
@@ -335,6 +377,7 @@ pub(super) fn build_layout(painter: &Painter, inputs: &LayoutInputs<'_>) -> Badg
         accent: inputs.accent,
         tooltip: TooltipInfo {
             name: name.clone(),
+            status,
             email: inputs
                 .usage
                 .and_then(|usage| usage.email.as_deref())
@@ -381,8 +424,9 @@ pub(super) struct AccountBadgeCache {
     entries: HashMap<PanelId, Entry>,
     /// Panel count at the last eviction sweep.
     swept_for: usize,
-    /// `$HOME`, read once.
-    home: Option<Option<PathBuf>>,
+    /// `$HOME`, read once (`home_read` says whether).
+    home: Option<PathBuf>,
+    home_read: bool,
 }
 
 impl AccountBadgeCache {
@@ -416,9 +460,11 @@ impl AccountBadgeCache {
 
     /// The user's home directory (read from the environment on first use).
     fn home(&mut self) -> Option<PathBuf> {
-        self.home
-            .get_or_insert_with(|| std::env::var_os("HOME").map(PathBuf::from))
-            .clone()
+        if !self.home_read {
+            self.home = std::env::var_os("HOME").map(PathBuf::from);
+            self.home_read = true;
+        }
+        self.home.clone()
     }
 }
 
@@ -431,6 +477,7 @@ impl HorizonApp {
         self.hub
             .account_badges
             .evict_closed(panel_count, |id| self.board.panel(id).is_some());
+        let home = self.hub.account_badges.home();
         let Some(panel) = self.board.panel(panel_id) else {
             return;
         };
@@ -440,13 +487,14 @@ impl HorizonApp {
             self.hub.account_badges.forget(panel_id);
             return;
         }
-        let env_dir = (kind == PanelKind::Claude)
-            .then(|| panel.env.get(CONFIG_DIR_ENV))
-            .flatten()
-            .map(|raw| Path::new(raw.as_str()));
+        // The dir the panel was started with (blank or unset means the default `~/.claude`).
+        let env_dir = home
+            .as_deref()
+            .filter(|_| kind == PanelKind::Claude)
+            .map(|home| claude_config_dir_for_env(&panel.env, home));
         let pixels_per_point = painter.ctx().pixels_per_point();
         let key = BadgeKey {
-            dir: detected.or(env_dir),
+            dir: detected.or(env_dir.as_deref()),
             version: self.hub.usage.version(),
             ppp_bits: pixels_per_point.to_bits(),
         };
@@ -456,9 +504,7 @@ impl HorizonApp {
         let (version, ppp_bits) = (key.version, key.ppp_bits);
         let dir = key.dir.map(Path::to_path_buf);
         let detected = detected.map(Path::to_path_buf);
-        let env_dir = env_dir.map(Path::to_path_buf);
 
-        let home = self.hub.account_badges.home();
         let names: Vec<String> = self
             .hub
             .usage
@@ -506,6 +552,8 @@ pub(super) struct PlacedBadge<'a> {
     /// The name is drawn next to the ring (wide panels only).
     pub(super) show_name: bool,
     pub(super) rect: Rect,
+    /// A click opens the quick-start strip at its accounts (shell panels that can start Claude).
+    pub(super) clickable: bool,
 }
 
 impl PlacedBadge<'_> {
@@ -520,14 +568,30 @@ const fn name_offset() -> f32 {
     RING_SLOT + NAME_GAP
 }
 
-/// Paints the badge inside `rect`: hover fill, ring (track and arc, or dashes when dimmed), disc
-/// and name.
-pub(super) fn paint_account_badge(painter: &Painter, rect: Rect, layout: &BadgeLayout, show_name: bool, hovered: bool) {
-    if hovered {
+/// How the pointer and the keyboard currently treat the badge.
+#[derive(Clone, Copy, Default)]
+struct BadgeInteraction {
+    hovered: bool,
+    /// Keyboard focus (only a clickable badge takes it): draws the focus ring.
+    focused: bool,
+}
+
+/// Paints the badge inside `rect`: hover fill, focus ring, ring (track and arc, or dashes when
+/// dimmed), disc and name.
+fn paint_account_badge(painter: &Painter, rect: Rect, layout: &BadgeLayout, show_name: bool, state: BadgeInteraction) {
+    if state.hovered {
         painter.rect_filled(
             rect.expand2(Vec2::new(3.0, 0.0)),
             egui::CornerRadius::same(HOVER_RADIUS),
             theme::alpha(theme::PANEL_BG_ALT(), HOVER_FILL_ALPHA),
+        );
+    }
+    if state.focused {
+        painter.rect_stroke(
+            rect.expand2(Vec2::new(3.0, 1.0)),
+            egui::CornerRadius::same(HOVER_RADIUS),
+            Stroke::new(1.5, theme::ACCENT()),
+            StrokeKind::Outside,
         );
     }
     let center = Pos2::new(rect.min.x + RING_SLOT / 2.0, rect.center().y);
@@ -572,24 +636,46 @@ fn paint_arc(painter: &Painter, center: Pos2, ring: &RingGeometry, color: Color3
     }
 }
 
-/// Paints a placed badge and gives it a hover-only tooltip (account, e-mail, quota, reset).
-pub(super) fn show_account_badge(ui: &mut Ui, painter: &Painter, panel_id: PanelId, badge: &PlacedBadge<'_>) {
+/// Paints a placed badge and gives it a tooltip (account, e-mail, quota, reset). Returns whether
+/// it was clicked this frame; only a clickable badge senses clicks, shows the pointer cursor and
+/// can take keyboard focus.
+pub(super) fn show_account_badge(ui: &mut Ui, painter: &Painter, panel_id: PanelId, badge: &PlacedBadge<'_>) -> bool {
     let layout = badge.layout;
+    let clickable = badge.clickable;
     let response = ui.interact(
         badge.rect,
         ui.make_persistent_id(("panel_account_badge", panel_id.0)),
-        Sense::hover(),
+        if clickable { Sense::click() } else { Sense::hover() },
     );
-    paint_account_badge(painter, badge.rect, layout, badge.show_name, response.hovered());
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &layout.accessible));
+    if clickable && response.hovered() {
+        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+    }
+    paint_account_badge(
+        painter,
+        badge.rect,
+        layout,
+        badge.show_name,
+        BadgeInteraction {
+            hovered: response.hovered(),
+            focused: clickable && response.has_focus(),
+        },
+    );
+    let widget = if clickable {
+        egui::WidgetType::Button
+    } else {
+        egui::WidgetType::Label
+    };
+    response.widget_info(|| egui::WidgetInfo::labeled(widget, true, &layout.accessible));
+    let clicked = clickable && response.clicked();
     response.on_hover_ui_at_pointer(|ui| {
         Frame::NONE
             .inner_margin(Margin::same(TOOLTIP_MARGIN - TOOLTIP_FRAME_MARGIN))
-            .show(ui, |ui| tooltip_body(ui, layout, now_unix_ms() / 1000));
+            .show(ui, |ui| tooltip_body(ui, layout, clickable, now_unix_ms() / 1000));
     });
+    clicked
 }
 
-fn tooltip_body(ui: &mut Ui, layout: &BadgeLayout, now_secs: i64) {
+fn tooltip_body(ui: &mut Ui, layout: &BadgeLayout, clickable: bool, now_secs: i64) {
     ui.set_width(TOOLTIP_WIDTH);
     ui.spacing_mut().item_spacing.y = 2.0;
     let info = &layout.tooltip;
@@ -605,12 +691,14 @@ fn tooltip_body(ui: &mut Ui, layout: &BadgeLayout, now_secs: i64) {
         FontId::proportional(13.0),
         theme::FG(),
     );
-    let pill_width = hub_ui::pill_width(painter, "active");
-    let pill = hub_ui::pill_rect(
-        Pos2::new(header.max.x - pill_width, header.center().y - 9.0),
-        pill_width,
-    );
-    hub_ui::pill(painter, pill, "active", theme::PALETTE_GREEN());
+    if let Some((label, color)) = info.status.pill() {
+        let pill_width = hub_ui::pill_width(painter, label);
+        let pill = hub_ui::pill_rect(
+            Pos2::new(header.max.x - pill_width, header.center().y - 9.0),
+            pill_width,
+        );
+        hub_ui::pill(painter, pill, label, color);
+    }
 
     if let Some(email) = lines.email {
         ui.label(egui::RichText::new(email).size(11.0).color(theme::FG_DIM()));
@@ -626,6 +714,14 @@ fn tooltip_body(ui: &mut Ui, layout: &BadgeLayout, now_secs: i64) {
     if let Some(note) = lines.note {
         ui.add_space(2.0);
         ui.label(egui::RichText::new(note).size(10.5).color(theme::PALETTE_YELLOW()));
+    }
+    if clickable {
+        ui.add_space(2.0);
+        ui.label(
+            egui::RichText::new("Click to start Claude with an account")
+                .size(10.5)
+                .color(theme::FG_DIM()),
+        );
     }
 }
 
@@ -654,399 +750,4 @@ fn weekly_row(ui: &mut Ui, layout: &BadgeLayout, text: &str) {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::cell::Cell;
-
-    use horizon_core::claude_usage::UsageWindow;
-
-    use super::*;
-    use crate::app::hub_ui::Severity;
-
-    fn profile(name: &str, dir: &str) -> ClaudeProfile {
-        ClaudeProfile {
-            name: name.to_owned(),
-            config_dir: dir.to_owned(),
-        }
-    }
-
-    fn two_profiles() -> Vec<ClaudeProfile> {
-        vec![profile("default", "~/.claude"), profile("work", "~/.claude-work")]
-    }
-
-    fn usage(state: UsageState, seven: Option<f32>) -> ProfileUsage {
-        ProfileUsage {
-            name: "work".to_owned(),
-            display_name: None,
-            email: Some("fulano@exemplo.com".to_owned()),
-            five_hour: UsageWindow {
-                percent: Some(12.0),
-                resets_at: None,
-            },
-            seven_day: UsageWindow {
-                percent: seven,
-                resets_at: None,
-            },
-            severity: None,
-            state,
-            fetched_at_ms: Some(1_000),
-        }
-    }
-
-    fn with_painter(check: impl FnOnce(&Painter)) {
-        let ctx = egui::Context::default();
-        let check = Cell::new(Some(check));
-        // Text layout needs fonts, which exist inside a pass.
-        let _ = ctx.run(egui::RawInput::default(), |ctx| {
-            let painter = Painter::new(ctx.clone(), egui::LayerId::background(), Rect::EVERYTHING);
-            if let Some(check) = check.take() {
-                check(&painter);
-            }
-        });
-    }
-
-    #[test]
-    fn remaining_is_100_minus_used_clamped() {
-        assert_eq!(remaining_pct(Some(66.0)), Some(34.0));
-        assert_eq!(remaining_pct(Some(0.0)), Some(100.0));
-        assert_eq!(remaining_pct(Some(100.0)), Some(0.0));
-        assert_eq!(remaining_pct(Some(130.0)), Some(0.0));
-        assert_eq!(remaining_pct(Some(-5.0)), Some(100.0));
-    }
-
-    #[test]
-    fn remaining_none_when_usage_unknown() {
-        assert_eq!(remaining_pct(None), None);
-        assert_eq!(remaining_pct(Some(f32::NAN)), None);
-    }
-
-    #[test]
-    fn ring_sweep_zero_and_full() {
-        assert!(ring_sweep(0.0).abs() < f32::EPSILON);
-        assert!(ring_sweep(-3.0).abs() < f32::EPSILON);
-        assert!((ring_sweep(100.0) - 1.0).abs() < f32::EPSILON);
-        assert!((ring_sweep(250.0) - 1.0).abs() < f32::EPSILON);
-        assert!((ring_sweep(50.0) - 0.5).abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn ring_sweep_min_visible_slice_when_nonzero() {
-        assert!((ring_sweep(0.1) - MIN_VISIBLE_SWEEP).abs() < f32::EPSILON);
-        assert!((ring_sweep(2.0) - 0.02).abs() < f32::EPSILON);
-        assert!(ring_sweep(3.0) > MIN_VISIBLE_SWEEP);
-    }
-
-    #[test]
-    fn ring_points_count_bounded_and_on_circle() {
-        let center = Pos2::new(30.0, 12.0);
-        let points = ring_points(center, 7.5, START_ANGLE, 0.34, 17);
-        assert_eq!(points.len(), 18);
-        for point in &points {
-            assert!(
-                ((*point - center).length() - 7.5).abs() < 1e-3,
-                "{point:?} off the circle"
-            );
-        }
-        // Starts at 12 o'clock and sweeps clockwise (towards +x on screen).
-        assert!((points[0] - Pos2::new(30.0, 4.5)).length() < 1e-3);
-        assert!(points[1].x > points[0].x);
-
-        assert_eq!(ring_points(center, 7.5, START_ANGLE, 1.0, 500).len(), MAX_SEGMENTS + 1);
-        assert_eq!(ring_points(center, 7.5, START_ANGLE, 1.0, 0).len(), 2);
-        for ppp in [1.0, 1.5, 2.0, 4.0] {
-            assert!(arc_segments(1.0, ppp) <= MAX_SEGMENTS);
-            assert!(arc_segments(0.02, ppp) >= 1);
-        }
-    }
-
-    #[test]
-    fn badge_state_dim_for_expired_missing_nologin() {
-        assert_eq!(badge_state(UsageState::Expired, Some(80.0)), BadgeState::Dim);
-        assert_eq!(badge_state(UsageState::Missing, Some(80.0)), BadgeState::Dim);
-        assert_eq!(badge_state(UsageState::Ok, None), BadgeState::Dim);
-        assert_eq!(badge_state(UsageState::Stale, None), BadgeState::Dim);
-    }
-
-    #[test]
-    fn badge_state_severity_follows_used_pct() {
-        assert_eq!(
-            badge_state(UsageState::Ok, Some(80.0)),
-            BadgeState::Ok(Severity::Normal)
-        );
-        assert_eq!(
-            badge_state(UsageState::Ok, Some(20.0)),
-            BadgeState::Ok(Severity::Warning)
-        );
-        assert_eq!(
-            badge_state(UsageState::Ok, Some(5.0)),
-            BadgeState::Ok(Severity::Critical)
-        );
-        assert_eq!(
-            badge_state(UsageState::Stale, Some(5.0)),
-            BadgeState::Ok(Severity::Critical)
-        );
-    }
-
-    #[test]
-    fn panel_profile_matches_normalized_config_dir() {
-        let home = Path::new("/home/u");
-        let profiles = two_profiles();
-        for dir in [
-            "/home/u/.claude-work",
-            "/home/u/.claude-work/",
-            "~/.claude-work",
-            "~/.claude-work/",
-        ] {
-            assert_eq!(
-                panel_profile(PanelKind::Shell, None, Some(Path::new(dir)), &profiles, home),
-                Some(1),
-                "detected {dir}"
-            );
-            assert_eq!(
-                panel_profile(PanelKind::Claude, Some(Path::new(dir)), None, &profiles, home),
-                Some(1),
-                "env {dir}"
-            );
-        }
-        // A running Claude beats the env the panel was started with.
-        assert_eq!(
-            panel_profile(
-                PanelKind::Claude,
-                Some(Path::new("~/.claude-work")),
-                Some(Path::new("/home/u/.claude")),
-                &profiles,
-                home
-            ),
-            Some(0)
-        );
-        // A profile written with a trailing slash still matches.
-        let slashed = vec![profile("work", "~/.claude-work/")];
-        assert_eq!(
-            panel_profile(
-                PanelKind::Shell,
-                None,
-                Some(Path::new("/home/u/.claude-work")),
-                &slashed,
-                home
-            ),
-            Some(0)
-        );
-    }
-
-    #[test]
-    fn panel_profile_default_dir_maps_to_default_profile() {
-        let home = Path::new("/home/u");
-        let profiles = two_profiles();
-        assert_eq!(panel_profile(PanelKind::Claude, None, None, &profiles, home), Some(0));
-        assert_eq!(
-            panel_profile(PanelKind::Claude, Some(Path::new("")), None, &profiles, home),
-            Some(0)
-        );
-        assert_eq!(
-            panel_profile(PanelKind::Claude, Some(Path::new("~/.claude/")), None, &profiles, home),
-            Some(0)
-        );
-        assert_eq!(
-            panel_profile(
-                PanelKind::Shell,
-                None,
-                Some(Path::new("/home/u/.claude")),
-                &profiles,
-                home
-            ),
-            Some(0)
-        );
-        // The default profile is found wherever it sits in the list.
-        let reordered = vec![profile("work", "~/.claude-work"), profile("default", "~/.claude")];
-        assert_eq!(panel_profile(PanelKind::Claude, None, None, &reordered, home), Some(1));
-        // No default profile configured: no account.
-        let only_work = vec![profile("work", "~/.claude-work")];
-        assert_eq!(panel_profile(PanelKind::Claude, None, None, &only_work, home), None);
-    }
-
-    #[test]
-    fn panel_profile_none_for_non_claude_shell() {
-        let home = Path::new("/home/u");
-        let profiles = two_profiles();
-        assert_eq!(panel_profile(PanelKind::Shell, None, None, &profiles, home), None);
-        // The env of a shell says nothing about a Claude that is not running.
-        assert_eq!(
-            panel_profile(
-                PanelKind::Shell,
-                Some(Path::new("~/.claude-work")),
-                None,
-                &profiles,
-                home
-            ),
-            None
-        );
-        assert_eq!(panel_profile(PanelKind::Editor, None, None, &profiles, home), None);
-    }
-
-    #[test]
-    fn panel_profile_unknown_dir_is_none() {
-        let home = Path::new("/home/u");
-        let profiles = two_profiles();
-        assert_eq!(
-            panel_profile(PanelKind::Shell, None, Some(Path::new("/srv/other")), &profiles, home),
-            None
-        );
-        assert_eq!(
-            panel_profile(PanelKind::Claude, Some(Path::new("/srv/other")), None, &profiles, home),
-            None
-        );
-        assert_eq!(panel_profile(PanelKind::Claude, None, None, &[], home), None);
-    }
-
-    #[test]
-    fn cache_rebuilds_only_when_key_changes() {
-        let panel = PanelId(7);
-        let mut cache = AccountBadgeCache::default();
-        let dir = PathBuf::from("/home/u/.claude-work");
-        let key = |dir: Option<&Path>, version, ppp_bits| BadgeKey { dir, version, ppp_bits };
-        let entry = |dir: Option<&Path>, version, ppp_bits| Entry {
-            dir: dir.map(Path::to_path_buf),
-            version,
-            ppp_bits,
-            layout: None,
-        };
-
-        assert!(!cache.is_fresh(panel, &key(Some(&dir), 1, 1)), "nothing cached yet");
-        cache.store(panel, entry(Some(&dir), 1, 1));
-        assert!(
-            cache.is_fresh(panel, &key(Some(&dir), 1, 1)),
-            "a panel without an account is cached too"
-        );
-        assert!(!cache.is_fresh(panel, &key(Some(&dir), 2, 1)), "new usage snapshot");
-        assert!(!cache.is_fresh(panel, &key(Some(&dir), 1, 2)), "new scale");
-        assert!(!cache.is_fresh(panel, &key(None, 1, 1)), "Claude gone");
-        assert!(
-            !cache.is_fresh(panel, &key(Some(Path::new("/home/u/.claude")), 1, 1)),
-            "other account"
-        );
-        assert!(!cache.is_fresh(PanelId(8), &key(Some(&dir), 1, 1)), "other panel");
-
-        cache.forget(panel);
-        assert!(!cache.is_fresh(panel, &key(Some(&dir), 1, 1)));
-    }
-
-    #[test]
-    fn cache_evicts_closed_panels_when_the_count_moves() {
-        let mut cache = AccountBadgeCache::default();
-        for id in [1, 2] {
-            cache.store(
-                PanelId(id),
-                Entry {
-                    dir: None,
-                    version: 0,
-                    ppp_bits: 0,
-                    layout: None,
-                },
-            );
-        }
-        cache.evict_closed(1, |id| id == PanelId(1));
-        assert!(cache.entries.contains_key(&PanelId(1)));
-        assert!(!cache.entries.contains_key(&PanelId(2)));
-    }
-
-    #[test]
-    fn badge_width_fits_name_ellipsis_and_ring() {
-        assert!((badge_width(None) - RING_SLOT).abs() < f32::EPSILON);
-        assert!((badge_width(Some(40.0)) - (RING_SLOT + NAME_GAP + 40.0)).abs() < f32::EPSILON);
-
-        with_painter(|painter| {
-            let long = profile(&"x".repeat(80), "~/.claude-long");
-            let short = profile("a", "~/.claude-a");
-            let layout = |profile: &ClaudeProfile| {
-                build_layout(
-                    painter,
-                    &LayoutInputs {
-                        profile,
-                        usage: None,
-                        reset_seven: None,
-                        accent: Color32::WHITE,
-                        pixels_per_point: 1.0,
-                    },
-                )
-            };
-            let long = layout(&long);
-            let short = layout(&short);
-            assert!(long.width(true) <= MAX_WIDTH + 0.5, "{}", long.width(true));
-            assert!(long.width(true) > short.width(true), "a longer name widens the badge");
-            assert!(short.width(true) > RING_SLOT);
-            assert!((short.width(false) - RING_SLOT).abs() < f32::EPSILON);
-        });
-    }
-
-    #[test]
-    fn layout_follows_usage_state() {
-        with_painter(|painter| {
-            let work = profile("work", "~/.claude-work");
-            let layout = |usage: Option<&ProfileUsage>| {
-                build_layout(
-                    painter,
-                    &LayoutInputs {
-                        profile: &work,
-                        usage,
-                        reset_seven: None,
-                        accent: Color32::WHITE,
-                        pixels_per_point: 2.0,
-                    },
-                )
-            };
-
-            let fresh = usage(UsageState::Ok, Some(66.0));
-            let ok = layout(Some(&fresh));
-            assert_eq!(ok.state, BadgeState::Ok(Severity::Normal));
-            assert_eq!(ok.accessible, "work, 34% of weekly quota remaining");
-            assert!(!ok.ring.arc.is_empty() && ok.ring.dashes.is_empty() && !ok.ring.full);
-            assert!(ok.ring.arc.len() <= MAX_SEGMENTS + 1);
-
-            let untouched = usage(UsageState::Ok, Some(0.0));
-            assert!(layout(Some(&untouched)).ring.full, "all quota left is a whole circle");
-
-            let expired = usage(UsageState::Expired, Some(10.0));
-            let dim = layout(Some(&expired));
-            assert_eq!(dim.state, BadgeState::Dim);
-            assert!(dim.ring.arc.is_empty() && !dim.ring.dashes.is_empty());
-            assert!(dim.tooltip.login_note.as_deref().is_some_and(|note| {
-                note.contains("claude /login") && note.contains("CLAUDE_CONFIG_DIR=~/.claude-work")
-            }));
-
-            let unknown = layout(None);
-            assert_eq!(unknown.state, BadgeState::Dim);
-            assert_eq!(unknown.accessible, "work, weekly quota unknown");
-            assert!(unknown.tooltip.login_note.is_none());
-        });
-    }
-
-    #[test]
-    fn tooltip_text_has_email_used_remaining_and_reset() {
-        let info = TooltipInfo {
-            name: "work".to_owned(),
-            email: Some("fulano@exemplo.com".to_owned()),
-            used_seven: Some(66.0),
-            used_five: Some(12.0),
-            reset: Some(("Mon 14:00".to_owned(), 1_000_000 + 2 * 86_400 + 4 * 3_600)),
-            login_note: None,
-        };
-        let lines = info.lines(1_000_000);
-        assert_eq!(lines.email, Some("fulano@exemplo.com"));
-        assert_eq!(lines.weekly, "7d: 66% used \u{b7} 34% left");
-        assert_eq!(lines.five.as_deref(), Some("5h: 12% used"));
-        assert_eq!(lines.reset.as_deref(), Some("Resets Mon 14:00 (in 2d 4h)"));
-        assert_eq!(lines.note, None);
-
-        let unknown = TooltipInfo {
-            name: "work".to_owned(),
-            email: None,
-            used_seven: None,
-            used_five: None,
-            reset: None,
-            login_note: Some("Not logged in".to_owned()),
-        };
-        let lines = unknown.lines(0);
-        assert_eq!(lines.weekly, "7d: no data");
-        assert!(lines.five.is_none() && lines.reset.is_none() && lines.email.is_none());
-        assert_eq!(lines.note, Some("Not logged in"));
-    }
-}
+mod tests;

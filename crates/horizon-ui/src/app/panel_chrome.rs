@@ -192,7 +192,8 @@ fn panel_kind_label_color(base: Color32, focused: bool) -> Color32 {
 }
 
 #[profiling::function]
-pub(super) fn paint_panel_chrome(ui: &mut egui::Ui, chrome: PanelChrome<'_>) {
+/// Paints the panel chrome. Returns `true` when the account badge was clicked.
+pub(super) fn paint_panel_chrome(ui: &mut egui::Ui, chrome: PanelChrome<'_>) -> bool {
     let painter = ui.painter_at(chrome.panel_rect);
     let accent = panel_chrome_accent(chrome.kind, chrome.workspace_accent, chrome.focused);
 
@@ -271,9 +272,9 @@ pub(super) fn paint_panel_chrome(ui: &mut egui::Ui, chrome: PanelChrome<'_>) {
     if let Some(chip) = chrome.agent {
         paint_agent_chip(ui, &painter, chrome.panel_id, chip, chrome.focused);
     }
-    if let Some(badge) = chrome.account {
-        show_account_badge(ui, &painter, chrome.panel_id, badge);
-    }
+    let account_clicked = chrome
+        .account
+        .is_some_and(|badge| show_account_badge(ui, &painter, chrome.panel_id, badge));
 
     // Collapsed panels are titlebar-only: skip the badges/history meter that
     // describe the (hidden) body. The caret + close button stay visible.
@@ -343,6 +344,7 @@ pub(super) fn paint_panel_chrome(ui: &mut egui::Ui, chrome: PanelChrome<'_>) {
         chrome.close_hovered,
         chrome.collapsed,
     );
+    account_clicked
 }
 
 /// Paint the collapse/expand caret to the left of the close button. The glyph
@@ -479,6 +481,36 @@ fn paint_close_and_resize_controls(
     );
 }
 
+/// Titlebar room kept for the workspace dot and the start of the title; the chip group (status
+/// dot, account badge, names) never grows into it.
+const CHIP_GROUP_LEFT_RESERVE: f32 = 80.0;
+
+/// X where the chip group ends: one gap left of the quick-start strip, or where the strip would end.
+fn chip_group_right(
+    titlebar_rect: Rect,
+    controls: Rect,
+    collapse: Rect,
+    has_history_meter: bool,
+    strip: Option<Rect>,
+) -> f32 {
+    strip.map_or_else(
+        || quick_start_strip_right(titlebar_rect, controls, collapse, has_history_meter),
+        |strip| strip.min.x - STRIP_GAP,
+    )
+}
+
+/// Widest the chip group (agent chip and account badge) may be, so it stops short of the title.
+pub(super) fn chip_group_budget(
+    titlebar_rect: Rect,
+    controls: Rect,
+    collapse: Rect,
+    has_history_meter: bool,
+    strip: Option<Rect>,
+) -> f32 {
+    let right = chip_group_right(titlebar_rect, controls, collapse, has_history_meter, strip);
+    (right - titlebar_rect.min.x - CHIP_GROUP_LEFT_RESERVE).max(0.0)
+}
+
 /// Rect of the agent chip in the titlebar: it ends one gap left of the quick-start strip, or
 /// where the strip would end when the panel has none.
 pub(super) fn agent_chip_rect(
@@ -489,10 +521,7 @@ pub(super) fn agent_chip_rect(
     strip: Option<Rect>,
     width: f32,
 ) -> Rect {
-    let right = strip.map_or_else(
-        || quick_start_strip_right(titlebar_rect, controls, collapse, has_history_meter),
-        |strip| strip.min.x - STRIP_GAP,
-    );
+    let right = chip_group_right(titlebar_rect, controls, collapse, has_history_meter, strip);
     Rect::from_min_size(
         Pos2::new(right - width, titlebar_rect.center().y - AgentChip::height() * 0.5),
         Vec2::new(width, AgentChip::height()),
@@ -514,9 +543,15 @@ fn paint_agent_chip(
         Sense::hover(),
     );
     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, status_label(chip.status)));
-    response.on_hover_ui(|ui| {
-        ui.label(chip.tooltip());
-    });
+    // The account badge inside the chip has its own tooltip; the chip's would open on top of it.
+    let over_badge = response
+        .hover_pos()
+        .is_some_and(|pos| chip.has_badge() && chip.badge_rect().contains(pos));
+    if !over_badge {
+        response.on_hover_ui(|ui| {
+            ui.label(chip.tooltip());
+        });
+    }
 }
 
 /// Compute the right x boundary where the title text must stop, accounting
@@ -929,8 +964,9 @@ mod tests {
     use egui::{Color32, Pos2, Rect};
 
     use super::{
-        BADGE_STACK_GAP, badge_stack_offset, focus_ring_stroke, panel_border_stroke, panel_fill, panel_title_color,
-        panel_titlebar_fill, quick_start_strip_right, title_focus_indicator_rect,
+        BADGE_STACK_GAP, CHIP_GROUP_LEFT_RESERVE, badge_stack_offset, chip_group_budget, focus_ring_stroke,
+        panel_border_stroke, panel_fill, panel_title_color, panel_titlebar_fill, quick_start_strip_right,
+        title_focus_indicator_rect,
     };
 
     #[test]
@@ -943,6 +979,20 @@ mod tests {
         assert_ne!(panel_fill(accent, true), panel_fill(accent, false));
         assert_ne!(panel_titlebar_fill(accent, true), panel_titlebar_fill(accent, false));
         assert_ne!(panel_title_color(true), panel_title_color(false));
+    }
+
+    #[test]
+    fn chip_group_budget_stops_short_of_the_title() {
+        let titlebar = Rect::from_min_size(Pos2::new(10.0, 0.0), egui::Vec2::new(520.0, 30.0));
+        let close = Rect::from_min_size(Pos2::new(490.0, 6.0), egui::Vec2::new(18.0, 18.0));
+        let collapse = Rect::from_min_size(Pos2::new(466.0, 6.0), egui::Vec2::new(18.0, 18.0));
+        let strip = Rect::from_min_size(Pos2::new(300.0, 5.0), egui::Vec2::new(72.0, 20.0));
+        let budget = chip_group_budget(titlebar, close, collapse, true, Some(strip));
+        let right = strip.min.x - super::STRIP_GAP;
+        assert!((budget - (right - titlebar.min.x - CHIP_GROUP_LEFT_RESERVE)).abs() < 1e-3);
+        // A strip pushed to the very left leaves no room instead of a negative width.
+        let crowded = Rect::from_min_size(Pos2::new(20.0, 5.0), egui::Vec2::new(72.0, 20.0));
+        assert!(chip_group_budget(titlebar, close, collapse, true, Some(crowded)).abs() < f32::EPSILON);
     }
 
     #[test]

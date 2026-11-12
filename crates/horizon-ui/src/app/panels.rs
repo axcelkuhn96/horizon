@@ -19,8 +19,8 @@ use super::agent_status_ui::AgentChip;
 use super::claude_quick_start::{StripArgs, paint_strip};
 use super::link::LinkBadgeView;
 pub(super) use super::panel_chrome::{
-    MicControl, PanelChrome, QuickStartControl, agent_chip_rect, paint_panel_chrome, panel_kind_icon,
-    panel_title_content_rect, quick_start_strip_right, show_inline_rename_editor,
+    MicControl, PanelChrome, QuickStartControl, agent_chip_rect, chip_group_budget, paint_panel_chrome,
+    panel_kind_icon, panel_title_content_rect, quick_start_strip_right, show_inline_rename_editor,
 };
 use super::shortcut_inventory::ssh_reconnect_shortcut_conflicts;
 use super::speech::MicState;
@@ -52,6 +52,12 @@ struct PanelSnapshot {
     collapsed: bool,
 }
 
+/// Width of the titlebar group of the agent chip (which already includes the account badge) or,
+/// when the panel has no chip, of the account badge alone.
+fn chip_group_width(chip: Option<&AgentChip<'_>>, badge_width: Option<f32>) -> Option<f32> {
+    chip.map(AgentChip::width).or(badge_width)
+}
+
 #[derive(Default)]
 struct PanelUiOutcome {
     focus_requested: bool,
@@ -63,6 +69,8 @@ struct PanelUiOutcome {
     command: Option<PanelCommand>,
     rename_action: RenameEditAction,
     mic_clicked: bool,
+    /// The account badge in the titlebar was clicked.
+    account_clicked: bool,
 }
 
 struct PanelMicInteraction {
@@ -591,6 +599,11 @@ impl HorizonApp {
                     );
                 }
 
+                // The account badge layout is refreshed before `display_title` borrows the board.
+                if !snapshot.is_renaming {
+                    self.refresh_account_badge(ui.painter(), panel_id);
+                }
+
                 // Compute display_title from the board on demand, avoiding a
                 // per-panel String clone in PanelSnapshot. The Cow is borrowed
                 // when the underlying panel title is sufficient, and only
@@ -603,66 +616,70 @@ impl HorizonApp {
 
                 // The agent chip (status dot and session name) sits left of the quick-start strip;
                 // collapsed panels keep it (their history meter is not painted, so it moves right).
+                let show_names = super::agent_status_ui::name_visible(snapshot.canvas_size.x);
                 let name_galley = if snapshot.is_renaming {
                     None
                 } else {
-                    self.hub.status_ui.name_galley(
-                        ui.painter(),
-                        panel_id,
-                        super::agent_status_ui::name_visible(snapshot.canvas_size.x),
-                    )
+                    self.hub.status_ui.name_galley(ui.painter(), panel_id, show_names)
                 };
                 // The account badge (profile disc, quota ring, name) joins the chip's group between
                 // the dot and the session name; a panel with no chip gets it alone.
-                let show_badge_name = super::agent_status_ui::name_visible(snapshot.canvas_size.x);
-                if !snapshot.is_renaming {
-                    self.refresh_account_badge(ui.painter(), panel_id);
-                }
                 let badge_layout = if snapshot.is_renaming {
                     None
                 } else {
                     self.hub.account_badges.get(panel_id)
                 };
-                let badge_width = badge_layout.map(|layout| layout.width(show_badge_name));
-                let agent_chip = if snapshot.is_renaming {
-                    None
-                } else {
-                    self.agent_chip(panel_id, snapshot.canvas_size.x, name_galley)
+                let history_meter = snapshot.scrollback_limit > 0 && !snapshot.collapsed;
+                let controls = if mic_eligible { rects.mic } else { rects.close };
+                let strip_rect = quick_start.as_ref().map(|strip| strip.rect);
+                let group_budget =
+                    chip_group_budget(rects.titlebar, controls, rects.collapse, history_meter, strip_rect);
+                let build_group = |names: bool| {
+                    let badge_width = badge_layout.map(|layout| layout.width(names));
+                    let chip = if snapshot.is_renaming {
+                        None
+                    } else {
+                        self.agent_chip(
+                            panel_id,
+                            if names { snapshot.canvas_size.x } else { 0.0 },
+                            name_galley.clone().filter(|_| names),
+                        )
                         .map(|chip| match badge_width {
                             Some(width) => chip.with_badge(width),
                             None => chip,
                         })
-                        .map(|chip| {
-                            let rect = agent_chip_rect(
-                                rects.titlebar,
-                                if mic_eligible { rects.mic } else { rects.close },
-                                rects.collapse,
-                                snapshot.scrollback_limit > 0 && !snapshot.collapsed,
-                                quick_start.as_ref().map(|strip| strip.rect),
-                                chip.width(),
-                            );
-                            chip.placed(rect)
-                        })
+                    };
+                    (chip, badge_width)
                 };
-                let account_badge = badge_layout.zip(badge_width).map(|(layout, width)| PlacedBadge {
+                let (mut agent_chip, mut badge_width) = build_group(show_names);
+                let mut badge_names = show_names;
+                // A narrow titlebar drops the names before the group would run into the title.
+                if show_names
+                    && chip_group_width(agent_chip.as_ref(), badge_width).is_some_and(|width| width > group_budget)
+                {
+                    (agent_chip, badge_width) = build_group(false);
+                    badge_names = false;
+                }
+                // One rect for the whole group: the chip when there is one, else the badge alone.
+                let group_rect = chip_group_width(agent_chip.as_ref(), badge_width).map(|width| {
+                    agent_chip_rect(
+                        rects.titlebar,
+                        controls,
+                        rects.collapse,
+                        history_meter,
+                        strip_rect,
+                        width,
+                    )
+                });
+                let agent_chip = agent_chip.zip(group_rect).map(|(chip, rect)| chip.placed(rect));
+                let account_badge = badge_layout.zip(group_rect).map(|(layout, group_rect)| PlacedBadge {
                     layout,
-                    show_name: show_badge_name,
-                    rect: agent_chip.as_ref().map_or_else(
-                        || {
-                            agent_chip_rect(
-                                rects.titlebar,
-                                if mic_eligible { rects.mic } else { rects.close },
-                                rects.collapse,
-                                snapshot.scrollback_limit > 0 && !snapshot.collapsed,
-                                quick_start.as_ref().map(|strip| strip.rect),
-                                width,
-                            )
-                        },
-                        AgentChip::badge_rect,
-                    ),
+                    show_name: badge_names,
+                    rect: agent_chip.as_ref().map_or(group_rect, AgentChip::badge_rect),
+                    clickable: interactive && quick_start.as_ref().is_some_and(|strip| strip.enabled),
                 });
 
-                paint_panel_chrome(
+                outcome.account_clicked = paint_panel_chrome(
                     ui,
                     PanelChrome {
                         panel_id,
@@ -959,6 +976,10 @@ impl HorizonApp {
         }
         if outcome.focus_requested {
             self.board.focus(panel_id);
+        }
+        if outcome.account_clicked {
+            self.open_quick_start_profiles(panel_id);
+            ctx.request_repaint();
         }
         if outcome.mic_clicked
             && let Some(speech) = self.speech.as_mut()

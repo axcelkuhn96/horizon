@@ -228,6 +228,11 @@ impl<'a> AgentChip<'a> {
         self
     }
 
+    /// Whether [`Self::with_badge`] made room for the account badge.
+    pub(super) fn has_badge(&self) -> bool {
+        self.badge_width.is_some()
+    }
+
     /// Where the account badge sits in the placed chip: after the dot.
     pub(super) fn badge_rect(&self) -> Rect {
         let lead = if self.status == AgentStatus::Unknown {
@@ -467,7 +472,9 @@ mod tests {
 
             let plain = AgentChip::build(&inputs(AgentStatus::Working, true)).expect("chip");
             let plain_width = plain.width();
+            assert!(!plain.has_badge());
             let chip = plain.with_badge(30.0);
+            assert!(chip.has_badge());
             assert!((chip.width() - (plain_width + 30.0 + BADGE_NAME_GAP)).abs() < 1e-3);
             let chip_size = Vec2::new(chip.width(), CHIP_HEIGHT);
             let chip = chip.placed(Rect::from_min_size(Pos2::new(100.0, 10.0), chip_size));

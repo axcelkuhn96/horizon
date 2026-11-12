@@ -115,6 +115,18 @@ impl HorizonApp {
         self.hub.quick_start.expanded = Some(expanded);
     }
 
+    /// Opens the strip of `panel_id` at its accounts (the profile list), or brings an open one
+    /// back to it. The account badge's click.
+    pub(in crate::app) fn open_quick_start_profiles(&mut self, panel_id: PanelId) {
+        if self.hub.quick_start.is_open_for(panel_id) {
+            if let Some(expanded) = self.hub.quick_start.expanded.as_mut() {
+                expanded.stage = Stage::Profiles;
+            }
+        } else {
+            self.open_quick_start_strip(panel_id);
+        }
+    }
+
     /// Rebuilds the open strip's rows when the profile list or the usage data moved.
     pub(super) fn refresh_quick_start_rows(&mut self, panel_id: PanelId) {
         let version = self.hub.rows_version;
