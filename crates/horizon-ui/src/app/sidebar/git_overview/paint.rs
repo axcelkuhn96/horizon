@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 
 use egui::text::{LayoutJob, TextFormat};
 use egui::{
-    Align2, Color32, CornerRadius, CursorIcon, FontId, Frame, Galley, Id, Margin, Painter, Pos2, Rect, RichText, Sense,
-    Shape, Stroke, Ui, Vec2, WidgetInfo, WidgetType,
+    Align2, Color32, CornerRadius, CursorIcon, FontId, Frame, Galley, Id, Margin, Painter, Pos2, Rect, Response,
+    RichText, Sense, Shape, Stroke, Ui, Vec2, WidgetInfo, WidgetType,
 };
 use horizon_core::git_overview::OverviewPoller;
 use horizon_core::{PresetConfig, WorkspaceId};
@@ -92,33 +92,37 @@ pub(in crate::app::sidebar) fn render_git_section(
         paint_error_line(ui, cache, workspace);
         return None;
     }
-    if !line_in_header {
-        paint_git_line(ui, cache, workspace);
-    }
+    let line_action = if line_in_header {
+        None
+    } else {
+        paint_git_line(ui, cache, workspace)
+    };
     if cache.worktree_rows.len() < 2 {
-        return None;
+        return line_action;
     }
 
     let open = expanded.contains(&workspace);
     let toggle_id = ui.make_persistent_id(("git_wt_toggle", workspace.0));
-    if toggle_row(
+    let toggle = toggle_row(
         ui,
         toggle_id,
         LINE_INDENT,
         "worktrees",
         &cache.worktrees_count_label,
         open,
-    ) {
+    );
+    let section_action = row_menu::show_repo_menu(&toggle, workspace, true).or(line_action);
+    if toggle.clicked() {
         if open {
             expanded.remove(&workspace);
         } else {
             expanded.insert(workspace);
         }
         *watch_stale = true;
-        return None;
+        return section_action;
     }
     if !open {
-        return None;
+        return section_action;
     }
 
     if copied.is_some_and(|copied| copied.at.elapsed() >= COPIED_FEEDBACK) {
@@ -147,7 +151,7 @@ pub(in crate::app::sidebar) fn render_git_section(
         flip(agents_open, workspace);
         *watch_stale = true;
     }
-    list.action
+    list.action.or(section_action)
 }
 
 /// What painting the open worktrees list produced this frame.
@@ -188,7 +192,8 @@ fn paint_worktree_list(
             &cache.agents_label,
             "",
             agents_open_now,
-        );
+        )
+        .clicked();
         if agents_open_now {
             let shown = visible_rows(cache.agent_count(), all);
             for index in cache.primary_count..cache.primary_count + shown {
@@ -376,7 +381,8 @@ pub(in crate::app::sidebar) fn paint_header_chip(
 }
 
 /// Branch chip as the first child row (when it does not fit on the header).
-fn paint_git_line(ui: &mut Ui, cache: &GitLineCache, workspace: WorkspaceId) {
+/// Its context menu starts a new worktree.
+fn paint_git_line(ui: &mut Ui, cache: &GitLineCache, workspace: WorkspaceId) -> Option<GitAction> {
     let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), GIT_LINE_HEIGHT), Sense::hover());
     let layout = chip_layout(ui.painter(), cache, ui.ctx().pixels_per_point());
     walk_chip(
@@ -387,8 +393,11 @@ fn paint_git_line(ui: &mut Ui, cache: &GitLineCache, workspace: WorkspaceId) {
         rect.center().y,
         true,
     );
-    let response = ui.interact(rect, ui.make_persistent_id(("git_line", workspace.0)), Sense::hover());
+    // Clicking the line does nothing; `Sense::click` is only for the context menu.
+    let response = ui.interact(rect, ui.make_persistent_id(("git_line", workspace.0)), Sense::click());
+    let action = row_menu::show_repo_menu(&response, workspace, false);
     response.on_hover_ui_at_pointer(|ui| show_tooltip(ui, &cache.tooltip, cache.changed_at));
+    action
 }
 
 // ---------------------------------------------------------------------------
@@ -402,8 +411,8 @@ fn inset_rect(rect: Rect, left: f32) -> Rect {
     )
 }
 
-/// Expand/collapse row (`▸`/`▾` painted as a triangle). Returns true on click.
-fn toggle_row(ui: &mut Ui, id: Id, indent: f32, label: &str, count: &str, open: bool) -> bool {
+/// Expand/collapse row (`▸`/`▾` painted as a triangle); its response reports the click.
+fn toggle_row(ui: &mut Ui, id: Id, indent: f32, label: &str, count: &str, open: bool) -> Response {
     let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), GIT_LINE_HEIGHT), Sense::hover());
     let response = ui.interact(rect, id, Sense::click());
     response.widget_info(|| WidgetInfo::labeled(WidgetType::CollapsingHeader, true, label));
@@ -453,7 +462,7 @@ fn toggle_row(ui: &mut Ui, id: Id, indent: f32, label: &str, count: &str, open: 
     if hovered {
         ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
     }
-    response.clicked()
+    response
 }
 
 /// "Show all (N)" / "Show less" row ending a truncated group.

@@ -36,6 +36,7 @@ mod usage_chips;
 pub(crate) mod util;
 mod view;
 mod workspace;
+mod worktree_dialog;
 mod yaml_highlight;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};

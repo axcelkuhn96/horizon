@@ -45,6 +45,7 @@ const CLAUDE_PROFILE_PREFIX: &str = "Claude \u{b7} ";
 pub(super) enum WorkspaceMenuAction {
     Rename(WorkspaceId),
     NewTerminal { workspace: WorkspaceId, preset: usize },
+    NewWorktree(WorkspaceId),
     SaveAsTemplate(WorkspaceId),
     RequestDelete(WorkspaceId),
 }
@@ -55,6 +56,8 @@ pub(super) struct WorkspaceMenuEnv<'a> {
     /// Saved template that "Save as template" would update, if any.
     pub(super) template_target: Option<&'a str>,
     pub(super) can_delete: bool,
+    /// The workspace folder is inside a git repository.
+    pub(super) has_repo: bool,
 }
 
 /// Launcher presets split into plain presets and Claude-profile presets, as
@@ -259,6 +262,10 @@ pub(super) fn show_items(
         chosen = Some(WorkspaceMenuAction::NewTerminal { workspace, preset });
     }
 
+    if env.has_repo && menu_row(ui, &MenuRow::new("New worktree + Claude\u{2026}")).clicked() {
+        chosen = Some(WorkspaceMenuAction::NewWorktree(workspace));
+    }
+
     if menu_row(ui, &MenuRow::new(&save_item_label(env.template_target))).clicked() {
         chosen = Some(WorkspaceMenuAction::SaveAsTemplate(workspace));
     }
@@ -397,6 +404,7 @@ impl HorizonApp {
                     self.add_panel_to_workspace(workspace, preset, None);
                 }
             }
+            WorkspaceMenuAction::NewWorktree(workspace) => self.open_new_worktree(ctx, workspace, None),
             WorkspaceMenuAction::SaveAsTemplate(workspace) => match self.save_workspace_as_template(workspace) {
                 Ok(saved) => {
                     show_notice(ctx, saved_notice_text(&saved), false);

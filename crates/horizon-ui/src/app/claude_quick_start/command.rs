@@ -5,8 +5,6 @@ use std::path::Path;
 use horizon_core::PresetConfig;
 use horizon_core::agent_detect::default_claude_config_dir;
 
-use crate::app::session::shell_single_quote;
-
 use super::QuickStartMode;
 
 const CONFIG_DIR_ENV: &str = "CLAUDE_CONFIG_DIR";
@@ -34,28 +32,24 @@ impl ShellSyntax {
             }
     }
 
-    /// `text` as one quoted word; `None` when it holds a control character (a newline would end
-    /// the command line early).
-    fn quote(self, text: &str) -> Option<String> {
-        match self {
-            Self::Posix => shell_single_quote(text),
-            Self::PowerShell => {
-                if text.chars().any(char::is_control) {
-                    return None;
-                }
-                // Inside '...' PowerShell ends the string at any of its quote glyphs; doubling
-                // one keeps it literal.
-                let mut quoted = String::from("'");
-                for c in text.chars() {
-                    quoted.push(c);
-                    if matches!(c, '\'' | '\u{2018}' | '\u{2019}' | '\u{201a}' | '\u{201b}') {
-                        quoted.push(c);
-                    }
-                }
-                quoted.push('\'');
-                Some(quoted)
+    /// Characters that would change meaning (or end the line) inside this shell's single quotes.
+    /// bash/zsh read `\` literally there but fish and nushell do not, and PowerShell treats its
+    /// quote glyphs, backtick and `$` specially, so none of them is ever typed into the shell.
+    fn unsafe_char(self, c: char) -> bool {
+        c.is_control()
+            || match self {
+                Self::Posix => matches!(c, '\'' | '\\'),
+                Self::PowerShell => matches!(c, '\'' | '`' | '$' | '\u{2018}' | '\u{2019}' | '\u{201a}' | '\u{201b}'),
             }
+    }
+
+    /// `text` as one single-quoted word, identical in bash, zsh, fish and nushell (and PowerShell);
+    /// `None` when it holds a character that [`Self::unsafe_char`] refuses.
+    fn quote(self, text: &str) -> Option<String> {
+        if text.chars().any(|c| self.unsafe_char(c)) {
+            return None;
         }
+        Some(format!("'{text}'"))
     }
 
     /// Word as the shell should read it: bare when it only holds safe characters, else quoted.
@@ -70,7 +64,8 @@ impl ShellSyntax {
 
 /// The command line that starts Claude for the derived profile `preset` in `mode`: the
 /// `CLAUDE_CONFIG_DIR` setting (only outside the default `~/.claude`), the preset's own binary and
-/// args, then the mode flag. `None` when the dir, binary or an arg cannot be quoted safely.
+/// args, then the mode flag. `None` when the dir, binary or an arg holds a character that cannot be quoted safely (the
+/// caller shows the `Unquotable` notice).
 #[must_use]
 pub(super) fn quick_start_command(
     preset: &PresetConfig,
@@ -197,13 +192,41 @@ mod tests {
     }
 
     #[test]
-    fn hostile_config_dir_stays_inside_the_quotes() {
-        let preset = preset(Some("/tmp/it's $(reboot);x"), Some("claude"), &[]);
+    fn config_dir_with_spaces_and_shell_metacharacters_stays_inside_the_quotes() {
+        let preset = preset(Some("/tmp/my dir $(reboot);x"), Some("claude"), &[]);
 
         assert_eq!(
             command(&preset, QuickStartMode::New).as_deref(),
-            Some("env 'CLAUDE_CONFIG_DIR=/tmp/it'\\''s $(reboot);x' claude")
+            Some("env 'CLAUDE_CONFIG_DIR=/tmp/my dir $(reboot);x' claude")
         );
+    }
+
+    #[test]
+    fn config_dir_with_quote_backslash_or_newline_is_refused() {
+        for dir in ["/tmp/it's", "/tmp/a\\b", "/tmp/a\nb", "/tmp/a\0b"] {
+            assert_eq!(
+                command(&preset(Some(dir), Some("claude"), &[]), QuickStartMode::New),
+                None,
+                "{dir:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn binary_and_args_with_quote_or_backslash_are_refused() {
+        assert_eq!(
+            command(&preset(None, Some("my'claude"), &[]), QuickStartMode::New),
+            None
+        );
+        assert_eq!(
+            command(&preset(None, Some("c\\claude"), &[]), QuickStartMode::New),
+            None
+        );
+        assert_eq!(
+            command(&preset(None, None, &["--p", "it's"]), QuickStartMode::New),
+            None
+        );
+        assert_eq!(command(&preset(None, None, &["a\\nb"]), QuickStartMode::New), None);
     }
 
     #[test]
@@ -258,12 +281,17 @@ mod tests {
     }
 
     #[test]
-    fn powershell_doubles_every_quote_glyph_and_keeps_commas_out_of_bare_words() {
-        let preset = preset(None, Some("claude"), &["it's \u{2019}x\u{2019}", "a,b"]);
-
+    fn powershell_refuses_quote_glyphs_backtick_and_dollar_and_keeps_commas_out_of_bare_words() {
+        for arg in ["it's", "\u{2019}x\u{2019}", "a`b", "$env:X"] {
+            assert_eq!(
+                powershell(&preset(None, Some("claude"), &[arg]), QuickStartMode::New),
+                None,
+                "{arg}"
+            );
+        }
         assert_eq!(
-            powershell(&preset, QuickStartMode::New).as_deref(),
-            Some("claude 'it''s \u{2019}\u{2019}x\u{2019}\u{2019}' 'a,b'")
+            powershell(&preset(None, Some("claude"), &["a,b"]), QuickStartMode::New).as_deref(),
+            Some("claude 'a,b'")
         );
     }
 }

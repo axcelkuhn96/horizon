@@ -394,9 +394,17 @@ pub(in crate::app) struct GitAction {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum GitActionKind {
     OpenTerminal,
-    OpenClaude { preset: usize },
+    OpenClaude {
+        preset: usize,
+    },
     NewWorkspace,
     CopyPath,
+    /// Open the cleanup dialog scoped to this one worktree.
+    RemoveWorktree,
+    /// Not tied to a row: `path` is ignored.
+    NewWorktree,
+    /// Not tied to a row: `path` is ignored.
+    CleanupWorktrees,
 }
 
 /// Sidebar git state, owned by `HubState`. UI state (what is expanded) is not
@@ -511,6 +519,18 @@ impl GitSidebarState {
         paths.sort();
         paths.dedup();
         paths
+    }
+
+    /// The latest overview of the workspace's repository, if it has one.
+    pub(in crate::app) fn overview_for(&self, workspace: WorkspaceId) -> Option<&RepoOverview> {
+        self.caches.get(&workspace)?.source.as_ref()
+    }
+
+    /// Asks the poller for a fresh overview now (after a worktree operation).
+    pub(in crate::app) fn refresh_now(&self) {
+        if let Some(poller) = &self.poller {
+            poller.refresh_now();
+        }
     }
 
     /// The row for worktree `path` in the workspace's current overview.

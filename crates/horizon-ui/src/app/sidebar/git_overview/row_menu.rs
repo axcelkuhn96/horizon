@@ -1,12 +1,15 @@
-//! Context menu of a worktree row (spec section 7): Open terminal here,
-//! Open Claude here, New workspace from worktree, Copy path.
+//! Context menus of the worktree section (spec sections 7 and 11): per worktree
+//! row, Open terminal here, Open Claude here, New workspace from worktree,
+//! Remove worktree and Copy path; per repository, New worktree and Clean up.
 //!
 //! "Open Claude here" expands the Claude profiles inline instead of opening a
 //! floating submenu: egui submenu popups paint below the `Order::Tooltip`
 //! sidebar, and the workspace menu's custom submenu area is private to it.
 
+use std::path::PathBuf;
+
 use egui::{Align2, Color32, CornerRadius, FontId, Id, Pos2, Response, Sense, Ui, Vec2, WidgetInfo, WidgetType};
-use horizon_core::{PanelKind, PresetConfig};
+use horizon_core::{PanelKind, PresetConfig, WorkspaceId};
 
 use super::paint::RowEnv;
 use super::{GitAction, GitActionKind, WorktreeRow};
@@ -153,6 +156,13 @@ fn menu_items(ui: &mut Ui, env: &RowEnv<'_>, row: &WorktreeRow) -> Option<GitAct
         picked = Some(action(GitActionKind::NewWorkspace));
     }
     ui.separator();
+    let block = remove_block_reason(row);
+    let remove = menu_item(ui, "Remove worktree\u{2026}", block.is_none(), Lead::None, Arrow::None);
+    if let Some(reason) = block {
+        remove.on_hover_text(reason);
+    } else if remove.clicked() {
+        picked = Some(action(GitActionKind::RemoveWorktree));
+    }
     if menu_item(ui, "Copy path", true, Lead::None, Arrow::None).clicked() {
         picked = Some(action(GitActionKind::CopyPath));
     }
@@ -160,6 +170,47 @@ fn menu_items(ui: &mut Ui, env: &RowEnv<'_>, row: &WorktreeRow) -> Option<GitAct
     if picked.is_some() {
         ui.close();
     }
+    picked
+}
+
+/// Why "Remove worktree..." is unavailable for `row`, from what the sidebar
+/// already knows. The cleanup dialog re-checks everything before removing.
+fn remove_block_reason(row: &WorktreeRow) -> Option<&'static str> {
+    if row.is_main {
+        Some("The main worktree cannot be removed")
+    } else if row.is_current {
+        Some("This workspace is open in it")
+    } else if row.locked {
+        Some("It is locked")
+    } else if row.dirty {
+        Some("It has uncommitted changes")
+    } else {
+        None
+    }
+}
+
+/// Context menu of the git line and the worktrees toggle: start a new worktree
+/// (and, on the toggle, open the cleanup). Not tied to any row.
+pub(super) fn show_repo_menu(response: &Response, workspace: WorkspaceId, with_cleanup: bool) -> Option<GitAction> {
+    let mut picked = None;
+    context_menu_above_sidebar_explicit_close(response, |ui| {
+        ui.set_min_width(MENU_MIN_WIDTH);
+        ui.spacing_mut().item_spacing.y = 0.0;
+        let action = |kind| GitAction {
+            workspace,
+            path: PathBuf::new(),
+            kind,
+        };
+        if menu_item(ui, "New worktree + Claude\u{2026}", true, Lead::None, Arrow::None).clicked() {
+            picked = Some(action(GitActionKind::NewWorktree));
+        }
+        if with_cleanup && menu_item(ui, "Clean up worktrees\u{2026}", true, Lead::None, Arrow::None).clicked() {
+            picked = Some(action(GitActionKind::CleanupWorktrees));
+        }
+        if picked.is_some() {
+            ui.close();
+        }
+    });
     picked
 }
 
