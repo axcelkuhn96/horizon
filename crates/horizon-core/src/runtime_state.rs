@@ -1,7 +1,7 @@
 mod agent_sessions;
 mod claude_live_sessions;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
 use serde::{Deserialize, Deserializer, Serialize};
@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::agent_detect::{RunningAgent, detect_running_agent};
 use crate::board::{Board, WorkspaceLayout};
-use crate::config::{Config, TerminalConfig, WindowConfig, WorkspaceConfig};
+use crate::config::{ClaudeProfile, Config, TerminalConfig, WindowConfig, WorkspaceConfig};
 use crate::error::{Error, Result};
 use crate::layout::workspace_slot_width;
 use crate::panel::{PanelKind, PanelOptions, PanelResume};
@@ -18,7 +18,7 @@ use crate::terminal::Terminal;
 use crate::view::CanvasViewState;
 
 pub use agent_sessions::{AgentSessionCatalog, AgentSessionRecord, most_recent_unclaimed_session_for};
-pub use claude_live_sessions::{claude_session_transcript_exists, live_claude_session_ids};
+pub use claude_live_sessions::{claude_config_dir_for_env, claude_transcript_exists_for_env, live_claude_session_ids};
 
 const RUNTIME_STATE_VERSION: u32 = 2;
 const DEFAULT_ROWS: u16 = 24;
@@ -207,7 +207,7 @@ impl RuntimeState {
 
     #[must_use]
     pub fn from_board(board: &Board, window: WindowConfig, canvas_view: CanvasViewState) -> Self {
-        Self::from_board_with_detached_workspaces(board, window, canvas_view, Vec::new())
+        Self::from_board_with_detached_workspaces(board, window, canvas_view, Vec::new(), &[])
     }
 
     #[must_use]
@@ -216,6 +216,7 @@ impl RuntimeState {
         window: WindowConfig,
         canvas_view: CanvasViewState,
         detached_workspaces: Vec<DetachedWorkspaceState>,
+        claude_profiles: &[ClaudeProfile],
     ) -> Self {
         let mut workspaces: Vec<WorkspaceState> = board
             .workspaces
@@ -267,10 +268,13 @@ impl RuntimeState {
                             running_agent: if panel.kind == PanelKind::Shell
                                 && panel.terminal_title.to_lowercase().contains("claude")
                             {
-                                panel.child_pid().and_then(detect_running_agent)
+                                panel
+                                    .child_pid()
+                                    .and_then(|pid| detect_running_agent(pid, claude_profiles))
                             } else {
                                 None
                             },
+                            env: panel.env.clone(),
                         }
                     })
                     .collect();
@@ -495,6 +499,9 @@ pub struct PanelState {
     /// this field deserialize to `None` (retro-compatible via `#[serde(default)]`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub running_agent: Option<RunningAgent>,
+    /// Extra PTY environment from the preset/template; omitted when empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
 }
 
 impl PanelState {
@@ -543,6 +550,7 @@ impl PanelState {
             collapsed: panel.collapsed,
             had_session_activity: false,
             running_agent: None,
+            env: panel.env.clone(),
         }
     }
 
@@ -591,6 +599,7 @@ impl PanelState {
             transcript_root: None,
             restore_as_disconnected_snapshot: false,
             collapsed: self.collapsed,
+            env: self.env.clone(),
             is_restore: true,
         }
     }
@@ -617,6 +626,7 @@ impl Default for PanelState {
             collapsed: false,
             had_session_activity: false,
             running_agent: None,
+            env: BTreeMap::new(),
         }
     }
 }
@@ -1090,6 +1100,52 @@ workspaces:
     }
 
     #[test]
+    fn panel_state_env_round_trips_yaml() {
+        let state = RuntimeState {
+            workspaces: vec![WorkspaceState {
+                local_id: "workspace".to_string(),
+                name: "alpha".to_string(),
+                panels: vec![PanelState {
+                    local_id: "panel".to_string(),
+                    name: "Claude work".to_string(),
+                    kind: PanelKind::Claude,
+                    env: std::collections::BTreeMap::from([(
+                        "CLAUDE_CONFIG_DIR".to_string(),
+                        "/home/u/.claude-work".to_string(),
+                    )]),
+                    ..PanelState::default()
+                }],
+                ..WorkspaceState::default()
+            }],
+            ..RuntimeState::default()
+        };
+
+        let yaml = state.to_yaml().expect("serialize runtime state");
+        assert!(yaml.contains("CLAUDE_CONFIG_DIR"));
+
+        let reloaded: RuntimeState = serde_yaml::from_str(&yaml).expect("deserialize runtime state");
+        let panel = &reloaded.workspaces[0].panels[0];
+        assert_eq!(
+            panel.env.get("CLAUDE_CONFIG_DIR").map(String::as_str),
+            Some("/home/u/.claude-work")
+        );
+        assert_eq!(panel.to_panel_options().env, panel.env);
+    }
+
+    #[test]
+    fn old_runtime_yaml_without_env_loads() {
+        let yaml = "workspaces:\n- name: alpha\n  panels:\n  - local_id: panel\n    name: Shell\n    kind: shell\n";
+        let state: RuntimeState = serde_yaml::from_str(yaml).expect("old runtime yaml loads");
+        let panel = &state.workspaces[0].panels[0];
+        assert!(panel.env.is_empty());
+        let reserialized = state.to_yaml().expect("serialize runtime state");
+        assert!(
+            !reserialized.contains("env:"),
+            "empty env must be omitted: {reserialized}"
+        );
+    }
+
+    #[test]
     fn pi_panel_state_round_trips_through_runtime_yaml() {
         let state = RuntimeState {
             workspaces: vec![WorkspaceState {
@@ -1190,6 +1246,7 @@ workspaces: []
             WindowConfig::default(),
             CanvasViewState::new([18.0, -12.0], 1.25),
             detached_workspaces.clone(),
+            &[],
         );
 
         assert_eq!(state.detached_workspaces.len(), 1);

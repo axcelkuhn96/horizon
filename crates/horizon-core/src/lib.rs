@@ -48,9 +48,10 @@ pub use board::{
     Board, Direction, PanelRect, ShutdownProgress, WorkspaceDockSide, WorkspaceLayout, nearest_in_direction,
 };
 pub use config::{
-    AppearanceConfig, AppearanceTheme, Config, FeaturesConfig, InputConfig, OverlaysConfig, PresetConfig,
-    ShortcutsConfig, SpeechBackend, SpeechConfig, SpeechHotkeyMode, SpeechProfile, SpeechTask, TerminalConfig,
-    WindowConfig, WorkspaceConfig, scroll_should_pan_canvas,
+    AppearanceConfig, AppearanceTheme, CLAUDE_BASE_PRESET_NAME, ClaudeProfile, Config, FeaturesConfig, InputConfig,
+    OverlaysConfig, PresetConfig, ShortcutsConfig, SpeechBackend, SpeechConfig, SpeechHotkeyMode, SpeechProfile,
+    SpeechTask, TerminalConfig, WindowConfig, WorkspaceConfig, claude_profile_preset, discover_claude_profiles,
+    expand_config_dir, scroll_should_pan_canvas, validate_claude_profiles,
 };
 pub use editor::{MarkdownEditor, PanelContent, PreviewMode};
 pub use error::{Error, Result};
@@ -67,8 +68,8 @@ pub use remote_hosts::{
 };
 pub use runtime_state::{
     AgentSessionBinding, AgentSessionCatalog, AgentSessionRecord, DetachedWorkspaceState, PanelState, PanelTemplateRef,
-    RuntimeState, WorkspaceState, WorkspaceTemplateRef, live_claude_session_ids, most_recent_unclaimed_session_for,
-    new_local_id,
+    RuntimeState, WorkspaceState, WorkspaceTemplateRef, claude_config_dir_for_env, live_claude_session_ids,
+    most_recent_unclaimed_session_for, new_local_id,
 };
 pub use search::{PanelSearchResult, SearchMatch, SearchOptions, SearchResults, search_board};
 pub use session_store::{

@@ -50,6 +50,7 @@ pub(super) fn render(ui: &mut Ui, config: &mut Config) -> bool {
                     args: Vec::new(),
                     resume: PanelResume::Fresh,
                     ssh_connection: None,
+                    env: std::collections::BTreeMap::new(),
                 });
                 changed = true;
             }

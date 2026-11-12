@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -8,7 +8,7 @@ use crate::editor::{MarkdownEditor, PanelContent};
 use crate::error::Result;
 use crate::git_changes::DiffViewer;
 use crate::horizon_home::HorizonHome;
-use crate::runtime_state::{AgentSessionBinding, PanelTemplateRef, claude_session_transcript_exists, new_local_id};
+use crate::runtime_state::{AgentSessionBinding, PanelTemplateRef, claude_transcript_exists_for_env, new_local_id};
 use crate::ssh::{SshConnection, SshConnectionStatus};
 use crate::terminal::{Terminal, TerminalSpawnOptions};
 use crate::transcript::PanelTranscript;
@@ -16,6 +16,7 @@ use crate::usage_dashboard::UsageDashboard;
 use crate::workspace::WorkspaceId;
 use crate::{AgentIntegrationKind, AgentResumeMode, agent_definition};
 
+use super::env::merge_spawn_env;
 use super::{
     AGENT_PANEL_SCROLLBACK_LIMIT, DEFAULT_CELL_HEIGHT, DEFAULT_CELL_WIDTH, DEFAULT_PANEL_SCROLLBACK_LIMIT,
     DEFAULT_PANEL_SIZE, Panel, PanelId, PanelKind, PanelLayout, PanelOptions, PanelResume,
@@ -76,6 +77,7 @@ struct TerminalPanelBuildArgs {
     launch_cwd: Option<PathBuf>,
     ssh_connection: Option<SshConnection>,
     collapsed: bool,
+    env: BTreeMap<String, String>,
 }
 
 impl StaticPanelSeed {
@@ -144,6 +146,7 @@ impl StaticPanelSeed {
             ssh_connection: None,
             ssh_status: None,
             collapsed: self.collapsed,
+            env: BTreeMap::new(),
             expanded_height: None,
         }
     }
@@ -234,6 +237,7 @@ pub(super) fn restore_failure_panel(
         session_binding,
         template,
         collapsed,
+        env,
         ..
     } = opts;
 
@@ -266,6 +270,7 @@ pub(super) fn restore_failure_panel(
             launch_cwd: cwd,
             ssh_connection: saved_ssh_connection,
             collapsed,
+            env,
         },
         terminal,
         ssh_status,
@@ -290,6 +295,7 @@ fn spawn_terminal(id: PanelId, workspace_id: WorkspaceId, local_id: String, opts
         transcript_root,
         restore_as_disconnected_snapshot,
         collapsed,
+        env,
         is_restore,
         ..
     } = opts;
@@ -311,6 +317,7 @@ fn spawn_terminal(id: PanelId, workspace_id: WorkspaceId, local_id: String, opts
         session_binding,
         saved_cwd.as_ref(),
         transcript.as_ref(),
+        &env,
         is_restore,
     );
     let ResolvedTerminalLaunch {
@@ -342,6 +349,7 @@ fn spawn_terminal(id: PanelId, workspace_id: WorkspaceId, local_id: String, opts
         launch_cwd: saved_cwd,
         ssh_connection: saved_ssh_connection,
         collapsed,
+        env: env.clone(),
     };
     if restore_as_disconnected_snapshot && panel_args.kind == PanelKind::Ssh && had_persisted_transcript_state {
         return spawn_disconnected_ssh_snapshot_panel(panel_args, rows, cols, replay_bytes);
@@ -357,7 +365,7 @@ fn spawn_terminal(id: PanelId, workspace_id: WorkspaceId, local_id: String, opts
         scrollback_limit: scrollback_limit_for_kind(kind),
         window_id: id.0,
         replay_bytes,
-        env: agent_env(kind),
+        env: merge_spawn_env(kind, &env, &HashMap::new()),
         kitty_keyboard: kitty_keyboard_for_kind(kind),
     })?;
     tracing::info!("created panel '{}' (id={})", panel_args.title, panel_args.id.0);
@@ -462,6 +470,7 @@ fn resolve_terminal_launch(
     session_binding: Option<AgentSessionBinding>,
     saved_cwd: Option<&PathBuf>,
     transcript: Option<&PanelTranscript>,
+    env: &BTreeMap<String, String>,
     is_restore: bool,
 ) -> ResolvedTerminalLaunch {
     let saved_cwd_string = saved_cwd.map(|path| path.display().to_string());
@@ -471,7 +480,7 @@ fn resolve_terminal_launch(
         session_binding,
         saved_cwd_string.as_deref(),
         name,
-        claude_session_transcript_exists,
+        claude_transcript_exists_for_env(env),
     );
     let (program, launch_args) = resolve_launch_command(
         command,
@@ -531,6 +540,7 @@ fn build_terminal_panel(
         launch_cwd,
         ssh_connection,
         collapsed,
+        env,
     } = panel_args;
     Panel {
         id,
@@ -557,6 +567,7 @@ fn build_terminal_panel(
         ssh_connection,
         ssh_status,
         collapsed,
+        env,
         expanded_height: None,
     }
 }
@@ -908,14 +919,6 @@ fn default_shell() -> String {
     std::env::var("SHELL").unwrap_or_else(|_| platform_default_shell().to_string())
 }
 
-pub(super) fn agent_env(kind: PanelKind) -> HashMap<String, String> {
-    let mut env = HashMap::new();
-    if kind.is_agent() {
-        env.insert("HORIZON".to_string(), "1".to_string());
-    }
-    env
-}
-
 fn horizon_claude_plugin_args() -> Vec<String> {
     let path = HorizonHome::resolve().claude_plugin_dir();
     if path.is_dir() {
@@ -1125,6 +1128,33 @@ mod tests {
 
         assert!(!resume_with_missing_transcript);
         assert!(resume_with_existing_transcript);
+    }
+
+    #[test]
+    fn resume_decision_uses_panel_config_dir() {
+        let config_dir = tempfile::tempdir().expect("tempdir");
+        let project = config_dir.path().join("projects/-repo");
+        std::fs::create_dir_all(&project).expect("create project dir");
+        std::fs::write(project.join("session-only-here.jsonl"), "{}\n").expect("write transcript");
+        let env = BTreeMap::from([(
+            "CLAUDE_CONFIG_DIR".to_string(),
+            config_dir.path().to_string_lossy().into_owned(),
+        )]);
+        let decide = |session_id: &str| {
+            let binding = AgentSessionBinding::new(PanelKind::Claude, session_id.to_string(), None, None, None);
+            let (_, should_resume) = resolve_session_binding(
+                PanelKind::Claude,
+                &PanelResume::Fresh,
+                Some(binding),
+                None,
+                None,
+                claude_transcript_exists_for_env(&env),
+            );
+            should_resume
+        };
+
+        assert!(decide("session-only-here"));
+        assert!(!decide("session-absent"));
     }
 
     #[test]

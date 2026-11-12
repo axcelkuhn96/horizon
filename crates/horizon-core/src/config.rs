@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -6,6 +7,10 @@ mod claude_profiles;
 mod input;
 mod workspace_template;
 
+pub use claude_profiles::{
+    CLAUDE_BASE_PRESET_NAME, ClaudeProfile, claude_profile_preset, discover_claude_profiles, expand_config_dir,
+    validate_claude_profiles,
+};
 pub use input::{InputConfig, scroll_should_pan_canvas};
 
 use crate::config_migration::{self, CURRENT_CONFIG_VERSION};
@@ -36,6 +41,8 @@ pub struct Config {
     pub presets: Vec<PresetConfig>,
     #[serde(default)]
     pub workspaces: Vec<WorkspaceConfig>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub claude_profiles: Vec<ClaudeProfile>,
 }
 
 /// Existing config files without a `version` field are treated as v1
@@ -57,6 +64,7 @@ impl Default for Config {
             input: InputConfig::default(),
             presets: default_presets(),
             workspaces: Vec::new(),
+            claude_profiles: Vec::new(),
         }
     }
 }
@@ -99,6 +107,9 @@ pub struct PresetConfig {
     pub resume: PanelResume,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh_connection: Option<SshConnection>,
+    /// Extra environment variables for the PTY (e.g. `CLAUDE_CONFIG_DIR`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
 }
 
 impl PresetConfig {
@@ -112,6 +123,7 @@ impl PresetConfig {
             ssh_connection: self.ssh_connection.clone(),
             kind: self.kind,
             resume: self.resume.clone(),
+            env: self.env.clone(),
             ..PanelOptions::default()
         }
     }
@@ -155,6 +167,7 @@ pub(crate) fn default_opencode_preset() -> PresetConfig {
         args: Vec::new(),
         resume: PanelResume::Fresh,
         ssh_connection: None,
+        env: BTreeMap::new(),
     }
 }
 
@@ -167,6 +180,7 @@ pub(crate) fn default_gemini_presets() -> [PresetConfig; 1] {
         args: Vec::new(),
         resume: PanelResume::Fresh,
         ssh_connection: None,
+        env: BTreeMap::new(),
     }]
 }
 
@@ -183,6 +197,7 @@ pub(crate) fn default_kilo_preset() -> PresetConfig {
         args: Vec::new(),
         resume: PanelResume::Fresh,
         ssh_connection: None,
+        env: BTreeMap::new(),
     }
 }
 
@@ -195,6 +210,7 @@ pub(crate) fn default_pi_preset() -> PresetConfig {
         args: Vec::new(),
         resume: PanelResume::Fresh,
         ssh_connection: None,
+        env: BTreeMap::new(),
     }
 }
 
@@ -260,6 +276,7 @@ pub(crate) fn default_codex_preset() -> PresetConfig {
         args: vec!["--no-alt-screen".to_string()],
         resume: PanelResume::Fresh,
         ssh_connection: None,
+        env: BTreeMap::new(),
     }
 }
 
@@ -276,6 +293,7 @@ pub(crate) fn default_claude_preset() -> PresetConfig {
         args: vec!["--permission-mode".to_string(), "auto".to_string()],
         resume: PanelResume::Fresh,
         ssh_connection: None,
+        env: BTreeMap::new(),
     }
 }
 
@@ -289,6 +307,7 @@ fn default_presets() -> Vec<PresetConfig> {
             args: Vec::new(),
             resume: PanelResume::Fresh,
             ssh_connection: None,
+            env: BTreeMap::new(),
         },
         default_codex_preset(),
         default_claude_preset(),
@@ -306,6 +325,7 @@ fn default_presets() -> Vec<PresetConfig> {
             args: Vec::new(),
             resume: PanelResume::Fresh,
             ssh_connection: None,
+            env: BTreeMap::new(),
         },
         PresetConfig {
             name: "Files".to_string(),
@@ -315,6 +335,7 @@ fn default_presets() -> Vec<PresetConfig> {
             args: Vec::new(),
             resume: PanelResume::Fresh,
             ssh_connection: None,
+            env: BTreeMap::new(),
         },
         PresetConfig {
             name: "Markdown".to_string(),
@@ -324,6 +345,7 @@ fn default_presets() -> Vec<PresetConfig> {
             args: Vec::new(),
             resume: PanelResume::Fresh,
             ssh_connection: None,
+            env: BTreeMap::new(),
         },
         PresetConfig {
             name: "Usage".to_string(),
@@ -333,6 +355,7 @@ fn default_presets() -> Vec<PresetConfig> {
             args: Vec::new(),
             resume: PanelResume::Fresh,
             ssh_connection: None,
+            env: BTreeMap::new(),
         },
     ]);
     presets
@@ -548,6 +571,9 @@ pub struct TerminalConfig {
     pub ssh_connection: Option<SshConnection>,
     #[serde(default)]
     pub collapsed: bool,
+    /// Extra environment variables for the PTY (same semantics as `PresetConfig.env`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
 }
 
 impl Default for TerminalConfig {
@@ -565,6 +591,7 @@ impl Default for TerminalConfig {
             size: None,
             ssh_connection: None,
             collapsed: false,
+            env: BTreeMap::new(),
         }
     }
 }
@@ -673,6 +700,7 @@ impl Config {
         self.input.resolve_pan_modifier()?;
         crate::speech_config::validate_speech(&self.features.speech, &shortcuts)?;
         validate_ssh_connections(&self.presets, &self.workspaces)?;
+        validate_claude_profiles(&self.claude_profiles)?;
         Ok(())
     }
 
@@ -686,6 +714,14 @@ impl Config {
             .filter_map(|preset| preset.ssh_connection.as_ref())
             .map(normalized_ssh_target)
             .collect();
+
+        if let Some(home) = std::env::var_os("HOME") {
+            for preset in self.derived_claude_presets(Path::new(&home)) {
+                if known_names.insert(preset.name.to_ascii_lowercase()) {
+                    presets.push(preset);
+                }
+            }
+        }
 
         match discover_ssh_hosts(None) {
             Ok(discovered_hosts) => {
@@ -708,6 +744,7 @@ impl Config {
                         args: Vec::new(),
                         resume: PanelResume::Fresh,
                         ssh_connection: Some(host.connection),
+                        env: BTreeMap::new(),
                     });
                 }
             }
@@ -1107,6 +1144,7 @@ presets:
             args: Vec::new(),
             resume: super::PanelResume::Fresh,
             ssh_connection: None,
+            env: super::BTreeMap::new(),
         };
 
         assert!(!preset.requires_workspace_cwd());
