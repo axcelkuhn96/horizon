@@ -590,6 +590,7 @@ Extensão pedida pelo usuário após o smoke. Mesmas regras de `## Global Constr
 | F6 prompts salvos | T28 | config + inserção + Settings |
 | F7 prefs de UI + minimap auto-hide | T29 | runtime_state + overlay |
 | F9 rename do painel | T30 | auditoria + nome custom em sidebar/link |
+| F10 marcador de conta + anel de cota na titlebar | T31 | cache por perfil, anel, tooltip |
 
 ---
 
@@ -623,20 +624,22 @@ Extensão pedida pelo usuário após o smoke. Mesmas regras de `## Global Constr
 
 **Contexto verificado:** transcripts ficam em `~/.claude/projects/<cwd codificado>/*.jsonl`, compartilhados entre todas as contas por symlink (`usage_stats/claude.rs` já varre esse diretório); logo o caminho **não** diz qual conta rodou a sessão — a atribuição vem de um índice próprio do Horizon. `runtime_state/claude_live_sessions.rs` e `agent_sessions.rs` já ligam painel↔session id; T23 passa a entregar o `session_id` via `HORIZON_STATUS`.
 
+**Worktrees (pedido do usuário):** o Claude grava por cwd, então sessões rodadas em worktrees do projeto (`~/expia-feat`, `<repo>/.claude/worktrees/agent-*`) vivem em dirs codificados diferentes. A lista de um workspace **agrega** o dir do repo principal + o de cada worktree de `RepoOverview.worktrees` (T18; sem repo → só o cwd), cada sessão carrega a worktree/branch de origem, e o resume abre o painel com `cwd` = a worktree da sessão (senão `--resume <id>` não a encontra) e a conta certa.
+
 **Files:**
 - Create: `crates/horizon-core/src/claude_sessions/{mod,scan,index,cache}.rs`; `crates/horizon-ui/src/app/claude_sessions.rs` (modal + helpers) e `app/claude_sessions/rows.rs` se > ~500 linhas
 - Modify: `lib.rs` (uma linha `pub mod claude_sessions;`; T24 é o dono de `lib.rs` na wave F4), `app/hub_state.rs` (campo `sessions_ui: SessionsUi`), `app/lifecycle.rs` (registrar `session_id` do `StatusEvent` no índice — chamada, não lógica), `app/claude_quick_start.rs` (passo "Resume…" ganha "Recent sessions…"; novo modo `ResumeId(String)` em `quick_start_command` + teste), `app/claude_launcher.rs` (entrada "Recent sessions…"), `app/sidebar/workspace_menu/*` (item **Recent Claude sessions…** — dono único na wave F4), `app/actions/command_palette.rs` (entrada `Claude: Recent sessions…`; dono único na F4)
 - Test: inline + `crates/horizon-core/tests/claude_sessions.rs` (projeto temporário com JSONL sintéticos)
 
 **Interfaces:**
-- Produces (core): `pub fn encode_project_dir(cwd: &Path) -> String` (todo caractere fora de `[A-Za-z0-9]` vira `-`; **validar o algoritmo contra os diretórios reais de `~/.claude/projects` no Step 1** e fixar a amostra no teste); `pub struct SessionSummary { id: String, title: String, first_prompt: String, updated: SystemTime, size: u64, cwd: PathBuf, account: SessionAccount }`; `pub enum SessionAccount { Profile(String), Unknown }`; `pub struct SessionScanner` (thread única + `mpsc`, como `OverviewPoller`): `request(project_dirs: Vec<PathBuf>)`, `try_recv() -> Option<ScanResult>`; leitura **lazy**: lista por `read_dir` + mtime, e só lê o **início** (≤ 64 KiB) de cada JSONL novo/alterado para título (`summary` do Claude se existir) e primeiro prompt do usuário (ignora linhas `isMeta`, `<command-…>`, `<local-command-…>`, tool results), cache por `(path, mtime, len)`, teto de 200 sessões por projeto (mais recentes) e 1 000 por varredura; linhas inválidas/arquivo truncado/UUID inválido → pula, nunca panic; nada de conteúdo em log
+- Produces (core): `pub fn encode_project_dir(cwd: &Path) -> String` (todo caractere fora de `[A-Za-z0-9]` vira `-`; **validar o algoritmo contra os diretórios reais de `~/.claude/projects` no Step 1** e fixar a amostra no teste); `pub struct SessionOrigin { pub worktree: PathBuf, pub branch: Option<String>, pub is_main: bool, pub is_agent: bool }` (agent = `WorktreeInfo.is_agent`/caminho sob `.claude/worktrees/`); `pub fn project_dirs_for(overview: Option<&RepoOverview>, cwd: &Path, projects_root: &Path) -> Vec<(PathBuf /*encoded dir*/, SessionOrigin)>` (dedupe por dir codificado; worktrees prunable/ausentes entram só se o dir codificado existir); `pub struct SessionSummary { origin: SessionOrigin, id: String, title: String, first_prompt: String, updated: SystemTime, size: u64, cwd: PathBuf, account: SessionAccount }`; `pub enum SessionAccount { Profile(String), Unknown }`; `pub struct SessionScanner` (thread única + `mpsc`, como `OverviewPoller`): `request(project_dirs: Vec<PathBuf>)`, `try_recv() -> Option<ScanResult>`; leitura **lazy**: lista por `read_dir` + mtime, e só lê o **início** (≤ 64 KiB) de cada JSONL novo/alterado para título (`summary` do Claude se existir) e primeiro prompt do usuário (ignora linhas `isMeta`, `<command-…>`, `<local-command-…>`, tool results), cache por `(path, mtime, len)` **e por dir codificado (mtime do dir)** para pular dirs sem mudança, teto de 200 sessões por dir e 1 000 por varredura; a UI mostra as **30 mais recentes** agregadas com "Show all" (`ListWindow { limit: 30 }`, expande para todas as varridas); linhas inválidas/arquivo truncado/UUID inválido → pula, nunca panic; nada de conteúdo em log
   - `pub struct AccountIndex` em `~/.horizon/claude-session-accounts.json` (`{"version":1,"sessions":{"<uuid>":{"profile":"conta2","config_dir":"/home/u/.claude-conta2","ts":1731400000}}}`): `load(path)`, `record(session_id, profile, config_dir, ts)`, `lookup(id) -> Option<&Entry>`, `save_atomic()` (tmp+rename, modo 0600, teto 5 000 entradas descartando as mais antigas), tolera arquivo ausente/corrompido (começa vazio, renomeia o corrompido para `.bad`), gravação fora da thread de UI (writer em thread própria com canal)
   - `pub fn resume_command_args(session_id: &str) -> Result<Vec<String>, SessionError>` (`["--resume", id]`, id deve ser UUID — rejeita qualquer outra coisa antes de montar comando)
-- Produces (ui): `SessionsUi` (estado do modal; lista cacheada por `scan_version`), `fn open_sessions(workspace)`; modal §10; "Resume" cria **novo painel** com preset derivado do perfil + `--resume <id>` e `cwd` do projeto (mesmo caminho de "Open Claude here" do T19/T25; F8 garante posicionamento), ou "Resume here" que escreve o comando no shell ativo via `quick_start_command(..., ResumeId)` (T21); conta `Unknown` → passo inline "Which account?" (chips de perfis, sem ComboBox) antes do resume, e a escolha grava no índice (`record`)
+- Produces (ui): `SessionsUi` (estado do modal; lista cacheada por `scan_version`; grupos de worktrees de agente recolhidos por padrão, estado por modal), `fn open_sessions(workspace)`; modal §10; "Resume" cria **novo painel** com preset derivado do perfil + `--resume <id>` e `cwd` = `session.origin.worktree` (mesmo caminho de "Open Claude here" do T19/T25; F8 garante posicionamento), ou "Resume here" que escreve o comando no shell ativo via `quick_start_command(..., ResumeId)` (T21); conta `Unknown` → passo inline "Which account?" (chips de perfis, sem ComboBox) antes do resume, e a escolha grava no índice (`record`)
 - Consumes: `StatusEvent.session_id` (T23), `ClaudeProfile`/presets derivados (T1/T3), `git_overview` (worktrees do repo também entram na lista: dirs codificados de cada worktree), `HubToasts` (T27)
 
-- [ ] **Step 1: Failing tests (core):** `encode_project_dir_matches_real_claude_dirs` (amostras reais `/home/axcel/horizon-fork` → `-home-axcel-horizon-fork`, `/a/b.c/d_e`), `scan_lists_sessions_newest_first`, `scan_title_prefers_summary_then_first_user_prompt`, `scan_skips_meta_and_command_lines`, `scan_reads_only_head_bytes`, `scan_cache_hit_when_mtime_and_len_unchanged`, `scan_cache_invalidates_on_mtime_change`, `scan_tolerates_truncated_and_binary_lines`, `scan_caps_sessions_per_project`, `scan_ignores_non_uuid_filenames`, `index_roundtrip_and_mode_0600`, `index_corrupt_file_starts_empty_and_renames_bad`, `index_caps_entries_dropping_oldest`, `index_atomic_save_leaves_no_partial_file`, `resume_args_reject_non_uuid_and_injection`, `account_attribution_uses_index_else_unknown`.
-- [ ] **Step 2: Failing tests (ui):** `quick_start_command_resume_id_quotes_dir_and_validates_uuid`, `session_row_label_sanitizes_control_chars_and_truncates`, `relative_date_label_buckets` (`just now`, `5 min`, `yesterday`, data), `sessions_list_cache_rebuilds_only_on_scan_version`, `unknown_account_requires_account_pick_before_resume`.
+- [ ] **Step 1: Failing tests (core):** `encode_project_dir_matches_real_claude_dirs` (amostras reais `/home/axcel/horizon-fork` → `-home-axcel-horizon-fork`, `/a/b.c/d_e`), `scan_lists_sessions_newest_first`, `scan_title_prefers_summary_then_first_user_prompt`, `scan_skips_meta_and_command_lines`, `scan_reads_only_head_bytes`, `scan_cache_hit_when_mtime_and_len_unchanged`, `scan_cache_invalidates_on_mtime_change`, `scan_tolerates_truncated_and_binary_lines`, `scan_caps_sessions_per_project`, `scan_ignores_non_uuid_filenames`, `index_roundtrip_and_mode_0600`, `index_corrupt_file_starts_empty_and_renames_bad`, `index_caps_entries_dropping_oldest`, `index_atomic_save_leaves_no_partial_file`, `resume_args_reject_non_uuid_and_injection`, `account_attribution_uses_index_else_unknown`, `project_dirs_include_main_and_all_worktrees`, `project_dirs_dedupe_same_encoded_dir`, `project_dirs_without_repo_is_cwd_only`, `agent_worktree_sessions_flagged`, `scan_skips_unchanged_encoded_dir_by_mtime`, `aggregate_sorted_newest_first_across_dirs`.
+- [ ] **Step 2: Failing tests (ui):** `quick_start_command_resume_id_quotes_dir_and_validates_uuid`, `session_row_label_sanitizes_control_chars_and_truncates`, `relative_date_label_buckets` (`just now`, `5 min`, `yesterday`, data), `sessions_list_cache_rebuilds_only_on_scan_version`, `unknown_account_requires_account_pick_before_resume`, `list_window_caps_at_30_and_show_all_expands`, `agent_group_collapsed_by_default_and_counts_hidden`, `resume_cwd_is_session_worktree_not_workspace_cwd`.
 - [ ] **Step 3:** `CARGO_BUILD_JOBS=4 cargo test -p horizon-core claude_sessions` / `-p horizon-ui claude_sessions claude_quick_start` — RED.
 - [ ] **Step 4:** Implementar núcleo → índice → UI. A varredura só dispara ao abrir o modal (e em focus do modal ao mudar de workspace); resultado volta por canal; a UI nunca lê disco por frame.
 - [ ] **Step 5:** GREEN; fmt; `RUSTFLAGS="-D warnings" cargo test --workspace`; clippy ×2; `node ~/.claude/scripts/gate-seguranca.js` (JSONL do usuário é input não confiável: limites de leitura, sanitização do prompt exibido, UUID estrito no comando, índice 0600).
@@ -782,6 +785,28 @@ Extensão pedida pelo usuário após o smoke. Mesmas regras de `## Global Constr
 
 ---
 
+### Task 31: Marcador de conta na titlebar com anel de cota restante (domínio: frontend; tipo: ui — helpers puros TDD)
+
+**Pedido do usuário (F10):** em cada painel mostrar **qual conta Claude** ele usa: círculo/ícone na cor de acento estável do perfil + nome do perfil, com um **anel** ao redor mostrando a cota semanal **restante** (100 − 7d usado %), cor por severidade quando baixa, esmaecido/oco se expirado/ausente, tooltip com e-mail, usado/restante e reset. Vale para painéis Claude com perfil e para shells rodando claude com `CLAUDE_CONFIG_DIR` conhecido (detecção ciente de perfil, T4, em cache — sem `/proc` por frame). Mesma cadeia de dono da titlebar do F1 (T23 → T31): **T31 roda depois do T23** na F3 (um único dono por wave; não funde com o dot do T23 porque tocam estados distintos) e o badge fica entre o dot de status e o botão Claude do T21.
+
+**Files:**
+- Create: `crates/horizon-ui/src/app/account_badge.rs` (resolução panel→perfil cacheada, geometria do anel, paint)
+- Modify: `app/panel_chrome.rs` e `app/panels.rs` (**somente** call site na titlebar; donos: T23 na F2, T31 na F3), `app/hub_state.rs` (campo `account_badges: AccountBadgeCache`)
+- Test: inline em `account_badge.rs`
+
+**Interfaces:**
+- Produces: `pub(super) fn panel_profile(panel_kind, env_config_dir: Option<&Path>, detected_agent: Option<&AgentInfo>, profiles: &[ClaudeProfile], home: &Path) -> Option<usize>` (índice do perfil; `CLAUDE_CONFIG_DIR` normalizado/`~` expandido e comparado ao `config_dir` do perfil; ausente ou igual a `~/.claude` → perfil default se existir; sem agente Claude → `None`; usa o que o painel/detector já guardam em cache, nunca `/proc` por frame); `pub(super) struct AccountBadgeCache` (chave por painel `(profile_index, usage_version, ppp)`; guarda `BadgeLayout { label_galley, ring: RingGeometry, tooltip: Arc<str> }`, rebuild só quando a chave muda); `remaining_pct(used_7d: Option<f32>) -> Option<f32>` (clamp 0..100); `ring_sweep(remaining: f32) -> f32` (fração 0..1; mínimo visível 2% se > 0); `ring_points(center, radius, start, sweep, segments) -> Vec<Pos2>` (arco por polilinha, ≤ 48 segmentos); `badge_state(usage: &UsageState, remaining: Option<f32>) -> BadgeState` (`Ok(severity) | Dim`; severidade por `hub_ui::severity_for`/`severity_color` sobre o usado); `paint_account_badge(painter, rect, layout, state, accent)`; `badge_width` consumido por `panel_title_content_rect` para empurrar o título
+- Consumes: `hub_ui::{accent_color, severity_for, severity_color, elided}` e cache de acentos, snapshot `self.hub.usage` (T8/T9, `usage_version`), perfis (T1), detecção ciente de perfil (T4), tooltip no padrão do §1
+
+- [ ] **Step 1: Failing tests:** `remaining_is_100_minus_used_clamped`, `remaining_none_when_usage_unknown`, `ring_sweep_zero_and_full`, `ring_sweep_min_visible_slice_when_nonzero`, `ring_points_count_bounded_and_on_circle`, `badge_state_dim_for_expired_missing_nologin`, `badge_state_severity_follows_used_pct`, `panel_profile_matches_normalized_config_dir`, `panel_profile_default_dir_maps_to_default_profile`, `panel_profile_none_for_non_claude_shell`, `panel_profile_unknown_dir_is_none`, `cache_rebuilds_only_when_key_changes`, `badge_width_fits_name_ellipsis_and_ring`, `tooltip_text_has_email_used_remaining_and_reset`.
+- [ ] **Step 2:** `CARGO_BUILD_JOBS=4 cargo test -p horizon-ui account_badge` — FAIL (RED).
+- [ ] **Step 3:** Implementar helpers puros → cache → paint conforme §17; call site único na titlebar.
+- [ ] **Step 4:** GREEN; fmt; `RUSTFLAGS="-D warnings" cargo test --workspace`; clippy ×2 (bloqueante + estrito). Perf: trace idle antes/depois sem alocação por frame no badge.
+- [ ] **Step 5:** Verificação real com cache de uso forjado: 3 painéis (conta A 20% usado, B 85%, C expirada) e um shell rodando claude com `CLAUDE_CONFIG_DIR`; screenshot por PID em `.superpowers/sdd/2026-11-12-claude-hub/task-31-visual/`.
+- [ ] **Step 6:** Commit `feat(ui): account marker with remaining-quota ring in the panel titlebar`.
+
+---
+
 ### Part F parallel waves
 
 **Dono único por arquivo compartilhado (Parte F):**
@@ -794,7 +819,7 @@ Extensão pedida pelo usuário após o smoke. Mesmas regras de `## Global Constr
 | `panel.rs`, `terminal.rs`, `terminal/events.rs` | T23 (F2) → T30 (F3, accessor) |
 | `board/link.rs`, `link/*`, `link_cli.rs`, `app/link.rs`, `app/link/send_dialog.rs`, skill horizon-link | T27 (F1) → T28 (F2, só `deliver_text` em `board/link.rs`) → T30 (F3) |
 | `main.rs`, `plugin_install.rs` | T23 (F2) |
-| `app/panel_chrome.rs`, `app/panels.rs` | T23 (F2) (T21 já mergeado) |
+| `app/panel_chrome.rs`, `app/panels.rs` | T23 (F2) → T31 (F3) (T21 já mergeado) |
 | `app/sidebar.rs`, `app/sidebar/git_overview/*`, `app/sidebar/workspace_menu/*` | T25 (F2) → T24 (F4, menu item) |
 | `app/sidebar/rows.rs`, `labels.rs` | T23 (F2, só dot em `rows.rs`) → T30 (F3) |
 | `app/claude_quick_start.rs`, `app/actions/command_palette.rs` | T28 (F2) → T26 (F3, quick-start) → T24 (F4) |
@@ -815,6 +840,7 @@ Extensão pedida pelo usuário após o smoke. Mesmas regras de `## Global Constr
 T27 (independente; cria HubToasts → T23, T24, T25, T26, T28) ── T25 (item "Send to all Claudes", opcional) , T30
 T29 (independente) ── T28 (config.rs)
 T25, T23 ── T30 (sidebar rows/menus)
+T23 (coluna de status na titlebar) ── T31 (badge de conta; usa perfis T1/T4 e uso T9)
 ```
 
 **Waves (≤ 4 tasks, uma worktree por task, um cargo por worktree, `CARGO_BUILD_JOBS=4`; cada wave só é cortada depois do merge verde da anterior: `RUSTFLAGS="-D warnings" cargo test --workspace`):**
@@ -823,7 +849,7 @@ T25, T23 ── T30 (sidebar rows/menus)
 |---|---|---|
 | **F1** (pode iniciar enquanto T21/T22 ainda estão em voo) | **T27** ‖ **T29** | T27: `hub_toast.rs`, `link/*`, `board/link.rs`, `link_cli.rs`, `app/link*`, `app/workspace.rs`, skill; T29: `runtime_state.rs`, `config.rs`, `app/mod.rs`, `minimap*`, `settings/general.rs` — nenhum toca titlebar nem sidebar |
 | **F2** (após merge de T21 + T22 + F1) | **T23** ‖ **T25** ‖ **T28** | T23: `lib.rs`, `agent_status*`, terminal/panel, `main.rs`, `plugin_install.rs`, `panel_chrome.rs`/`panels.rs`, `sidebar/rows.rs`, `hub_toast.rs`; T25: `git_overview/worktree_ops*`, `sidebar.rs`, `sidebar/git_overview/*`, `sidebar/workspace_menu/*`, `worktree_dialog.rs`; T28: `config.rs`, `config/prompts.rs`, `settings/{claude,workspaces}.rs`, palette, `claude_quick_start.rs`, `board/link.rs` (`deliver_text`) |
-| **F3** (após merge de F2) | **T26** ‖ **T30** | T26: `claude_usage/{auto_pick,alerts}.rs`, launcher, quick-start, `worktree_dialog.rs`, `lifecycle.rs`; T30: `panel.rs` accessor, `link/resolve.rs`, `sidebar/{rows,labels}.rs`, `sidebar.rs` |
+| **F3** (após merge de F2) | **T26** ‖ **T30** ‖ **T31** | T31: `account_badge.rs` + call site em `panel_chrome.rs`/`panels.rs`; T26: `claude_usage/{auto_pick,alerts}.rs`, launcher, quick-start, `worktree_dialog.rs`, `lifecycle.rs`; T30: `panel.rs` accessor, `link/resolve.rs`, `sidebar/{rows,labels}.rs`, `sidebar.rs` |
 | **F4** (após merge de F3) | **T24** | `claude_sessions/*`, `lib.rs`, quick-start/launcher/palette/workspace menu/lifecycle (todos livres nesta wave) |
 | **F5** | Smoke ampliado (extensão da Task 17: status, sessões, worktrees, Auto/alertas, ask/reply, prompts, prefs, rename; F8 já coberto) | needs everything |
 

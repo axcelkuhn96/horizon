@@ -269,6 +269,7 @@ Modal 560 (frame de modal, scrim), aberto por: item **Recent Claude sessions…*
 │ [Esc] close   ↑↓ select   Enter resume    [Resume here][Resume]│
 └───────────────────────────────────────────────────────────┘
 ```
+- **Agregação por worktree:** a lista junta o repo principal + todas as worktrees do repo (nomeadas pelo `RepoOverview`). Cada linha ganha um **chip de branch** (⎇ pintado + nome 10 monospace `FG_SOFT`, máx. 18 chars meio-truncado, fill `alpha(FG_DIM(), 40)`, raio 4) quando a sessão não é do repo principal; o do principal não mostra chip. Worktrees de agente (`.claude/worktrees/agent-*`) ficam num **grupo recolhido** `▸ Agent worktrees (7)` no fim da lista (cabeçalho 26h, `FG_DIM`), expandível no clique; dentro, linhas normais com chip. Mostra as **30 mais recentes** no total; rodapé da lista `Showing 30 of 112 · Show all` (link-texto `ACCENT`, 11) expande tudo (scroll preguiçoso). Resume abre o painel com `cwd` = a worktree da sessão (tooltip da linha: caminho absoluto e `Resumes in <worktree>`).
 - **Linha (44h, 2 linhas):** título 12 `FG()` (summary ou primeiro prompt, controle removido, truncado com `hub_ui::elided`); linha 2 10.5 `FG_DIM()`: dot de `profile_accent` + nome da conta, data relativa (`just now`, `5 min ago`, `2 h ago`, `yesterday`, `Nov 8`), branch/cwd relativo se o projeto é um worktree, tamanho. Conta desconhecida: pílula `account unknown` `FG_DIM` e dot hueco. Selecionada: fill `blend(PANEL_BG_ALT(), ACCENT(), 0.22)` + barra 3 px; hover 0.12.
 - **Lista:** altura máx. 320 com scroll, mais recentes primeiro, teto 200; scroll preguiçoso (linhas fora da tela não calculam galley); strings/galleys cacheados por `scan_version`. Carregando: 3 linhas esqueleto `FG_DIM` alpha 0.15 (sem animação); vazio: `No Claude sessions for this project yet` centralizado `FG_DIM`; erro de leitura: linha `PALETTE_RED` 11 sem detalhe de conteúdo.
 - **Ações:** **Resume** (primário 30h) abre **novo painel** com a conta da sessão; **Resume here** (secundário) escreve o comando no shell ativo; Enter = Resume, Shift+Enter = Resume here; duplo clique = Resume.
@@ -339,3 +340,17 @@ Modal 560 (frame de modal, scrim), aberto por: item **Recent Claude sessions…*
 ## 16. Rename de painel (referência)
 
 Sem visual novo: duplo clique na titlebar já abre o editor inline (§existente); na sidebar o duplo clique numa linha de painel abre o mesmo editor inline sobre a linha (altura 26, `TextEdit` com a mesma fonte do rótulo, Enter confirma, Esc cancela, vazio/só espaços descarta). O nome custom aparece em sidebar, badge do §6, diálogo Send e `horizon link list`.
+
+## 17. Marcador de conta na titlebar (anel de cota restante)
+
+Em painéis Claude com perfil e em shells rodando claude com `CLAUDE_CONFIG_DIR` conhecido, a titlebar mostra um **badge de conta** (altura 18, largura = anel + gap 5 + nome elidido, máx. 120), posicionado entre o dot de status (§8) e o botão "✳ Claude ▾" / medidor de histórico; o título do painel cede espaço via `panel_title_content_rect`. Sem perfil/sem agente: nada pintado (zero largura).
+
+```
+ ◔ conta2        ← anel de 14 px + nome 10.5
+```
+- **Disco + anel:** disco central r=3.5 na cor do perfil (`hub_ui::accent_color(slot)`, o mesmo do chip, launcher e sidebar). Em volta, anel de raio 7.5: trilho stroke 1.8 `alpha(FG_DIM(), 70)` (círculo completo) e **arco de cota restante** stroke 2.4, cap redondo, começando às 12h e varrendo no sentido horário `restante/100 × 360°` (mín. fatia visível de 2% se > 0). Arco por polilinha (`ring_points`, ≤ 48 segmentos pela escala), nunca por galley.
+- **Cor do arco:** severidade pelo usado (`severity_color`, mesma escala dos chips do §1): ok `PALETTE_GREEN()`, atenção (≥ 80% usado) `PALETTE_YELLOW()`, crítico (≥ 90%) `PALETTE_RED()`. Expirado/sem login/sem dado: arco ausente, só o trilho tracejado (6/4), disco oco (stroke 1.2 na cor do perfil, sem fill) e nome a `alpha 0.55`; o texto `expired` não é pintado (o tooltip explica). Acessibilidade: o comprimento do arco carrega o dado além da cor, e o badge tem `widget_info` com `"conta2, 34% of weekly quota remaining"`.
+- **Nome:** 10.5 proportional `FG_SOFT()`, elidido com `hub_ui::elided` na largura restante; perfil default exibe `default`.
+- **Hover/clique:** hover = fill `alpha(PANEL_BG_ALT(), 200)` raio 4 e cursor pointer; clique abre o popup do T21 no passo de contas (trocar de conta = nova sessão; não altera a atual). Foco de teclado: `paint_focus_ring`.
+- **Tooltip** (`on_hover_ui_at_pointer`, largura 280, margin 12): nome do perfil 13 strong + pílula `active`; e-mail 11 `FG_DIM`; `7d: 66% used · 34% left` com `mini_bar` 4 px na cor de severidade; `5h: 12% used`; `Resets Mon 14:00 (in 2d 4h)` 10.5 `FG_DIM`; credencial inválida → linha `Not logged in — run claude /login with CLAUDE_CONFIG_DIR=…` `PALETTE_YELLOW` 10.5.
+- **Cache/perf:** layout (galley do nome, geometria do anel, strings do tooltip) por painel, chave `(perfil, usage_version, ppp)`; sem formatação por frame; repaint só com snapshot novo. Resolução panel→perfil usa env/detector já guardados no painel (sem `/proc` por frame).
