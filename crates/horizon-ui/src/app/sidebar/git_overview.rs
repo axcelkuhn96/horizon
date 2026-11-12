@@ -13,6 +13,7 @@ mod paint;
 mod row_menu;
 
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write as _;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -190,10 +191,10 @@ fn upstream_text(overview: &RepoOverview) -> Option<String> {
     let upstream = overview.upstream.as_deref()?;
     let mut text = format!("upstream {upstream}");
     if overview.ahead > 0 {
-        text.push_str(&format!(" \u{b7} {} ahead", overview.ahead));
+        let _ = write!(text, " \u{b7} {} ahead", overview.ahead);
     }
     if overview.behind > 0 {
-        text.push_str(&format!(" \u{b7} {} behind", overview.behind));
+        let _ = write!(text, " \u{b7} {} behind", overview.behind);
     }
     Some(text)
 }
@@ -271,11 +272,8 @@ fn build_cache(overview: &RepoOverview) -> GitLineCache {
     let worktree_rows = build_rows(overview);
     let primary_count = worktree_rows.iter().filter(|row| !row.agent_group).count();
     let agent_count = worktree_rows.len() - primary_count;
-    let tooltip = worktree_rows
-        .iter()
-        .find(|row| row.is_current)
-        .map(|row| row.tooltip.clone())
-        .unwrap_or_else(|| TooltipData {
+    let tooltip = worktree_rows.iter().find(|row| row.is_current).map_or_else(
+        || TooltipData {
             title: branch_text(
                 overview.branch.as_deref(),
                 overview.detached,
@@ -285,7 +283,9 @@ fn build_cache(overview: &RepoOverview) -> GitLineCache {
             path: overview.repo_root.display().to_string(),
             upstream: upstream_text(overview),
             changes: changes_text(Some(overview.dirty_count)),
-        });
+        },
+        |row| row.tooltip.clone(),
+    );
     GitLineCache {
         source: Some(overview.clone()),
         error: None,

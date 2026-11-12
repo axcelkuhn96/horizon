@@ -63,7 +63,7 @@ fn badge_opacity(received_at: Instant, now: Instant) -> f32 {
     } else if elapsed >= BADGE_TOTAL {
         0.0
     } else {
-        1.0 - (elapsed - BADGE_FULL).as_secs_f32() / (BADGE_TOTAL - BADGE_FULL).as_secs_f32()
+        1.0 - elapsed.saturating_sub(BADGE_FULL).as_secs_f32() / BADGE_TOTAL.saturating_sub(BADGE_FULL).as_secs_f32()
     }
 }
 
@@ -73,7 +73,7 @@ fn badge_opacity(received_at: Instant, now: Instant) -> f32 {
 fn badge_wake(received_at: Instant, now: Instant) -> Option<Duration> {
     let elapsed = elapsed(received_at, now);
     if elapsed < BADGE_FULL {
-        Some(BADGE_FULL - elapsed)
+        Some(BADGE_FULL.saturating_sub(elapsed))
     } else if elapsed < BADGE_TOTAL {
         Some(BADGE_FADE_FRAME.min(badge_remaining(received_at, now)))
     } else {
@@ -446,7 +446,7 @@ mod tests {
         let start = Instant::now();
         assert_eq!(badge_wake(start, start), Some(BADGE_FULL));
         assert_eq!(
-            badge_wake(start, start + Duration::from_millis(2000)),
+            badge_wake(start, start + Duration::from_secs(2)),
             Some(Duration::from_millis(300))
         );
         assert_eq!(

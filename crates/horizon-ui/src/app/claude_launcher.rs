@@ -833,11 +833,13 @@ mod tests {
 
     #[test]
     fn base_cc_alias_is_skipped_but_derived_profiles_are_listed() {
-        let mut config = horizon_core::Config::default();
-        config.claude_profiles = vec![horizon_core::ClaudeProfile {
-            name: "conta2".to_owned(),
-            config_dir: "/home/u/.claude-conta2".to_owned(),
-        }];
+        let config = horizon_core::Config {
+            claude_profiles: vec![horizon_core::ClaudeProfile {
+                name: "conta2".to_owned(),
+                config_dir: "/home/u/.claude-conta2".to_owned(),
+            }],
+            ..horizon_core::Config::default()
+        };
 
         let presets = config.resolved_presets();
         let names = claude_profile_names(&presets);

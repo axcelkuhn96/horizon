@@ -139,22 +139,29 @@ mod tests {
         }
     }
 
+    fn assert_position(actual: [f32; 2], expected: [f32; 2]) {
+        assert!(
+            actual.iter().zip(expected).all(|(a, e)| (a - e).abs() < 1e-3),
+            "{actual:?} != {expected:?}"
+        );
+    }
+
     #[test]
     fn grid_positions_fill_rows_left_to_right() {
         let size = [100.0, 50.0];
         let step_x = 100.0 + TILE_GAP;
         let step_y = 50.0 + TILE_GAP;
 
-        assert_eq!(grid_position(0, size, 3), [WS_INNER_PAD, WS_INNER_PAD]);
-        assert_eq!(grid_position(1, size, 3), [WS_INNER_PAD + step_x, WS_INNER_PAD]);
-        assert_eq!(grid_position(2, size, 3), [WS_INNER_PAD + 2.0 * step_x, WS_INNER_PAD]);
-        assert_eq!(grid_position(3, size, 3), [WS_INNER_PAD, WS_INNER_PAD + step_y]);
-        assert_eq!(
+        assert_position(grid_position(0, size, 3), [WS_INNER_PAD, WS_INNER_PAD]);
+        assert_position(grid_position(1, size, 3), [WS_INNER_PAD + step_x, WS_INNER_PAD]);
+        assert_position(grid_position(2, size, 3), [WS_INNER_PAD + 2.0 * step_x, WS_INNER_PAD]);
+        assert_position(grid_position(3, size, 3), [WS_INNER_PAD, WS_INNER_PAD + step_y]);
+        assert_position(
             grid_position(4, size, 3),
-            [WS_INNER_PAD + step_x, WS_INNER_PAD + step_y]
+            [WS_INNER_PAD + step_x, WS_INNER_PAD + step_y],
         );
         // Zero columns must not divide by zero: behaves as a single column.
-        assert_eq!(grid_position(2, size, 0), [WS_INNER_PAD, WS_INNER_PAD + 2.0 * step_y]);
+        assert_position(grid_position(2, size, 0), [WS_INNER_PAD, WS_INNER_PAD + 2.0 * step_y]);
     }
 
     #[test]

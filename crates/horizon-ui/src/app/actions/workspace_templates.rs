@@ -372,7 +372,8 @@ mod tests {
 
     #[test]
     fn workspace_templates_positions_are_relative_to_the_workspace() {
-        assert_eq!(relative_position([300.0, 220.0], [100.0, 20.0]), [200.0, 200.0]);
+        let position = relative_position([300.0, 220.0], [100.0, 20.0]);
+        assert!((position[0] - 200.0).abs() < 1e-3 && (position[1] - 200.0).abs() < 1e-3);
     }
 
     #[test]

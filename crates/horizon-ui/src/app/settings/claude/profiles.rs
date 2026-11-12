@@ -76,7 +76,7 @@ fn unique_profile_name(profiles: &[ClaudeProfile]) -> String {
     if !taken(base) {
         return base.to_string();
     }
-    (2..)
+    (2..=u32::MAX)
         .map(|n| format!("{base} {n}"))
         .find(|name| !taken(name))
         .unwrap_or_else(|| base.to_string())
@@ -482,7 +482,7 @@ mod tests {
         let mut cache = InfoCache::default();
         let start = Instant::now();
         cache.store("~/a".to_string(), info(CredentialState::Expired), start);
-        let almost = start + INFO_TTL - Duration::from_millis(1);
+        let almost = start + INFO_TTL.saturating_sub(Duration::from_millis(1));
         assert_eq!(cache.next_to_fetch(&["~/a"], almost), None);
         assert_eq!(cache.next_to_fetch(&["~/a"], start + INFO_TTL).as_deref(), Some("~/a"));
         // The outdated value keeps showing until the new read lands.

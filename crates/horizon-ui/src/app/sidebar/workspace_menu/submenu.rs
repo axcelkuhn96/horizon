@@ -204,7 +204,7 @@ pub(super) fn show_presets_submenu(ctx: &Context, id: Id, row: &Response, preset
             memory.move_focus(FocusDirection::None);
         });
     }
-    let focused = ctx.memory(|memory| memory.focused());
+    let focused = ctx.memory(egui::Memory::focused);
     let focus_now = focused.is_some_and(|id| row_ids.contains(&id)) || intent == KeyIntent::Open;
     let inside_now = pointer_in_zone(ctx.pointer_hover_pos(), row.rect, Some(area.response.rect));
     let last_inside = if inside || inside_now {

@@ -784,7 +784,7 @@ mod tests {
         frame(&ctx, &raw, false);
         raw.time = Some(0.1);
         frame(&ctx, &raw, false);
-        assert!(ctx.memory(|m| m.top_modal_layer()).is_some());
+        assert!(ctx.memory(egui::Memory::top_modal_layer).is_some());
         // A request from the layer behind the modal is surrendered next frame
         // and focus lands on the modal's sink.
         raw.time = Some(0.2);
@@ -792,6 +792,6 @@ mod tests {
         raw.time = Some(0.3);
         frame(&ctx, &raw, false);
         assert!(!ctx.memory(|m| m.has_focus(background)));
-        assert!(ctx.memory(|m| m.focused()).is_some());
+        assert!(ctx.memory(egui::Memory::focused).is_some());
     }
 }

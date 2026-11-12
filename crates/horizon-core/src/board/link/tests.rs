@@ -139,7 +139,7 @@ fn board_send_refuses_multiline_without_enter_when_paste_is_not_bracketed() {
             assert_eq!(code, LinkErrorCode::BadRequest);
             assert!(message.contains("multi-line"), "{message}");
         }
-        other => panic!("expected bad_request, got {other:?}"),
+        other @ LinkResponse::Ok(_) => panic!("expected bad_request, got {other:?}"),
     }
     // A single line still goes through.
     assert_eq!(
@@ -197,7 +197,7 @@ fn board_closed_panel_returns_closed_error() {
 
     match send(&mut board, "gone", "x", true) {
         LinkResponse::Err { code, .. } => assert_eq!(code, LinkErrorCode::Closed),
-        other => panic!("expected closed error, got {other:?}"),
+        other @ LinkResponse::Ok(_) => panic!("expected closed error, got {other:?}"),
     }
 }
 
@@ -212,7 +212,7 @@ fn board_send_rejects_text_over_the_request_cap_without_writing() {
     let big = "a".repeat(crate::link::MAX_REQUEST_BYTES + 1);
     match send(&mut board, "sink", &big, true) {
         LinkResponse::Err { code, .. } => assert_eq!(code, LinkErrorCode::TooLarge),
-        other => panic!("expected too_large, got {other:?}"),
+        other @ LinkResponse::Ok(_) => panic!("expected too_large, got {other:?}"),
     }
     std::thread::sleep(Duration::from_millis(200));
     assert!(
@@ -227,7 +227,7 @@ fn board_unknown_target_returns_not_found() {
     let _ = command_panel(&mut board, "one", "exec cat");
     match send(&mut board, "nope", "x", true) {
         LinkResponse::Err { code, .. } => assert_eq!(code, LinkErrorCode::NotFound),
-        other => panic!("expected not_found, got {other:?}"),
+        other @ LinkResponse::Ok(_) => panic!("expected not_found, got {other:?}"),
     }
 }
 

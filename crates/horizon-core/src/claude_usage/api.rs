@@ -330,7 +330,7 @@ mod tests {
         let stub = Stub::new(200, "", USAGE_BODY);
         let usage = refresh_profile(&fx.profile, fx.home.path(), &stub.url, NOW_MS, None);
         let path = fx.home.path().join("claude-usage-cache.json");
-        crate::claude_usage::save_cache(&path, &[usage.clone()]).unwrap();
+        crate::claude_usage::save_cache(&path, std::slice::from_ref(&usage)).unwrap();
         let raw = fs::read_to_string(&path).unwrap();
         for forbidden in ["accessToken", "refreshToken", TEST_TOKEN, "sk-refresh-SECRET"] {
             assert!(!raw.contains(forbidden), "cache leaked {forbidden}");

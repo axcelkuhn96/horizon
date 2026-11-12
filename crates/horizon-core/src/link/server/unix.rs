@@ -424,7 +424,7 @@ mod tests {
         big.push(b'\n');
         match exchange(&path, &big) {
             LinkResponse::Err { code, .. } => assert_eq!(code, LinkErrorCode::TooLarge),
-            other => panic!("expected too_large, got {other:?}"),
+            other @ LinkResponse::Ok(_) => panic!("expected too_large, got {other:?}"),
         }
     }
 
@@ -435,7 +435,7 @@ mod tests {
         let big = vec![b'a'; MAX_REQUEST_BYTES + 1];
         match exchange(&path, &big) {
             LinkResponse::Err { code, .. } => assert_eq!(code, LinkErrorCode::TooLarge),
-            other => panic!("expected too_large, got {other:?}"),
+            other @ LinkResponse::Ok(_) => panic!("expected too_large, got {other:?}"),
         }
     }
 
@@ -480,7 +480,7 @@ mod tests {
         let server = LinkServer::start(path.clone()).expect("start");
         match exchange(&path, b"{\"v\":9,\"op\":\"list\"}\n") {
             LinkResponse::Err { code, .. } => assert_eq!(code, LinkErrorCode::VersionMismatch),
-            other => panic!("expected version_mismatch, got {other:?}"),
+            other @ LinkResponse::Ok(_) => panic!("expected version_mismatch, got {other:?}"),
         }
 
         let client_path = path.clone();
@@ -607,7 +607,7 @@ mod tests {
                 assert_eq!(code, LinkErrorCode::BadRequest);
                 assert!(message.contains("busy"), "{message}");
             }
-            other => panic!("expected busy error, got {other:?}"),
+            other @ LinkResponse::Ok(_) => panic!("expected busy error, got {other:?}"),
         }
         drop(holders);
     }

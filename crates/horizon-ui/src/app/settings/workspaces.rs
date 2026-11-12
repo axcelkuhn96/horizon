@@ -221,7 +221,7 @@ fn render(ui: &mut Ui, config: &mut Config, state: &mut WorkspacesTabState) -> b
         if elapsed >= OPENED_FEEDBACK {
             state.feedback = None;
         } else {
-            ui.ctx().request_repaint_after(OPENED_FEEDBACK - elapsed);
+            ui.ctx().request_repaint_after(OPENED_FEEDBACK.saturating_sub(elapsed));
         }
     }
     changed

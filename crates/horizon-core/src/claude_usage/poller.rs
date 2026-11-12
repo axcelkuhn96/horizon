@@ -249,8 +249,6 @@ impl UsagePoller {
         let spawned = thread::Builder::new()
             .name("claude-usage-poller".to_owned())
             .spawn(move || {
-                #[cfg(test)]
-                let _alive = worker_alive;
                 let mut schedule = Schedule::new(interval);
                 while let Some(rate_limited) = worker.refresh(&result_tx) {
                     schedule.record(rate_limited, Instant::now());
@@ -258,6 +256,8 @@ impl UsagePoller {
                         break;
                     }
                 }
+                #[cfg(test)]
+                drop(worker_alive);
             });
         if let Err(error) = spawned {
             tracing::warn!(%error, "failed to start claude usage poller thread");
