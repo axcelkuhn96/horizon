@@ -320,6 +320,7 @@ mod tests {
             args: Vec::new(),
             resume: PanelResume::Fresh,
             ssh_connection: None,
+            env: std::collections::BTreeMap::new(),
         }
     }
 }

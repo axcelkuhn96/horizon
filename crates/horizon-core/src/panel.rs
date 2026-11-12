@@ -1,6 +1,8 @@
+mod env;
 mod spawn;
 
 use std::borrow::Cow;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -16,12 +18,12 @@ use crate::terminal::{AgentNotification, Terminal, TerminalSpawnOptions};
 use crate::usage_dashboard::UsageDashboard;
 use crate::workspace::WorkspaceId;
 
+use self::env::merge_spawn_env;
 pub use self::spawn::current_unix_millis;
 #[cfg(test)]
 use self::spawn::platform_default_shell;
 use self::spawn::{
-    AgentLaunchContext, agent_env, kitty_keyboard_for_kind, resolve_launch_command, scrollback_limit_for_kind,
-    spawn_panel,
+    AgentLaunchContext, kitty_keyboard_for_kind, resolve_launch_command, scrollback_limit_for_kind, spawn_panel,
 };
 
 const DEFAULT_CELL_WIDTH: u16 = 8;
@@ -129,6 +131,8 @@ pub struct PanelOptions {
     pub transcript_root: Option<PathBuf>,
     pub restore_as_disconnected_snapshot: bool,
     pub collapsed: bool,
+    /// Extra environment for the PTY, from the preset (generic; e.g. `CLAUDE_CONFIG_DIR`).
+    pub env: BTreeMap<String, String>,
     /// True when this panel is being restored from persisted state rather
     /// than newly added; continue-style agents only reconnect on restore.
     pub is_restore: bool,
@@ -154,6 +158,7 @@ impl Default for PanelOptions {
             transcript_root: None,
             restore_as_disconnected_snapshot: false,
             collapsed: false,
+            env: BTreeMap::new(),
             is_restore: false,
         }
     }
@@ -190,6 +195,8 @@ pub struct Panel {
     /// When `true`, the panel renders as titlebar-only (body hidden). The PTY
     /// stays alive — collapsing never kills the terminal session.
     pub collapsed: bool,
+    /// Extra PTY environment from the preset; reused on restart and persisted.
+    pub env: BTreeMap<String, String>,
     /// The panel height (`layout.size[1]`) recorded before collapse, so expand
     /// can restore the prior height. `None` when the panel has never collapsed.
     expanded_height: Option<f32>,
@@ -541,7 +548,7 @@ impl Panel {
             );
         }
 
-        let env = agent_env(self.kind);
+        let env = merge_spawn_env(self.kind, &self.env, &HashMap::new());
         self.content = PanelContent::Terminal(Terminal::spawn(TerminalSpawnOptions {
             program,
             args: launch_args,
@@ -744,6 +751,7 @@ mod tests {
             ssh_connection: None,
             ssh_status: None,
             collapsed: false,
+            env: std::collections::BTreeMap::new(),
             expanded_height: None,
         }
     }

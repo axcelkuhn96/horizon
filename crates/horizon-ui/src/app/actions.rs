@@ -202,6 +202,7 @@ mod tests {
                 user: Some("deploy".to_string()),
                 ..horizon_core::SshConnection::default()
             }),
+            env: std::collections::BTreeMap::new(),
         }];
 
         let entries = command_palette_preset_entries(&presets);

@@ -1,0 +1,113 @@
+//! Environment handling for terminal panels: agent defaults, preset `env`
+//! overrides and values injected by Horizon itself.
+
+use std::collections::{BTreeMap, HashMap};
+
+use super::PanelKind;
+
+/// Variable Horizon owns for agent panels; presets may not override it.
+const HORIZON_MARKER: &str = "HORIZON";
+
+fn agent_env(kind: PanelKind) -> HashMap<String, String> {
+    let mut env = HashMap::new();
+    if kind.is_agent() {
+        env.insert(HORIZON_MARKER.to_string(), "1".to_string());
+    }
+    env
+}
+
+/// Environment for a terminal panel's PTY.
+///
+/// Starts from the per-kind defaults, applies the preset `env` (except the
+/// reserved `HORIZON` key), then applies `injected` last so values set by
+/// Horizon itself (e.g. `HORIZON_PANEL_*`) can never be overridden by a preset.
+pub(crate) fn merge_spawn_env(
+    kind: PanelKind,
+    preset_env: &BTreeMap<String, String>,
+    injected: &HashMap<String, String>,
+) -> HashMap<String, String> {
+    let mut env = agent_env(kind);
+    env.extend(
+        preset_env
+            .iter()
+            .filter(|(key, _)| key.as_str() != HORIZON_MARKER)
+            .map(|(key, value)| (key.clone(), value.clone())),
+    );
+    env.extend(injected.iter().map(|(key, value)| (key.clone(), value.clone())));
+    env
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{BTreeMap, HashMap};
+
+    use super::merge_spawn_env;
+    use crate::config::PresetConfig;
+    use crate::panel::PanelKind;
+
+    fn preset_env(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn merge_keeps_horizon_one_for_agents() {
+        let merged = merge_spawn_env(PanelKind::Claude, &BTreeMap::new(), &HashMap::new());
+        assert_eq!(merged.get("HORIZON").map(String::as_str), Some("1"));
+
+        let shell = merge_spawn_env(PanelKind::Shell, &BTreeMap::new(), &HashMap::new());
+        assert!(!shell.contains_key("HORIZON"));
+    }
+
+    #[test]
+    fn merge_preset_overrides_other_keys() {
+        let preset = preset_env(&[("CLAUDE_CONFIG_DIR", "/home/u/.claude-work"), ("FOO", "bar")]);
+        let merged = merge_spawn_env(PanelKind::Claude, &preset, &HashMap::new());
+        assert_eq!(
+            merged.get("CLAUDE_CONFIG_DIR").map(String::as_str),
+            Some("/home/u/.claude-work")
+        );
+        assert_eq!(merged.get("FOO").map(String::as_str), Some("bar"));
+        assert_eq!(merged.get("HORIZON").map(String::as_str), Some("1"));
+    }
+
+    #[test]
+    fn merge_preset_cannot_override_horizon() {
+        let preset = preset_env(&[("HORIZON", "0")]);
+        let agent = merge_spawn_env(PanelKind::Claude, &preset, &HashMap::new());
+        assert_eq!(agent.get("HORIZON").map(String::as_str), Some("1"));
+
+        let shell = merge_spawn_env(PanelKind::Shell, &preset, &HashMap::new());
+        assert!(!shell.contains_key("HORIZON"));
+    }
+
+    #[test]
+    fn merge_injected_wins_over_preset() {
+        let preset = preset_env(&[("HORIZON_PANEL_ID", "spoofed"), ("FOO", "bar")]);
+        let injected = HashMap::from([("HORIZON_PANEL_ID".to_string(), "42".to_string())]);
+        let merged = merge_spawn_env(PanelKind::Claude, &preset, &injected);
+        assert_eq!(merged.get("HORIZON_PANEL_ID").map(String::as_str), Some("42"));
+        assert_eq!(merged.get("FOO").map(String::as_str), Some("bar"));
+    }
+
+    #[test]
+    fn preset_without_env_serializes_without_key() {
+        let preset: PresetConfig = serde_yaml::from_str("name: Shell\n").expect("parse preset");
+        assert!(preset.env.is_empty());
+        let yaml = serde_yaml::to_string(&preset).expect("serialize preset");
+        assert!(!yaml.contains("env"), "empty env must not be serialized: {yaml}");
+    }
+
+    #[test]
+    fn preset_env_reaches_panel_options() {
+        let preset: PresetConfig =
+            serde_yaml::from_str("name: Work\nkind: claude\nenv:\n  CLAUDE_CONFIG_DIR: /tmp/work\n").expect("parse");
+        let options = preset.to_panel_options();
+        assert_eq!(
+            options.env.get("CLAUDE_CONFIG_DIR").map(String::as_str),
+            Some("/tmp/work")
+        );
+    }
+}

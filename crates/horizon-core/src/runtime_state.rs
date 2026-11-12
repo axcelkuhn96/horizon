@@ -1,7 +1,7 @@
 mod agent_sessions;
 mod claude_live_sessions;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
 use serde::{Deserialize, Deserializer, Serialize};
@@ -271,6 +271,7 @@ impl RuntimeState {
                             } else {
                                 None
                             },
+                            env: panel.env.clone(),
                         }
                     })
                     .collect();
@@ -495,6 +496,9 @@ pub struct PanelState {
     /// this field deserialize to `None` (retro-compatible via `#[serde(default)]`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub running_agent: Option<RunningAgent>,
+    /// Extra PTY environment from the preset/template; omitted when empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
 }
 
 impl PanelState {
@@ -543,6 +547,7 @@ impl PanelState {
             collapsed: panel.collapsed,
             had_session_activity: false,
             running_agent: None,
+            env: panel.env.clone(),
         }
     }
 
@@ -591,6 +596,7 @@ impl PanelState {
             transcript_root: None,
             restore_as_disconnected_snapshot: false,
             collapsed: self.collapsed,
+            env: self.env.clone(),
             is_restore: true,
         }
     }
@@ -617,6 +623,7 @@ impl Default for PanelState {
             collapsed: false,
             had_session_activity: false,
             running_agent: None,
+            env: BTreeMap::new(),
         }
     }
 }
@@ -1087,6 +1094,52 @@ workspaces:
         };
 
         assert!(panel.to_panel_options().collapsed);
+    }
+
+    #[test]
+    fn panel_state_env_round_trips_yaml() {
+        let state = RuntimeState {
+            workspaces: vec![WorkspaceState {
+                local_id: "workspace".to_string(),
+                name: "alpha".to_string(),
+                panels: vec![PanelState {
+                    local_id: "panel".to_string(),
+                    name: "Claude work".to_string(),
+                    kind: PanelKind::Claude,
+                    env: std::collections::BTreeMap::from([(
+                        "CLAUDE_CONFIG_DIR".to_string(),
+                        "/home/u/.claude-work".to_string(),
+                    )]),
+                    ..PanelState::default()
+                }],
+                ..WorkspaceState::default()
+            }],
+            ..RuntimeState::default()
+        };
+
+        let yaml = state.to_yaml().expect("serialize runtime state");
+        assert!(yaml.contains("CLAUDE_CONFIG_DIR"));
+
+        let reloaded: RuntimeState = serde_yaml::from_str(&yaml).expect("deserialize runtime state");
+        let panel = &reloaded.workspaces[0].panels[0];
+        assert_eq!(
+            panel.env.get("CLAUDE_CONFIG_DIR").map(String::as_str),
+            Some("/home/u/.claude-work")
+        );
+        assert_eq!(panel.to_panel_options().env, panel.env);
+    }
+
+    #[test]
+    fn old_runtime_yaml_without_env_loads() {
+        let yaml = "workspaces:\n- name: alpha\n  panels:\n  - local_id: panel\n    name: Shell\n    kind: shell\n";
+        let state: RuntimeState = serde_yaml::from_str(yaml).expect("old runtime yaml loads");
+        let panel = &state.workspaces[0].panels[0];
+        assert!(panel.env.is_empty());
+        let reserialized = state.to_yaml().expect("serialize runtime state");
+        assert!(
+            !reserialized.contains("env:"),
+            "empty env must be omitted: {reserialized}"
+        );
     }
 
     #[test]

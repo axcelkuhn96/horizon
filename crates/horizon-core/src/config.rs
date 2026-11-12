@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -103,6 +104,9 @@ pub struct PresetConfig {
     pub resume: PanelResume,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh_connection: Option<SshConnection>,
+    /// Extra environment variables for the PTY (e.g. `CLAUDE_CONFIG_DIR`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
 }
 
 impl PresetConfig {
@@ -116,6 +120,7 @@ impl PresetConfig {
             ssh_connection: self.ssh_connection.clone(),
             kind: self.kind,
             resume: self.resume.clone(),
+            env: self.env.clone(),
             ..PanelOptions::default()
         }
     }
@@ -159,6 +164,7 @@ pub(crate) fn default_opencode_preset() -> PresetConfig {
         args: Vec::new(),
         resume: PanelResume::Fresh,
         ssh_connection: None,
+        env: BTreeMap::new(),
     }
 }
 
@@ -171,6 +177,7 @@ pub(crate) fn default_gemini_presets() -> [PresetConfig; 1] {
         args: Vec::new(),
         resume: PanelResume::Fresh,
         ssh_connection: None,
+        env: BTreeMap::new(),
     }]
 }
 
@@ -187,6 +194,7 @@ pub(crate) fn default_kilo_preset() -> PresetConfig {
         args: Vec::new(),
         resume: PanelResume::Fresh,
         ssh_connection: None,
+        env: BTreeMap::new(),
     }
 }
 
@@ -199,6 +207,7 @@ pub(crate) fn default_pi_preset() -> PresetConfig {
         args: Vec::new(),
         resume: PanelResume::Fresh,
         ssh_connection: None,
+        env: BTreeMap::new(),
     }
 }
 
@@ -264,6 +273,7 @@ pub(crate) fn default_codex_preset() -> PresetConfig {
         args: vec!["--no-alt-screen".to_string()],
         resume: PanelResume::Fresh,
         ssh_connection: None,
+        env: BTreeMap::new(),
     }
 }
 
@@ -280,6 +290,7 @@ pub(crate) fn default_claude_preset() -> PresetConfig {
         args: vec!["--permission-mode".to_string(), "auto".to_string()],
         resume: PanelResume::Fresh,
         ssh_connection: None,
+        env: BTreeMap::new(),
     }
 }
 
@@ -293,6 +304,7 @@ fn default_presets() -> Vec<PresetConfig> {
             args: Vec::new(),
             resume: PanelResume::Fresh,
             ssh_connection: None,
+            env: BTreeMap::new(),
         },
         default_codex_preset(),
         default_claude_preset(),
@@ -310,6 +322,7 @@ fn default_presets() -> Vec<PresetConfig> {
             args: Vec::new(),
             resume: PanelResume::Fresh,
             ssh_connection: None,
+            env: BTreeMap::new(),
         },
         PresetConfig {
             name: "Files".to_string(),
@@ -319,6 +332,7 @@ fn default_presets() -> Vec<PresetConfig> {
             args: Vec::new(),
             resume: PanelResume::Fresh,
             ssh_connection: None,
+            env: BTreeMap::new(),
         },
         PresetConfig {
             name: "Markdown".to_string(),
@@ -328,6 +342,7 @@ fn default_presets() -> Vec<PresetConfig> {
             args: Vec::new(),
             resume: PanelResume::Fresh,
             ssh_connection: None,
+            env: BTreeMap::new(),
         },
         PresetConfig {
             name: "Usage".to_string(),
@@ -337,6 +352,7 @@ fn default_presets() -> Vec<PresetConfig> {
             args: Vec::new(),
             resume: PanelResume::Fresh,
             ssh_connection: None,
+            env: BTreeMap::new(),
         },
     ]);
     presets
@@ -552,6 +568,9 @@ pub struct TerminalConfig {
     pub ssh_connection: Option<SshConnection>,
     #[serde(default)]
     pub collapsed: bool,
+    /// Extra environment variables for the PTY (same semantics as `PresetConfig.env`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
 }
 
 impl Default for TerminalConfig {
@@ -569,6 +588,7 @@ impl Default for TerminalConfig {
             size: None,
             ssh_connection: None,
             collapsed: false,
+            env: BTreeMap::new(),
         }
     }
 }
@@ -713,6 +733,7 @@ impl Config {
                         args: Vec::new(),
                         resume: PanelResume::Fresh,
                         ssh_connection: Some(host.connection),
+                        env: BTreeMap::new(),
                     });
                 }
             }
@@ -1112,6 +1133,7 @@ presets:
             args: Vec::new(),
             resume: super::PanelResume::Fresh,
             ssh_connection: None,
+            env: super::BTreeMap::new(),
         };
 
         assert!(!preset.requires_workspace_cwd());
