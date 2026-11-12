@@ -12,7 +12,7 @@ use crate::agent_definition;
 use crate::editor::{MarkdownEditor, PanelContent};
 use crate::error::Result;
 use crate::git_changes::DiffViewer;
-use crate::runtime_state::{AgentSessionBinding, PanelTemplateRef, claude_session_transcript_exists};
+use crate::runtime_state::{AgentSessionBinding, PanelTemplateRef, claude_transcript_exists_for_env};
 use crate::ssh::{SshConnection, SshConnectionStatus};
 use crate::terminal::{AgentNotification, Terminal, TerminalSpawnOptions};
 use crate::usage_dashboard::UsageDashboard;
@@ -518,10 +518,12 @@ impl Panel {
         // A pre-assigned Claude binding may not have a transcript yet (panel
         // never received a message); resuming it would fail, so relaunch
         // fresh under the same session id instead.
+        let transcript_exists = claude_transcript_exists_for_env(&self.env);
         let should_resume = self.kind.supports_session_binding()
-            && self.session_binding.as_ref().is_some_and(|binding| {
-                self.kind != PanelKind::Claude || claude_session_transcript_exists(&binding.session_id)
-            });
+            && self
+                .session_binding
+                .as_ref()
+                .is_some_and(|binding| self.kind != PanelKind::Claude || transcript_exists(&binding.session_id));
         let (program, launch_args) = resolve_launch_command(
             self.launch_command.clone(),
             self.launch_args.clone(),

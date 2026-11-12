@@ -39,6 +39,7 @@ impl HorizonApp {
             self.window_config.clone(),
             self.canvas_view,
             detached_workspaces,
+            &self.template_config.effective_claude_profiles(),
         );
         if let Err(error) = self
             .session_store

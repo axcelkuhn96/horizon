@@ -8,7 +8,7 @@ use crate::editor::{MarkdownEditor, PanelContent};
 use crate::error::Result;
 use crate::git_changes::DiffViewer;
 use crate::horizon_home::HorizonHome;
-use crate::runtime_state::{AgentSessionBinding, PanelTemplateRef, claude_session_transcript_exists, new_local_id};
+use crate::runtime_state::{AgentSessionBinding, PanelTemplateRef, claude_transcript_exists_for_env, new_local_id};
 use crate::ssh::{SshConnection, SshConnectionStatus};
 use crate::terminal::{Terminal, TerminalSpawnOptions};
 use crate::transcript::PanelTranscript;
@@ -317,6 +317,7 @@ fn spawn_terminal(id: PanelId, workspace_id: WorkspaceId, local_id: String, opts
         session_binding,
         saved_cwd.as_ref(),
         transcript.as_ref(),
+        &env,
         is_restore,
     );
     let ResolvedTerminalLaunch {
@@ -469,6 +470,7 @@ fn resolve_terminal_launch(
     session_binding: Option<AgentSessionBinding>,
     saved_cwd: Option<&PathBuf>,
     transcript: Option<&PanelTranscript>,
+    env: &BTreeMap<String, String>,
     is_restore: bool,
 ) -> ResolvedTerminalLaunch {
     let saved_cwd_string = saved_cwd.map(|path| path.display().to_string());
@@ -478,7 +480,7 @@ fn resolve_terminal_launch(
         session_binding,
         saved_cwd_string.as_deref(),
         name,
-        claude_session_transcript_exists,
+        claude_transcript_exists_for_env(env),
     );
     let (program, launch_args) = resolve_launch_command(
         command,
@@ -1126,6 +1128,33 @@ mod tests {
 
         assert!(!resume_with_missing_transcript);
         assert!(resume_with_existing_transcript);
+    }
+
+    #[test]
+    fn resume_decision_uses_panel_config_dir() {
+        let config_dir = tempfile::tempdir().expect("tempdir");
+        let project = config_dir.path().join("projects/-repo");
+        std::fs::create_dir_all(&project).expect("create project dir");
+        std::fs::write(project.join("session-only-here.jsonl"), "{}\n").expect("write transcript");
+        let env = BTreeMap::from([(
+            "CLAUDE_CONFIG_DIR".to_string(),
+            config_dir.path().to_string_lossy().into_owned(),
+        )]);
+        let decide = |session_id: &str| {
+            let binding = AgentSessionBinding::new(PanelKind::Claude, session_id.to_string(), None, None, None);
+            let (_, should_resume) = resolve_session_binding(
+                PanelKind::Claude,
+                &PanelResume::Fresh,
+                Some(binding),
+                None,
+                None,
+                claude_transcript_exists_for_env(&env),
+            );
+            should_resume
+        };
+
+        assert!(decide("session-only-here"));
+        assert!(!decide("session-absent"));
     }
 
     #[test]

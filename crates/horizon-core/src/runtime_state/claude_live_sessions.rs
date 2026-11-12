@@ -1,11 +1,41 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
+use crate::agent_detect::default_claude_config_dir;
+use crate::config::expand_config_dir;
+
+const CONFIG_DIR_ENV: &str = "CLAUDE_CONFIG_DIR";
+
+/// Config dir a Claude panel runs under: its `CLAUDE_CONFIG_DIR` env entry
+/// (expanded against `home`), else the default `~/.claude`.
+#[must_use]
+pub fn claude_config_dir_for_env(env: &BTreeMap<String, String>, home: &Path) -> PathBuf {
+    env.get(CONFIG_DIR_ENV)
+        .map(|raw| raw.trim())
+        .filter(|raw| !raw.is_empty())
+        .map_or_else(|| default_claude_config_dir(home), |raw| expand_config_dir(raw, home))
+}
+
+/// Transcript probe bound to the config dir of a panel's `env`.
+///
+/// Without `$HOME` a relative or `~` config dir cannot be resolved, so the
+/// probe reports no transcript (the safe answer: start a fresh session).
+pub fn claude_transcript_exists_for_env(env: &BTreeMap<String, String>) -> impl Fn(&str) -> bool {
+    let config_dir = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| claude_config_dir_for_env(env, &home));
+    move |session_id| {
+        config_dir
+            .as_deref()
+            .is_some_and(|dir| claude_session_transcript_exists(dir, session_id))
+    }
+}
+
 /// Returns session ids currently owned by a running Claude Code process.
 ///
-/// Claude Code maintains a live-session registry under `~/.claude/sessions/`,
+/// Claude Code maintains a live-session registry under `<config_dir>/sessions/`,
 /// one `<pid>.json` entry per running process, removed again on clean exit.
 /// Sessions listed there are already open in some terminal, so automatically
 /// resuming one of them would attach two UIs to the same conversation.
@@ -14,11 +44,8 @@ use serde_json::Value;
 /// processes) are ignored on Linux. On other platforms every entry is treated
 /// as live, which errs on the side of starting a fresh session.
 #[must_use]
-pub fn live_claude_session_ids() -> HashSet<String> {
-    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
-        return HashSet::new();
-    };
-    collect_live_session_ids(&home.join(".claude/sessions"), process_is_alive)
+pub fn live_claude_session_ids(config_dir: &Path) -> HashSet<String> {
+    collect_live_session_ids(&config_dir.join("sessions"), process_is_alive)
 }
 
 fn collect_live_session_ids(dir: &Path, process_is_alive: impl Fn(u64) -> bool) -> HashSet<String> {
@@ -67,16 +94,13 @@ fn process_is_alive(_pid: u64) -> bool {
 /// Claude Code refuses `--resume` for session ids without an on-disk
 /// transcript and `--session-id` for ids that already have one, so launch
 /// commands must pick between the two based on what the store contains.
-/// Transcripts live one level below `~/.claude/projects/`, named
+/// Transcripts live one level below `<config_dir>/projects/`, named
 /// `<session_id>.jsonl`; the project directory is scanned instead of derived
 /// from the panel cwd because the cwd munging scheme is Claude Code's
 /// implementation detail.
 #[must_use]
-pub fn claude_session_transcript_exists(session_id: &str) -> bool {
-    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
-        return false;
-    };
-    claude_session_transcript_exists_in(&home.join(".claude/projects"), session_id)
+pub fn claude_session_transcript_exists(config_dir: &Path, session_id: &str) -> bool {
+    claude_session_transcript_exists_in(&config_dir.join("projects"), session_id)
 }
 
 fn claude_session_transcript_exists_in(projects_dir: &Path, session_id: &str) -> bool {
@@ -94,7 +118,13 @@ fn claude_session_transcript_exists_in(projects_dir: &Path, session_id: &str) ->
 mod tests {
     use std::collections::HashSet;
 
-    use super::{claude_session_transcript_exists_in, collect_live_session_ids};
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+
+    use super::{
+        claude_config_dir_for_env, claude_session_transcript_exists, claude_session_transcript_exists_in,
+        claude_transcript_exists_for_env, collect_live_session_ids, live_claude_session_ids,
+    };
 
     fn write_entry(dir: &std::path::Path, name: &str, contents: &str) {
         std::fs::write(dir.join(name), contents).expect("write registry entry");
@@ -158,5 +188,83 @@ mod tests {
             &projects.path().join("missing"),
             "session-1"
         ));
+    }
+
+    fn write_live_entry(config_dir: &std::path::Path, session_id: &str) {
+        let sessions = config_dir.join("sessions");
+        std::fs::create_dir_all(&sessions).expect("create sessions dir");
+        let pid = std::process::id();
+        std::fs::write(
+            sessions.join(format!("{pid}.json")),
+            format!(r#"{{"pid":{pid},"sessionId":"{session_id}"}}"#),
+        )
+        .expect("write live entry");
+    }
+
+    fn write_transcript(config_dir: &std::path::Path, session_id: &str) {
+        let project = config_dir.join("projects/-repo");
+        std::fs::create_dir_all(&project).expect("create project dir");
+        std::fs::write(project.join(format!("{session_id}.jsonl")), "{}\n").expect("write transcript");
+    }
+
+    #[test]
+    fn live_sessions_read_from_given_config_dir() {
+        let first = tempfile::tempdir().expect("tempdir");
+        let second = tempfile::tempdir().expect("tempdir");
+        write_live_entry(first.path(), "session-first");
+        write_live_entry(second.path(), "session-second");
+
+        assert_eq!(
+            live_claude_session_ids(first.path()),
+            HashSet::from(["session-first".to_string()])
+        );
+        assert_eq!(
+            live_claude_session_ids(second.path()),
+            HashSet::from(["session-second".to_string()])
+        );
+    }
+
+    #[test]
+    fn transcript_exists_checks_given_dir() {
+        let first = tempfile::tempdir().expect("tempdir");
+        let second = tempfile::tempdir().expect("tempdir");
+        write_transcript(second.path(), "session-1");
+
+        assert!(!claude_session_transcript_exists(first.path(), "session-1"));
+        assert!(claude_session_transcript_exists(second.path(), "session-1"));
+    }
+
+    #[test]
+    fn panel_config_dir_prefers_env_and_expands_home() {
+        let home = PathBuf::from("/home/x");
+        let mut env = BTreeMap::new();
+        assert_eq!(claude_config_dir_for_env(&env, &home), PathBuf::from("/home/x/.claude"));
+
+        env.insert("CLAUDE_CONFIG_DIR".to_string(), "~/.claude-work".to_string());
+        assert_eq!(
+            claude_config_dir_for_env(&env, &home),
+            PathBuf::from("/home/x/.claude-work")
+        );
+
+        env.insert("CLAUDE_CONFIG_DIR".to_string(), "/srv/claude".to_string());
+        assert_eq!(claude_config_dir_for_env(&env, &home), PathBuf::from("/srv/claude"));
+
+        env.insert("CLAUDE_CONFIG_DIR".to_string(), "  ".to_string());
+        assert_eq!(claude_config_dir_for_env(&env, &home), PathBuf::from("/home/x/.claude"));
+    }
+
+    #[test]
+    fn transcript_probe_follows_panel_env_dir() {
+        let other = tempfile::tempdir().expect("tempdir");
+        write_transcript(other.path(), "session-9");
+        let env = BTreeMap::from([(
+            "CLAUDE_CONFIG_DIR".to_string(),
+            other.path().to_string_lossy().into_owned(),
+        )]);
+
+        let exists = claude_transcript_exists_for_env(&env);
+
+        assert!(exists("session-9"));
+        assert!(!exists("session-10"));
     }
 }

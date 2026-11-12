@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::agent_detect::{RunningAgent, detect_running_agent};
 use crate::board::{Board, WorkspaceLayout};
-use crate::config::{Config, TerminalConfig, WindowConfig, WorkspaceConfig};
+use crate::config::{ClaudeProfile, Config, TerminalConfig, WindowConfig, WorkspaceConfig};
 use crate::error::{Error, Result};
 use crate::layout::workspace_slot_width;
 use crate::panel::{PanelKind, PanelOptions, PanelResume};
@@ -18,7 +18,7 @@ use crate::terminal::Terminal;
 use crate::view::CanvasViewState;
 
 pub use agent_sessions::{AgentSessionCatalog, AgentSessionRecord, most_recent_unclaimed_session_for};
-pub use claude_live_sessions::{claude_session_transcript_exists, live_claude_session_ids};
+pub use claude_live_sessions::{claude_config_dir_for_env, claude_transcript_exists_for_env, live_claude_session_ids};
 
 const RUNTIME_STATE_VERSION: u32 = 2;
 const DEFAULT_ROWS: u16 = 24;
@@ -207,7 +207,7 @@ impl RuntimeState {
 
     #[must_use]
     pub fn from_board(board: &Board, window: WindowConfig, canvas_view: CanvasViewState) -> Self {
-        Self::from_board_with_detached_workspaces(board, window, canvas_view, Vec::new())
+        Self::from_board_with_detached_workspaces(board, window, canvas_view, Vec::new(), &[])
     }
 
     #[must_use]
@@ -216,6 +216,7 @@ impl RuntimeState {
         window: WindowConfig,
         canvas_view: CanvasViewState,
         detached_workspaces: Vec<DetachedWorkspaceState>,
+        claude_profiles: &[ClaudeProfile],
     ) -> Self {
         let mut workspaces: Vec<WorkspaceState> = board
             .workspaces
@@ -267,7 +268,9 @@ impl RuntimeState {
                             running_agent: if panel.kind == PanelKind::Shell
                                 && panel.terminal_title.to_lowercase().contains("claude")
                             {
-                                panel.child_pid().and_then(detect_running_agent)
+                                panel
+                                    .child_pid()
+                                    .and_then(|pid| detect_running_agent(pid, claude_profiles))
                             } else {
                                 None
                             },
@@ -1243,6 +1246,7 @@ workspaces: []
             WindowConfig::default(),
             CanvasViewState::new([18.0, -12.0], 1.25),
             detached_workspaces.clone(),
+            &[],
         );
 
         assert_eq!(state.detached_workspaces.len(), 1);
