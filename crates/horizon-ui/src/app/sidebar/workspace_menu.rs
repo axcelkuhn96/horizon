@@ -46,6 +46,7 @@ pub(super) enum WorkspaceMenuAction {
     Rename(WorkspaceId),
     NewTerminal { workspace: WorkspaceId, preset: usize },
     NewWorktree(WorkspaceId),
+    RecentSessions(WorkspaceId),
     SendToAll(WorkspaceId),
     SaveAsTemplate(WorkspaceId),
     RequestDelete(WorkspaceId),
@@ -267,6 +268,10 @@ pub(super) fn show_items(
         chosen = Some(WorkspaceMenuAction::NewWorktree(workspace));
     }
 
+    if menu_row(ui, &MenuRow::new("Recent Claude sessions\u{2026}")).clicked() {
+        chosen = Some(WorkspaceMenuAction::RecentSessions(workspace));
+    }
+
     if menu_row(ui, &MenuRow::new("Send to all Claudes\u{2026}")).clicked() {
         chosen = Some(WorkspaceMenuAction::SendToAll(workspace));
     }
@@ -410,6 +415,7 @@ impl HorizonApp {
                 }
             }
             WorkspaceMenuAction::NewWorktree(workspace) => self.open_new_worktree(ctx, workspace, None),
+            WorkspaceMenuAction::RecentSessions(workspace) => self.open_claude_sessions(ctx, workspace),
             WorkspaceMenuAction::SendToAll(workspace) => self.open_send_to_workspace(workspace),
             WorkspaceMenuAction::SaveAsTemplate(workspace) => match self.save_workspace_as_template(workspace) {
                 Ok(saved) => {

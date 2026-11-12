@@ -4,6 +4,7 @@ use std::path::Path;
 
 use horizon_core::PresetConfig;
 use horizon_core::agent_detect::default_claude_config_dir;
+use horizon_core::claude_sessions::resume_command_args;
 
 use super::QuickStartMode;
 
@@ -84,6 +85,33 @@ pub(super) fn quick_start_command(
     home: &Path,
     syntax: ShellSyntax,
 ) -> Option<String> {
+    command_line(preset, mode.flag().as_slice(), home, syntax)
+}
+
+/// The command line that resumes the session `session_id` of the derived profile `preset`,
+/// started in `cwd` (Claude only finds a transcript from the directory it ran in): `cd` first,
+/// then the same line [`quick_start_command`] builds, ending in `--resume <id>`. `None` when the
+/// id is not a UUID, or `cwd`, the dir, binary or an arg holds a character that cannot be quoted
+/// safely. A failed `cd` leaves the shell where it was and Claude reports the missing session.
+#[must_use]
+pub(super) fn resume_session_command(
+    preset: &PresetConfig,
+    session_id: &str,
+    cwd: &Path,
+    home: &Path,
+    syntax: ShellSyntax,
+) -> Option<String> {
+    let resume = resume_command_args(session_id).ok()?;
+    let tail: Vec<&str> = resume.iter().map(String::as_str).collect();
+    let line = command_line(preset, &tail, home, syntax)?;
+    let dir = syntax.quote(cwd.to_str()?)?;
+    Some(match syntax {
+        ShellSyntax::Posix => format!("cd {dir}; {line}"),
+        ShellSyntax::PowerShell => format!("Set-Location -LiteralPath {dir}; {line}"),
+    })
+}
+
+fn command_line(preset: &PresetConfig, tail: &[&str], home: &Path, syntax: ShellSyntax) -> Option<String> {
     let config_dir = preset
         .env
         .get(CONFIG_DIR_ENV)
@@ -105,7 +133,7 @@ pub(super) fn quick_start_command(
     for arg in &preset.args {
         words.push(syntax.word(arg)?);
     }
-    words.extend(mode.flag().map(str::to_owned));
+    words.extend(tail.iter().map(|word| (*word).to_owned()));
     let line = words.join(" ");
     if syntax == ShellSyntax::PowerShell
         && let Some(dir) = config_dir
@@ -310,5 +338,31 @@ mod tests {
             powershell(&preset(None, Some("claude"), &["a,b"]), QuickStartMode::New).as_deref(),
             Some("claude 'a,b'")
         );
+    }
+
+    #[test]
+    fn quick_start_command_resume_id_quotes_dir_and_validates_uuid() {
+        const ID: &str = "f054f32b-7840-4c95-9f84-e61f37db5f5c";
+        let preset = preset(Some("/home/u/.claude-conta2"), Some("claude"), &[]);
+        let run =
+            |id: &str, cwd: &str, syntax| resume_session_command(&preset, id, Path::new(cwd), Path::new(HOME), syntax);
+
+        assert_eq!(
+            run(ID, "/home/u/proj wt", ShellSyntax::Posix).as_deref(),
+            Some(
+                "cd '/home/u/proj wt'; env 'CLAUDE_CONFIG_DIR=/home/u/.claude-conta2' claude --resume f054f32b-7840-4c95-9f84-e61f37db5f5c"
+            )
+        );
+        assert!(run(ID, "/home/u/p", ShellSyntax::PowerShell).is_some_and(|line| {
+            line.starts_with("Set-Location -LiteralPath '/home/u/p'; ") && line.contains("--resume")
+        }));
+        assert_eq!(run("$(reboot)", "/home/u/p", ShellSyntax::Posix), None, "not a UUID");
+        assert_eq!(run(&format!("{ID};reboot"), "/home/u/p", ShellSyntax::Posix), None);
+        assert_eq!(
+            run(ID, "/home/u/it's", ShellSyntax::Posix),
+            None,
+            "unquotable directory"
+        );
+        assert_eq!(run(ID, "/home/u/new\nline", ShellSyntax::Posix), None);
     }
 }

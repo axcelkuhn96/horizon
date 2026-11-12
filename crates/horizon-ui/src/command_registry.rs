@@ -48,6 +48,8 @@ pub enum CommandId {
     // Claude
     /// Open the Claude profile launcher overlay.
     OpenClaudeLauncher,
+    /// Open the recent Claude sessions of the active workspace.
+    OpenRecentSessions,
     /// Paste the saved prompt at this index of the effective list into the focused terminal.
     InsertPrompt(usize),
     /// Like [`Self::InsertPrompt`], then press Enter.
@@ -204,6 +206,15 @@ fn global_commands(shortcuts: &AppShortcuts, primary_label: &str) -> Vec<Command
             shortcuts.claude_launcher.display_label(primary_label),
             &["claude", "session", "profile", "account", "launch"],
         ),
+        CommandEntry {
+            id: CommandId::OpenRecentSessions,
+            label: "Recent Claude sessions".into(),
+            shortcut: None,
+            keywords: ["claude", "session", "resume", "history", "recent", "continue"]
+                .iter()
+                .map(|keyword| (*keyword).into())
+                .collect(),
+        },
         command_entry(
             CommandId::ToggleSettings,
             "Settings",
@@ -244,6 +255,11 @@ mod tests {
     #[test]
     fn action_commands_all_have_shortcuts() {
         for entry in action_commands(&AppShortcuts::default(), "Ctrl") {
+            if entry.id == CommandId::OpenRecentSessions {
+                // Reachable from the palette and the sidebar menu; no key of its own.
+                assert!(entry.shortcut.is_none());
+                continue;
+            }
             assert!(entry.shortcut.is_some(), "entry '{}' has no shortcut", entry.label);
         }
     }

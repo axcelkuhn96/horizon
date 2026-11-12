@@ -265,7 +265,7 @@ impl HorizonApp {
         }
     }
 
-    fn focus_panel_from_toast(&mut self, ctx: &Context, panel_id: PanelId) {
+    pub(in crate::app) fn focus_panel_from_toast(&mut self, ctx: &Context, panel_id: PanelId) {
         if self.board.panel(panel_id).is_none() {
             return;
         }

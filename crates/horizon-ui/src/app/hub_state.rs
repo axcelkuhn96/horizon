@@ -11,6 +11,7 @@ use super::account_badge::AccountBadgeCache;
 use super::agent_status_ui::StatusUi;
 use super::claude_launcher::ClaudeLauncherState;
 use super::claude_quick_start::QuickStartUi;
+use super::claude_sessions::SessionsUi;
 use super::hub_toast::HubToasts;
 use super::hub_ui;
 use super::link::{LinkUiState, LinkVisual};
@@ -69,6 +70,8 @@ pub(super) struct HubState {
     pub(super) alerts: AlertTracker,
     /// New-worktree and cleanup dialogs, their worker channel and notice.
     pub(super) worktree_ui: WorktreeUi,
+    /// Recent Claude sessions modal, its scanner and the session-to-account index.
+    pub(super) sessions: SessionsUi,
 }
 
 impl HubState {

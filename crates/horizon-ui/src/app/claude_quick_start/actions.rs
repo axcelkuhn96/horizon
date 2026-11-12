@@ -13,7 +13,7 @@ use crate::app::claude_launcher::{RowUsage, claude_profile_names, find_profile_p
 use crate::app::hub_ui;
 use crate::theme;
 
-use super::command::{ShellSyntax, quick_start_command};
+use super::command::{ShellSyntax, quick_start_command, resume_session_command};
 use super::state::{Expanded, Row};
 use super::titlebar;
 use super::{
@@ -289,6 +289,53 @@ impl HorizonApp {
         });
         if let LinkResponse::Err { message, .. } = response {
             tracing::warn!(%message, "quick start could not write to the panel");
+            return Err(StartFailure::WriteFailed);
+        }
+        self.hub.quick_start.busy.forget(panel_id);
+        self.board.focus(panel_id);
+        ctx.request_repaint();
+        Ok(())
+    }
+
+    /// Types `cd <cwd>; claude --resume <id>` (under `profile_name`) into the idle local shell
+    /// `panel_id`, the way [`Self::run_claude_quick_start`] types its line. Refuses a busy,
+    /// exited or remote shell, an id that is not a UUID and a directory that cannot be quoted.
+    pub(in crate::app) fn resume_session_in_shell(
+        &mut self,
+        ctx: &Context,
+        panel_id: PanelId,
+        profile_name: &str,
+        session_id: &str,
+        cwd: &std::path::Path,
+    ) -> Result<(), StartFailure> {
+        let preset = find_profile_preset(&self.presets, profile_name)
+            .cloned()
+            .ok_or(StartFailure::NoPreset)?;
+        let panel = self.board.panel(panel_id).ok_or(StartFailure::Exited)?;
+        let is_ssh = panel.kind == PanelKind::Ssh || panel.ssh_connection.is_some();
+        let exited = panel.child_exited();
+        let busy = !exited && panel.child_pid().is_some_and(titlebar::shell_is_busy);
+        match Availability::of(panel.kind, is_ssh, busy, exited) {
+            Availability::Ready => {}
+            Availability::Busy => return Err(StartFailure::Busy),
+            Availability::Exited => return Err(StartFailure::Exited),
+        }
+        let home = std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(std::path::PathBuf::from)
+            .unwrap_or_default();
+        let command = resume_session_command(&preset, session_id, cwd, &home, ShellSyntax::NATIVE)
+            .ok_or(StartFailure::Unquotable)?;
+        let target = panel.local_id.clone();
+        let response = self.board.handle_link_request(LinkRequest::Send {
+            target: SendTarget::panel(target),
+            text: command,
+            enter: true,
+            from: None,
+            from_id: None,
+        });
+        if let LinkResponse::Err { message, .. } = response {
+            tracing::warn!(%message, "session resume could not write to the panel");
             return Err(StartFailure::WriteFailed);
         }
         self.hub.quick_start.busy.forget(panel_id);

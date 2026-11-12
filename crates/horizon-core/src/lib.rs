@@ -5,6 +5,7 @@ pub mod agent_status;
 mod agents;
 mod attention;
 mod board;
+pub mod claude_sessions;
 pub mod claude_usage;
 mod config;
 mod config_migration;
@@ -82,8 +83,8 @@ pub use remote_hosts::{
 };
 pub use runtime_state::{
     AgentSessionBinding, AgentSessionCatalog, AgentSessionRecord, DetachedWorkspaceState, PanelState, PanelTemplateRef,
-    RuntimeState, UiPrefs, WorkspaceState, WorkspaceTemplateRef, claude_config_dir_for_env, live_claude_session_ids,
-    most_recent_unclaimed_session_for, new_local_id,
+    RuntimeState, UiPrefs, WorkspaceState, WorkspaceTemplateRef, claude_config_dir_for_env,
+    claude_transcript_exists_for_env, live_claude_session_ids, most_recent_unclaimed_session_for, new_local_id,
 };
 pub use search::{PanelSearchResult, SearchMatch, SearchOptions, SearchResults, search_board};
 pub use session_store::{
