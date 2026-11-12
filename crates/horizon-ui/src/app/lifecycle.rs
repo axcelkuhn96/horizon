@@ -386,6 +386,7 @@ impl HorizonApp {
         self.poll_config_reload();
         self.poll_claude_usage(ctx);
         self.poll_agent_status();
+        self.note_panel_sessions(ctx);
         self.poll_update_check();
         self.maybe_start_update_check();
 
@@ -959,6 +960,7 @@ impl HorizonApp {
         self.render_dir_picker(ctx);
         self.render_command_palette(ctx);
         self.render_claude_launcher(ctx);
+        self.render_claude_sessions(ctx);
         self.render_send_to_panel(ctx);
         self.render_worktree_dialogs(ctx);
         self.poll_link(ctx);

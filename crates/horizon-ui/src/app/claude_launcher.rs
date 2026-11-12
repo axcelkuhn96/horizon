@@ -48,10 +48,10 @@ const HEADER_WORKSPACE_WIDTH: f32 = 160.0;
 const QUICK_PICK_COUNT: usize = 9;
 
 /// Pixels-per-point and available width a galley was laid out for.
-type LayoutKey = (u32, u32);
+pub(super) type LayoutKey = (u32, u32);
 
 /// Elided galley kept across frames; relaid out only when its [`LayoutKey`] changes.
-struct CachedGalley {
+pub(super) struct CachedGalley {
     key: LayoutKey,
     galley: Arc<Galley>,
 }
@@ -152,6 +152,8 @@ enum LauncherAction {
     /// The Auto entry: the profile is chosen when the action is applied.
     LaunchAuto,
     OpenSettings,
+    /// `R`: the recent sessions of the active workspace.
+    OpenRecent,
 }
 
 /// One `5h` / `7d` line of a row's usage column, formatted when the rows are built.
@@ -398,6 +400,7 @@ impl HorizonApp {
             }
             LauncherAction::LaunchAuto => self.launch_claude_auto(ctx),
             LauncherAction::OpenSettings => self.open_settings_claude_tab(),
+            LauncherAction::OpenRecent => self.open_claude_sessions_for_active(ctx),
             LauncherAction::None if !outcome.dismissed => self.hub.claude_launcher = Some(state),
             LauncherAction::None => {}
         }
@@ -409,6 +412,9 @@ impl HorizonApp {
 fn handle_launcher_keys(ctx: &Context, state: &mut ClaudeLauncherState) -> LauncherAction {
     let len = state.rows.len();
     ctx.input_mut(|input| {
+        if input.consume_key(Modifiers::NONE, Key::R) {
+            return LauncherAction::OpenRecent;
+        }
         if len == 0 {
             return if input.consume_key(Modifiers::NONE, Key::Enter) {
                 LauncherAction::OpenSettings
@@ -481,7 +487,7 @@ fn show_launcher_contents(ui: &mut Ui, state: &mut ClaudeLauncherState) -> Launc
     action
 }
 
-fn layout_key(painter: &Painter, width: f32) -> LayoutKey {
+pub(super) fn layout_key(painter: &Painter, width: f32) -> LayoutKey {
     (painter.ctx().pixels_per_point().to_bits(), width.to_bits())
 }
 
@@ -540,6 +546,7 @@ fn paint_footer(ui: &mut Ui, width: f32, has_auto: bool) {
     if has_auto {
         hub_ui::kbd_hint(&mut footer, "0", "auto");
     }
+    hub_ui::kbd_hint(&mut footer, "R", "recent");
     hub_ui::kbd_hint(&mut footer, "Esc", "close");
 }
 
@@ -748,7 +755,7 @@ fn paint_usage_column(painter: &Painter, rect: Rect, usage: &RowUsage) {
 }
 
 /// [`hub_ui::elided`] reused from `slot` while `key` is unchanged.
-fn cached_elided(
+pub(super) fn cached_elided(
     slot: &mut Option<CachedGalley>,
     key: LayoutKey,
     painter: &Painter,

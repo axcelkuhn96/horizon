@@ -220,6 +220,7 @@ impl HorizonApp {
             CommandId::SearchFileContents => self.open_explorer_search(),
             CommandId::PasteIntoExplorer => self.paste_files_into_explorer(),
             CommandId::OpenClaudeLauncher => self.toggle_claude_launcher(),
+            CommandId::OpenRecentSessions => self.open_claude_sessions_for_active(ctx),
             CommandId::InsertPrompt(index) => self.insert_prompt_by_index(ctx, index, false),
             CommandId::InsertPromptAndSend(index) => self.insert_prompt_by_index(ctx, index, true),
             CommandId::ToggleScrollPan => {

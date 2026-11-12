@@ -6,6 +6,7 @@ mod canvas;
 mod claude_auto;
 mod claude_launcher;
 mod claude_quick_start;
+mod claude_sessions;
 mod detached_viewports;
 mod file_drop;
 mod file_drop_highlight;
