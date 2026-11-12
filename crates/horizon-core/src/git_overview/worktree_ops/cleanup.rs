@@ -24,9 +24,13 @@ const PROTECTED_BRANCHES: [&str; 5] = ["main", "master", "develop", "dev", "trun
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CleanupReason {
-    /// The branch tip is contained in the default branch or the upstream, and
+    /// The branch tip is contained in a default branch (local or `origin`'s), and
     /// is not simply the default branch's own tip.
     Merged,
+    /// The branch tip is contained only in its own upstream: pushed, but not
+    /// merged into the default branch. Never pre-ticked and its branch is never
+    /// deleted, so the work stays reachable on the branch.
+    Pushed,
     /// The branch tip is exactly the default branch's tip: a branch with no
     /// commits of its own yet (or one merged by fast-forward). Never offered
     /// pre-ticked.
@@ -42,6 +46,7 @@ impl CleanupReason {
     pub fn label(self) -> &'static str {
         match self {
             Self::Merged => "merged",
+            Self::Pushed => "pushed, not merged",
             Self::Fresh => "no commits yet",
             Self::Prunable => "prunable",
             Self::Orphan => "orphan",
@@ -269,12 +274,11 @@ impl<'r> Context<'r> {
         }
     }
 
-    fn is_merged(&self, tip: Oid, upstream: Option<Oid>) -> bool {
-        self.default_tips
-            .iter()
-            .copied()
-            .chain(upstream)
-            .any(|base| contains(self.main, base, tip))
+    /// `tip` is contained in a default branch. A branch's own upstream does not count
+    /// (pushed is not merged); an upstream that is the default branch is already among
+    /// the default tips.
+    fn is_merged(&self, tip: Oid) -> bool {
+        self.default_tips.iter().any(|base| contains(self.main, *base, tip))
     }
 
     /// `tip` is the very tip of a default branch.
@@ -472,13 +476,16 @@ fn classify_valid(
                     .ok()
                     .and_then(|upstream| upstream.get().peel_to_commit().ok())
                     .map(|commit| commit.id());
-                if !ctx.is_merged(tip, upstream) {
-                    return None;
-                }
-                if ctx.at_default_tip(tip) {
-                    CleanupReason::Fresh
+                if ctx.is_merged(tip) {
+                    if ctx.at_default_tip(tip) {
+                        CleanupReason::Fresh
+                    } else {
+                        CleanupReason::Merged
+                    }
+                } else if upstream.is_some_and(|base| contains(ctx.main, base, tip)) {
+                    CleanupReason::Pushed
                 } else {
-                    CleanupReason::Merged
+                    return None;
                 }
             }
             Err(error) if error.code() == ErrorCode::NotFound => CleanupReason::Orphan,
@@ -486,7 +493,7 @@ fn classify_valid(
         }
     } else {
         let head = repo.refname_to_id("HEAD").ok()?;
-        if ctx.is_merged(head, None) {
+        if ctx.is_merged(head) {
             if ctx.at_default_tip(head) {
                 CleanupReason::Fresh
             } else {
@@ -709,19 +716,13 @@ fn delete_merged_branch(ctx: &Context<'_>, candidate: &CleanupCandidate) -> bool
     }
 }
 
-/// The branch tip is contained in a default branch or in its upstream, read now.
+/// The branch tip is contained in a default branch, read now (its own upstream does not count).
 fn branch_still_merged(main: &Repository, branch: &git2::Branch<'_>) -> bool {
     let Ok(tip) = branch.get().peel_to_commit().map(|commit| commit.id()) else {
         return false;
     };
-    let upstream = branch
-        .upstream()
-        .ok()
-        .and_then(|upstream| upstream.get().peel_to_commit().ok())
-        .map(|commit| commit.id());
     default_branch_tips(main)
         .into_iter()
-        .chain(upstream)
         .any(|base| contains(main, base, tip))
 }
 
@@ -757,5 +758,24 @@ mod tests {
         commit(&repo, "refs/heads/topic", Some(base), "late work");
         let topic = repo.find_branch("topic", BranchType::Local).expect("topic");
         assert!(!branch_still_merged(&repo, &topic), "the new commit is not in main");
+    }
+
+    #[test]
+    fn a_pushed_but_unmerged_branch_is_not_merged() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = Repository::init(tmp.path()).expect("init");
+        let base = commit(&repo, "refs/heads/main", None, "base");
+        let work = commit(&repo, "refs/heads/feature", Some(base), "feature work");
+        repo.reference("refs/remotes/origin/feature", work, true, "pushed")
+            .expect("remote ref");
+        let mut config = repo.config().expect("config");
+        config.set_str("branch.feature.remote", "origin").expect("remote");
+        config
+            .set_str("branch.feature.merge", "refs/heads/feature")
+            .expect("merge");
+
+        let feature = repo.find_branch("feature", BranchType::Local).expect("feature");
+        assert!(feature.upstream().is_ok(), "the fixture has an upstream");
+        assert!(!branch_still_merged(&repo, &feature), "pushed is not merged");
     }
 }

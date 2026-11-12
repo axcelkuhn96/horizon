@@ -410,29 +410,55 @@ fn classify_prunable_when_dir_missing() {
     assert!(candidate.safe());
 }
 
-#[test]
-fn classify_default_branch_unknown_blocks_merged_reason() {
-    let fixture = Fixture::with_head("trunk");
-    let path = fixture.worktree("done");
-    // Merged only through its upstream: no `main`, `master` or `origin/HEAD` exists.
+/// Gives branch `name` an `origin/<name>` upstream at `oid` (a pushed branch).
+fn push_stub(fixture: &Fixture, name: &str, oid: Oid) {
     fixture
         .repo
         .remote("origin", "https://example.invalid/x.git")
         .expect("remote");
     fixture
         .repo
-        .reference("refs/remotes/origin/done", fixture.head_oid(), true, "test")
+        .reference(&format!("refs/remotes/origin/{name}"), oid, true, "test")
         .expect("remote ref");
     let mut config = fixture.repo.config().expect("config");
-    config.set_str("branch.done.remote", "origin").expect("remote cfg");
     config
-        .set_str("branch.done.merge", "refs/heads/done")
+        .set_str(&format!("branch.{name}.remote"), "origin")
+        .expect("remote cfg");
+    config
+        .set_str(&format!("branch.{name}.merge"), &format!("refs/heads/{name}"))
         .expect("merge cfg");
+}
+
+#[test]
+fn classify_pushed_only_branch_is_not_merged_when_default_is_unknown() {
+    let fixture = Fixture::with_head("trunk");
+    let path = fixture.worktree("done");
+    // Contained only in its own upstream: no `main`, `master` or `origin/HEAD` exists.
+    push_stub(&fixture, "done", fixture.head_oid());
 
     let candidate = fixture.candidate(&path);
 
-    assert_eq!(candidate.reason, CleanupReason::Merged);
-    assert_eq!(candidate.blockers, [Blocker::DefaultBranchUnknown]);
+    assert_eq!(candidate.reason, CleanupReason::Pushed);
+    assert!(!candidate.preselect());
+}
+
+#[test]
+fn classify_pushed_unmerged_feature_branch_is_pushed_not_merged() {
+    let fixture = Fixture::new();
+    let path = fixture.worktree("feature");
+    let checkout = Repository::open(&path).expect("open");
+    let work = commit_file(&checkout, "feature.txt", "work\n");
+    fixture.advance_main();
+    push_stub(&fixture, "feature", work);
+
+    let candidate = fixture.candidate(&path);
+
+    assert_eq!(candidate.reason, CleanupReason::Pushed);
+    assert!(candidate.safe(), "blockers: {:?}", candidate.blockers);
+    assert!(!candidate.preselect(), "a pushed branch is never pre-ticked");
+    let statuses = remove(&fixture, &[path.as_path()], true);
+    assert_eq!(statuses, [RemoveStatus::Removed { branch_deleted: false }]);
+    assert!(fixture.branch_exists("feature"), "the pushed branch is kept");
 }
 
 // --- remove -------------------------------------------------------------------------

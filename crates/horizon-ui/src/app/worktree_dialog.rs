@@ -20,7 +20,7 @@ use horizon_core::git_overview::{
     BranchInfo, CleanupCandidate, Created, RemoveOutcome, WorktreeError, classify_cleanup, create_worktree,
     list_branches, remove_worktrees,
 };
-use horizon_core::{PanelKind, PresetConfig, WorkspaceId};
+use horizon_core::{PanelKind, PresetConfig, Terminal, WorkspaceId};
 
 use super::HorizonApp;
 use super::claude_auto::{AUTO_NAME, MIN_PROFILES_FOR_AUTO};
@@ -245,6 +245,13 @@ impl HorizonApp {
             .filter_map(|workspace| workspace.cwd.clone())
             .collect();
         paths.extend(self.board.panels.iter().filter_map(|panel| panel.launch_cwd.clone()));
+        // A shell that `cd`-ed into a worktree is using it, whatever it was launched with.
+        paths.extend(
+            self.board
+                .panels
+                .iter()
+                .filter_map(|panel| panel.terminal().and_then(Terminal::current_cwd)),
+        );
         paths.sort();
         paths.dedup();
         paths

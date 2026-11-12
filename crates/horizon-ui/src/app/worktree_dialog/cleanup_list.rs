@@ -81,6 +81,9 @@ impl CleanupRow {
                 "\nIts branch is at the default branch's tip: no commits of its own yet (or merged by fast-forward).",
             ),
             CleanupReason::Prunable => tooltip.push_str("\nThe folder is already gone: only git's record is removed."),
+            CleanupReason::Pushed => {
+                tooltip.push_str("\nPushed to its upstream but not merged into the default branch: its branch is kept.")
+            }
             CleanupReason::Merged | CleanupReason::Orphan => {}
         }
         if self.candidate.ignored.any() {
@@ -422,7 +425,7 @@ fn reason_color(reason: CleanupReason) -> Color32 {
     match reason {
         CleanupReason::Merged => theme::PALETTE_GREEN(),
         CleanupReason::Prunable => theme::FG_DIM(),
-        CleanupReason::Orphan | CleanupReason::Fresh => theme::PALETTE_YELLOW(),
+        CleanupReason::Orphan | CleanupReason::Fresh | CleanupReason::Pushed => theme::PALETTE_YELLOW(),
     }
 }
 
