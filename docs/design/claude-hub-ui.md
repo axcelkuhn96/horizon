@@ -203,3 +203,25 @@ Badge "message received" (titlebar do painel receptor):
 | estado de credencial na aba Claude | `usage_version` |
 | lista de alvos do Send | ao abrir o diálogo |
 | contagem/nome na confirmação de Delete | ao abrir o modal |
+
+## 7. Git e worktrees na sidebar
+
+Cada workspace com `cwd` dentro de um repo git ganha, logo abaixo da linha de cabeçalho (32 px), uma **linha git** compacta de 20 px e, expansível, uma sub-lista **worktrees**. Workspace sem repo: nenhuma linha (zero altura). Dados vêm de `RepoOverview` (Task 18); a UI só lê strings/galleys prontos.
+
+```
+ ▾ api-core                          ← cabeçalho existente
+   ⎇ feat/claude-hub  ↑2 ↓1  ● 5     ← linha git 20h, indent 28
+   ▸ worktrees 3                     ← toggle 20h (só se há >1 worktree)
+ ▾ api-core                          ← expandido:
+   ⎇ feat/claude-hub  ↑2 ↓1  ● 5
+   ▾ worktrees 3
+       main            ../api-core        ●   ← linha 22h, indent 40
+     ▌ feat/claude-hub ../api-core-hub        ← barra 3 px ACCENT = atual
+       fix/login       ../api-core-fix  🔒
+```
+- **Linha git:** glifo de branch pintado (círculo r=2 + 2 segmentos, 1.2 px, `FG_DIM()`) | nome 10.5 `FG_SOFT()` (máx ~22 chars + `…`, meio-truncado) | `↑n` `PALETTE_GREEN()` e `↓n` `PALETTE_YELLOW()` monospace 10, omitidos se 0 ou sem upstream | `● n` dirty: dot r=3 `PALETTE_YELLOW()` + n monospace 10 `FG_SOFT()`; limpo = nada (sem dot verde: cor só quando importa). Setas pintadas como triângulos 5x7, não glifos.
+- **Estados:** detached → nome `HEAD @ <7 hex>` em itálico `FG_DIM()`; sem upstream → sem setas; repo sem commits → `(no commits)` `FG_DIM()`; erro de leitura → `git?` `FG_DIM()` com tooltip do erro; aguardando 1º dado → linha oculta (sem placeholder, sem pulo > 20 px). Painel recolhido na sidebar: só o dot dirty no cabeçalho.
+- **Linha de worktree:** branch 10.5 `FG()` (detached: `HEAD @ abc1234` `FG_DIM`), caminho curto 10 monospace `FG_DIM()` relativo ao pai do repo principal (`../api-core-fix`; principal = `.`), dot dirty r=3 `PALETTE_YELLOW`, cadeado pintado se `locked`, `prunable` = texto a `alpha 0.55` + pílula `prunable` `FG_DIM`. **current** (cwd do workspace dentro dessa worktree): barra 3 px `ACCENT()` + fill `blend(PANEL_BG_ALT(), ACCENT(), 0.14)`. Hover: fill `PANEL_BG_ALT()`, cursor pointer; foco: anel padrão. Principal listada primeiro, depois ordem alfabética por branch.
+- **Interação:** clique em linha de worktree = abre terminal shell com `cwd` = worktree, dentro do workspace (foco no novo painel). Clique no toggle expande/recolhe (estado por workspace em `HubState`, não persistido). Clique na linha git: sem ação. Menu de contexto da linha de worktree (`context_menu_above_sidebar`, itens 12, altura 26): **Open terminal here**; **Open Claude here ▸** (submenu largura 240, perfis `Claude · <perfil>` com dot de `profile_accent`, mesmo cabeçalho do §5); **New workspace from worktree** (cria workspace nomeado pelo branch com cwd da worktree); separador; **Copy path** (caminho absoluto; linha "Copied" 1.5 s). Worktree `prunable` desabilita as 3 primeiras ações.
+- **Tooltip** (linha git ou de worktree, `on_hover_ui_at_pointer`, largura 300, margin 12): branch 13 strong + pílula `current`/`main`/`locked`; caminho absoluto monospace 10.5 `FG_DIM` (quebra no meio); `upstream origin/main · ↑2 ahead · ↓1 behind`; `5 changed files`; `Updated 12 s ago` 10.5 `FG_DIM`; rodapé 10 `FG_DIM`: `Click: open terminal · Right-click: more`.
+- **Cache (nada por frame):** `git2` roda só no `OverviewPoller` (thread própria, 15 s + `refresh_now`). Ao chegar `RepoOverview`, a UI constrói uma vez `GitLineCache { overview_version, branch_label, badges, worktree_rows: Vec<WorktreeRow{label, short_path, tooltip}> }` por workspace e só reconstrói quando `overview_version` muda ou ppp/tema muda. Sem `request_repaint` periódico: o poller acorda a UI uma vez por resultado diferente do anterior (resultados idênticos são descartados). `refresh_now` ao abrir o menu da worktree e ao focar a janela.

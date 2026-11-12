@@ -61,16 +61,17 @@ These files are edited by several tasks as written. In parallel mode each has ex
 
 | Shared file | Owner | Rule for the others |
 |---|---|---|
-| `crates/horizon-core/src/lib.rs` | Task 0 | Task 0 adds `pub mod claude_usage;` and `pub mod link;`; tasks 1, 7, 10, 13 do not touch `lib.rs` and expose their API by path (`horizon_core::claude_usage::…`, `horizon_core::link::…`, `horizon_core::config::…`); ignore "Modify `lib.rs`" in those tasks |
+| `crates/horizon-core/src/lib.rs` | Task 0 (wave 0), then T18 (wave 2, adds only `pub mod git_overview;`) | Task 0 adds `pub mod claude_usage;` and `pub mod link;`; tasks 1, 7, 10, 13 do not touch `lib.rs` and expose their API by path (`horizon_core::claude_usage::…`, `horizon_core::link::…`, `horizon_core::config::…`); ignore "Modify `lib.rs`" in those tasks |
 | `crates/horizon-core/src/config.rs` | Wave-1 track A (T1→T2→T3), then T5 (wave 2), then T9 (wave 3) — never two at once | Task 0 adds the `mod claude_profiles; mod workspace_template;` lines; Task 10 does not edit `config.rs` |
 | `crates/horizon-core/src/panel.rs`, `panel/spawn.rs`, `runtime_state.rs` | Track A (T2, T4); later T14 (`spawn.rs` only, wave 2) | no other task |
 | `crates/horizon-ui/src/app/mod.rs` | Task 0 (declares `mod claude_launcher; mod usage_chips; mod link;` and the field `pending_delete_workspace: Option<WorkspaceId>`), T5 (field `claude_launcher`, wave 2), T9 (field `claude_usage`, wave 3), T16 (fields `link_server`, `link_badges`, `send_to_panel`, wave 4) | one per wave; T12 uses the Task 0 field and does not edit `app/mod.rs` |
-| `app/lifecycle.rs` | T9 (wave 3), then T16 (wave 4) | never concurrent |
+| `app/lifecycle.rs` | T9 (wave 3), then T16 (wave 4), then T19 (wave 5, git overview poller drain only) | never concurrent |
+| `app/hub_state.rs` | Task 0 creates; each UI task adds its own fields in its wave (T5 w2, T9/T12 w3, T16 w4, T19 w5) | one editor per wave; wave 3 T9 and T12 touch disjoint fields but must not both edit the struct literal in the same commit window — T12 owns `pending_delete_workspace`, T9 the usage fields; merge conflicts resolved by the merger |
 | `app/settings/mod.rs` | Task 0 (adds `SettingsTab::{Claude, Workspaces}`, `ALL: [Self; 6]`, labels, dispatch to `claude::show` / `workspaces::show`, and the editor fields `claude_tab`, `workspaces_tab`) | T6 and T11 only fill their own `settings/claude.rs` / `settings/workspaces.rs`; ignore "Modify `settings/mod.rs`" in those tasks |
 | `command_registry.rs`, `app/actions/command_palette.rs`, `app/actions/pickers.rs`, `shortcuts.rs`, `app/shortcuts.rs`, `app/shortcut_inventory.rs`, `app/settings/shortcuts.rs` | T5 only | no other task |
 | `app/actions.rs` (mod declarations) | Task 0 (declares `mod open_template; mod workspace_templates;`) | T11 creates `actions/open_template.rs`, T12 creates `actions/workspace_templates.rs` |
 | `app/root_chrome.rs`, `app/sidebar/toolbar.rs`, `app/settings/general.rs` | T9 only | no other task |
-| `app/sidebar.rs` | T12 only | no other task |
+| `app/sidebar.rs` | T12 (wave 3), then T19 (wave 5, call sites only) | no other task; never concurrent |
 | `crates/horizon-ui/src/main.rs`, `plugin_install.rs` | T15 only | no other task |
 | `Cargo.toml` / `Cargo.lock` | T8 only | no other task |
 | `app/panels.rs`, `app/panel_chrome.rs` | T16 only | no other task |
@@ -79,6 +80,7 @@ These files are edited by several tasks as written. In parallel mode each has ex
 
 ```
 T0 ─┬─ T1 ─ T2 ─ T3 ─ T4            (track A, sequential: config/panel/runtime_state)
+    ├─ T18                           (git overview core, new files only)
     ├─ T7 ─ T8                       (track B: claude_usage + Cargo.toml)
     └─ T13                           (track C: link pure core)
 
@@ -86,7 +88,8 @@ T3 ─ T5 (launcher)          T1 ─ T6 (settings Claude)
 T2 ─ T10 (template core)    T2+T13 ─ T14 (socket server)    T13 ─ T15 (CLI + skill)
 
 T5+T8 ─ T9 (chips)    T3+T10 ─ T11 (settings Workspaces)    T3+T10 ─ T12 (sidebar menu)
-T14 ─ T16 (drain + panel menu + badge)           all ─ T17
+T14 ─ T16 (drain + panel menu + badge)
+T3+T18 ─ T19 (sidebar git line + worktrees; after T12 and T16 in file order)      all ─ T17
 ```
 
 ### Waves
@@ -95,10 +98,11 @@ T14 ─ T16 (drain + panel menu + badge)           all ─ T17
 |---|---|---|
 | 0 | **Task 0** (wiring), on `feat/claude-hub` directly | single task |
 | 1 | **A:** T1→T2→T3→T4 (sequential inside the track) ‖ **B:** T7→T8 ‖ **C:** T13 | A owns config/panel/runtime_state/agent_detect; B owns `claude_usage/` + `Cargo.toml`; C owns `link/` (pure files) |
-| 2 | **T5** ‖ **T6** ‖ **T10** ‖ **T14** ‖ **T15** | T5: shortcuts/config.rs/palette/pickers/app/mod.rs; T6: `settings/claude.rs`; T10: `config/workspace_template.rs`; T14: `link/server.rs`, `panel/spawn.rs`, `board/link.rs`, `terminal.rs`; T15: `main.rs`, `link_cli.rs`, `plugin_install.rs` — disjoint |
+| 2 | **T5** ‖ **T6** ‖ **T10** ‖ **T14** ‖ **T15** ‖ **T18** | T5: shortcuts/config.rs/palette/pickers/app/mod.rs; T6: `settings/claude.rs`; T10: `config/workspace_template.rs`; T14: `link/server.rs`, `panel/spawn.rs`, `board/link.rs`, `terminal.rs`; T15: `main.rs`, `link_cli.rs`, `plugin_install.rs`; T18: `git_overview/` (new) + the single `pub mod git_overview;` line in `lib.rs` — disjoint |
 | 3 | **T9** ‖ **T11** ‖ **T12** | T9: config.rs (features), general.rs, root_chrome, toolbar, app/mod.rs, lifecycle; T11: `settings/workspaces.rs`, `actions/open_template.rs`; T12: `sidebar.rs`, `sidebar/workspace_menu.rs`, `actions/workspace_templates.rs` — disjoint |
 | 4 | **T16** | needs app/mod.rs + lifecycle.rs after T9 merged |
-| 5 | **T17** | needs everything; single task |
+| 5 | **T19** | touches `sidebar.rs` after T12, `hub_state.rs` and `lifecycle.rs` after T16; consumes T18 and T3 presets |
+| 6 | **T17** | needs everything (also smokes Part E); single task |
 
 ### Rules for parallel execution
 - Task 0 and the post-merge `cargo test --workspace` after each wave are mandatory gates; a failing merge is fixed on `feat/claude-hub` by a `build-fixer` before the next wave is cut.
@@ -122,6 +126,8 @@ T14 ─ T16 (drain + panel menu + badge)           all ─ T17
 | `crates/horizon-ui/src/app/usage_chips.rs` (new) | toolbar chips paint + layout metrics |
 | `crates/horizon-ui/src/app/link.rs`, `link_cli.rs` (new) | UI-thread drain; CLI client |
 | `plugins`: `HorizonHome::claude_plugin_dir()` content | skill `horizon-link/SKILL.md` |
+| `crates/horizon-core/src/git_overview/{mod,model,compute,poller}.rs` (new) | repo + worktree overview domain (git2) |
+| `crates/horizon-ui/src/app/sidebar/git_overview.rs` (new) | sidebar git line, worktrees list, menu, cache |
 
 ---
 
@@ -498,7 +504,54 @@ T14 ─ T16 (drain + panel menu + badge)           all ─ T17
 - [ ] **Step 2:** Write `docs/testing/2026-11-12-claude-hub-smoke.md` (self-contained for another agent): baseline, flows A/B/C/D, edges (expired token, narrow window, zero profiles, ambiguous link target, closed target, 64 KiB payload), persistence/restore (env kept across restart and relaunch), visual regression checklist, perf idle check.
 - [ ] **Step 3:** Execute it: `cargo build`; launch `target/debug/horizon` with `DISPLAY=:1`, note the PID; screenshot only that PID's window (`xwininfo -root -tree` to find the window id for the PID via `xdotool search --pid`, then `import -window <id>` or equivalent); no Playwright/browser. Verify: `/proc/<child>/environ` of a `claude2` panel contains `CLAUDE_CONFIG_DIR=…/.claude-conta2`; socket mode 0600 (`stat -c %a`) and removed after close; `horizon link list/send/read/--no-enter/ambiguous/missing` behaviors; two Claude sessions exchanging a message through the skill (manual, evidence in report); credential mtimes unchanged (`stat -c %Y`) after 2 poll cycles (use manual refresh); `rg -c 'accessToken|refreshToken' ~/.horizon/claude-usage-cache.json` → 0.
 - [ ] **Step 4:** Run full validation including `RUSTFLAGS="-D warnings" cargo test --workspace --features speech` and the pedantic tier (advisory); expected all blocking tiers green.
+- [ ] **Step 4b:** Part E smoke (T18/T19): sidebar shows the git line for a repo workspace (branch, ↑↓, dirty count) and none for a non-repo cwd; a linked worktree appears in the list with the `current` marker when applicable; click opens a shell in the worktree cwd (`pwd`); "Open Claude here" panel has the profile's `CLAUDE_CONFIG_DIR` and the worktree cwd; "New workspace from worktree" and "Copy path" work; `git commit` in the repo updates the line within ~15 s; idle trace shows no continuous repaint from the overview poller. Add the flow to the smoke plan and evidence to the report.
 - [ ] **Step 5:** Delete the smoke plan file; update `docs/architecture/maintainability.md`; commit `docs: sync maintainability notes for claude hub` (smoke plan not committed).
+
+### Task 18: Git overview core (domínio: ; tipo: regra-de-negocio)
+
+**Files:**
+- Create: `crates/horizon-core/src/git_overview/{mod.rs,model.rs,compute.rs,poller.rs}`
+- Modify: `crates/horizon-core/src/lib.rs` (single line `pub mod git_overview;` plus re-exports are NOT added; API used by path `horizon_core::git_overview::…`)
+- Test: inline `#[cfg(test)]` in `compute.rs` and `poller.rs`; temp repos built with `git2` (no shell-out, no `git` binary)
+
+**Interfaces:**
+- Consumes: `git2` (already a dependency, no default features), `thiserror`, `tracing`
+- Produces:
+  - `pub struct WorktreeInfo { pub path: PathBuf, pub branch: Option<String>, pub is_main: bool, pub is_current: bool, pub locked: bool, pub prunable: bool, pub dirty_count: usize }` (`branch: None` = detached; `Clone, Debug, PartialEq, Eq`)
+  - `pub struct RepoOverview { pub repo_root: PathBuf, pub branch: Option<String>, pub detached: bool, pub dirty_count: usize, pub upstream: Option<String>, pub ahead: usize, pub behind: usize, pub worktrees: Vec<WorktreeInfo> }` (`Clone, Debug, PartialEq, Eq`; `repo_root` = main working tree; worktrees ordered main first, then by branch name)
+  - `#[derive(Debug, thiserror::Error)] pub enum GitOverviewError { Git(#[from] git2::Error), Io(#[from] std::io::Error) }`
+  - `pub fn compute_repo_overview(cwd: &Path) -> Result<Option<RepoOverview>, GitOverviewError>`: `Repository::discover`; not a repo → `Ok(None)`; bare repo → `Ok(None)`; unborn HEAD → `branch` from `HEAD` symbolic target, no upstream; ahead/behind via `graph_ahead_behind(local_oid, upstream_oid)` only when the branch has a configured upstream that resolves; `dirty_count` from `statuses` (include untracked, exclude ignored); worktrees from `Repository::worktrees()` + `find_worktree` (`is_locked`, `validate` → `prunable`) plus the main tree; each worktree's dirty count and branch opened with `Repository::open_from_worktree` (failure → that entry gets `dirty_count: 0`, never fails the whole call); `is_current` = canonicalized `cwd` starts with the canonicalized worktree path (longest match wins when worktrees nest)
+  - `pub struct OverviewPoller` with `pub fn start(cwds: Vec<(K, PathBuf)>, interval: Duration) -> Self` generic over `K: Clone + Eq + Hash + Send + 'static` (the UI passes `WorkspaceId`), `pub fn set_cwds(&self, cwds: Vec<(K, PathBuf)>)`, `pub fn refresh_now(&self)`, `pub fn try_recv(&self) -> Option<(K, Result<Option<RepoOverview>, GitOverviewError>)>`, `Drop` signals stop and joins; single `std::thread`; default interval constant `pub const DEFAULT_INTERVAL: Duration = Duration::from_secs(15)`; wakes via `mpsc::Receiver::recv_timeout` on a command channel; skips sending a result equal to the previous one for that key; a panic-free loop (errors are sent as results, never logged per tick above `debug`)
+
+- [ ] **Step 1: Failing tests:** `non_repo_returns_none`, `plain_repo_reports_branch_and_clean`, `dirty_count_counts_modified_and_untracked_not_ignored`, `detached_head_sets_detached_and_no_branch`, `unborn_head_reports_branch_without_error`, `upstream_ahead_behind_counts` (two commits ahead, one behind a local `refs/remotes/origin/main` fixture with `branch.main.remote/merge` config), `no_upstream_gives_zero_and_none`, `linked_worktree_listed_with_branch_and_dirty`, `cwd_inside_linked_worktree_marks_it_current` (and the main one not current), `locked_worktree_flagged`, `missing_worktree_dir_is_prunable_and_does_not_fail`, `poller_delivers_result_and_dedups_identical`, `poller_refresh_now_wakes_before_interval`, `poller_drop_stops_thread` (join returns within 2 s).
+- [ ] **Step 2:** `CARGO_BUILD_JOBS=3 cargo test -p horizon-core git_overview` — FAIL (RED).
+- [ ] **Step 3:** Implement model, compute, poller; no `unwrap`/`expect` in runtime code; files < 600 lines.
+- [ ] **Step 4:** Same filtered test run — PASS (GREEN). `cargo fmt --all -- --check`. Full validation deferred per compile-budget ruling.
+- [ ] **Step 5:** Commit `feat(core): add git overview with worktrees, ahead/behind and poller`.
+
+### Task 19: Sidebar git line + worktrees list (domínio: frontend; tipo: ui)
+
+**Files:**
+- Create: `crates/horizon-ui/src/app/sidebar/git_overview.rs` (render, cache, menu, pure helpers)
+- Modify: `app/sidebar.rs` (call sites only: one call after the header row in `render_sidebar_workspace`, `SidebarActions` fields for the new actions, handling in `apply_sidebar_actions`), `app/sidebar/` module declaration, `app/hub_state.rs` (fields `git_overviews: HashMap<WorkspaceId, GitLineCache>`, `git_poller: Option<OverviewPoller<WorkspaceId>>`, `git_expanded: HashSet<WorkspaceId>`, `git_version: u64`), `app/lifecycle.rs` (start/refresh poller from workspace cwds; drain `try_recv` in the existing per-frame drain point with a cap of 16 results; request repaint only when a result changed the cache), `app/actions/` only if a helper is needed to create the terminal/workspace
+- Test: pure logic tests inside `git_overview.rs`
+
+**Interfaces:**
+- Consumes: T18 `RepoOverview`, `WorktreeInfo`, `OverviewPoller`; T3 derived presets `Claude · <profile>` and `profile_accent`; `HorizonApp::create_panel_with_options(PanelOptions, WorkspaceId)` (`app/actions/panels.rs:25`) with `PanelOptions.cwd = Some(worktree.path)`; `Workspace.cwd` (`horizon-core/src/workspace.rs:26`); `menu::context_menu_above_sidebar`; spec `docs/design/claude-hub-ui.md` §7 and §0 primitives
+- Produces:
+  - `pub(super) struct GitLineCache { overview_version: u64, branch_label: String, ahead: usize, behind: usize, dirty_count: usize, worktree_rows: Vec<WorktreeRow> }` and `struct WorktreeRow { path: PathBuf, label: String, short_path: String, tooltip: String, is_current: bool, dirty: bool, locked: bool, prunable: bool }`
+  - `fn build_cache(overview: &RepoOverview, version: u64) -> GitLineCache`
+  - `fn branch_label(branch: Option<&str>, detached: bool, head_short: Option<&str>) -> String` (`HEAD @ abc1234` when detached; middle-ellipsis above 22 chars)
+  - `fn short_worktree_path(main_root: &Path, wt: &Path) -> String` (relative to the main repo parent: `.` for main, `../name` for siblings, absolute display with `~` for paths outside)
+  - `fn sync_poller_cwds(workspaces: &[(WorkspaceId, PathBuf)], poller: &OverviewPoller<WorkspaceId>)` called only when the workspace set or a cwd changed
+  - Actions: click row → shell terminal in worktree; menu **Open terminal here**, **Open Claude here ▸** (derived presets with cwd override; `PanelOptions.cwd` wins over the workspace cwd), **New workspace from worktree** (name = branch or dir name, cwd = worktree path), **Copy path**; prunable disables the first three; `refresh_now` on menu open and window focus
+  - No git call on the UI thread and none per frame; strings only built in `build_cache`
+
+- [ ] **Step 1: Failing tests:** `branch_label_detached_shows_short_sha`, `branch_label_middle_ellipsis_over_22`, `short_path_main_is_dot`, `short_path_sibling_is_relative_to_repo_parent`, `short_path_outside_uses_tilde_or_absolute`, `build_cache_orders_main_first_and_marks_current`, `build_cache_hides_ahead_behind_when_zero`, `no_cache_entry_for_non_repo_workspace` (`Ok(None)` removes the entry), `identical_overview_does_not_bump_version`.
+- [ ] **Step 2:** `CARGO_BUILD_JOBS=3 cargo test -p horizon-ui sidebar::git_overview` — FAIL (RED).
+- [ ] **Step 3:** Implement helpers, cache and drain; then paint per spec §7 (git line, toggle, rows, current bar, tooltip, menu) using `theme.rs` constants by name; keep `sidebar.rs` edits to call sites (sidebar.rs is above the size guideline: new code stays in the new module).
+- [ ] **Step 4:** Same filtered test run — PASS (GREEN). `cargo fmt --all -- --check`. Record "visual validation deferred to final smoke" in the report (Task 17 Step 4b covers it).
+- [ ] **Step 5:** Commit `feat(ui): sidebar git line and worktrees list with open-here actions`.
 
 ---
 
@@ -513,4 +566,4 @@ T14 ─ T16 (drain + panel menu + badge)           all ─ T17
 7. **New dependency `ureq` 3.5.2** (crates.io latest stable checked 2026-11-12, MSRV 1.85 ≤ project 1.88): chosen over `reqwest` (pulls tokio full runtime/hyper) and over shelling out to `curl` (would put the token on a command line); `default-features = false` + `rustls` only; justification repeated in the Task 8 commit.
 8. **Config compatibility (S9)** — every new field is `serde(default)` and skipped when empty; no migration; a test per field asserts old YAML loads and round-trips without noise.
 9. **Resume signature changes (Task 4)** — callers of `live_claude_session_ids`/`classify_agent_from_environ` span core and UI; `cargo test --workspace` after the change is the safety net, and the panel's config dir defaults to `~/.claude` so non-profile panels behave as before.
-10. **Scope** — large (18 tasks). If the session runs out, stop after a part boundary (A, C, B, D are independently shippable in that order); `/mapear` was the alternative.
+10. **Scope** — large (20 tasks). If the session runs out, stop after a part boundary (A, C, B, D, E are independently shippable in that order; E needs A's T3 for "Open Claude here"); `/mapear` was the alternative.
