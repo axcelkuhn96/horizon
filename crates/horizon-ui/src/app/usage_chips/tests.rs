@@ -187,6 +187,20 @@ fn tokens_today_is_formatted_once_when_the_stats_arrive() {
 }
 
 #[test]
+fn tokens_scan_stops_being_pending_once_answered_or_after_the_patience_window() {
+    let mut state = ClaudeUsageState::default();
+    let now = Instant::now();
+    assert!(!state.tokens_scan_pending(now));
+
+    state.tokens_scan = Some((now, false));
+    assert!(state.tokens_scan_pending(now));
+    assert!(!state.tokens_scan_pending(now + TOKENS_SCAN_PATIENCE));
+
+    state.tokens_scan = Some((now, true));
+    assert!(!state.tokens_scan_pending(now));
+}
+
+#[test]
 fn snapshot_follows_the_profile_list_and_feeds_the_launcher_seams() {
     let mut state = ClaudeUsageState::default();
     assert!(state.set_profiles(vec![profile("conta1"), profile("conta2")]));

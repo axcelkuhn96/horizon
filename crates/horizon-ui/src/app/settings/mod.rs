@@ -389,8 +389,24 @@ fn render_gui_tab(
         });
 }
 
+/// Moves the editor to `tab`. Leaving the YAML tab re-parses the buffer into
+/// `editing_config` so GUI tabs never work from a stale copy; if the YAML does
+/// not parse, the editor stays on the YAML tab and shows the parse error.
+fn switch_tab(editor: &mut SettingsEditor, tab: SettingsTab) {
+    if editor.active_tab == SettingsTab::Yaml && tab != SettingsTab::Yaml {
+        match Config::from_yaml(&editor.buffer) {
+            Ok(config) => editor.editing_config = Some(config),
+            Err(error) => {
+                editor.status = SettingsStatus::Error(error.to_string());
+                return;
+            }
+        }
+    }
+    editor.active_tab = tab;
+}
+
 fn render_tab_bar(ui: &mut egui::Ui, editor: &mut SettingsEditor) {
-    let old_tab = editor.active_tab;
+    let mut clicked = None;
 
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
@@ -414,14 +430,13 @@ fn render_tab_bar(ui: &mut egui::Ui, editor: &mut SettingsEditor) {
                 .corner_radius(TAB_CORNER_RADIUS);
 
             if ui.add(btn).clicked() {
-                editor.active_tab = tab;
+                clicked = Some(tab);
             }
         }
     });
 
-    // Re-parse buffer when switching from YAML to a GUI tab.
-    if old_tab == SettingsTab::Yaml && editor.active_tab != SettingsTab::Yaml {
-        editor.editing_config = Config::from_yaml(&editor.buffer).ok();
+    if let Some(tab) = clicked {
+        switch_tab(editor, tab);
     }
 }
 
@@ -448,4 +463,46 @@ fn section_card(ui: &mut egui::Ui, content: impl FnOnce(&mut egui::Ui)) {
 
 fn dim_label(ui: &mut egui::Ui, text: &str) {
     ui.add(egui::Label::new(egui::RichText::new(text).color(theme::FG_DIM()).size(11.0)).wrap());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn editor(buffer: &str, tab: SettingsTab) -> SettingsEditor {
+        SettingsEditor {
+            buffer: buffer.to_owned(),
+            original: String::new(),
+            status: SettingsStatus::None,
+            active_tab: tab,
+            editing_config: None,
+            claude_tab: claude::ClaudeTabState::default(),
+            workspaces_tab: workspaces::WorkspacesTabState::default(),
+        }
+    }
+
+    #[test]
+    fn leaving_the_yaml_tab_reparses_the_edited_buffer() {
+        let yaml = Config::default().to_yaml().expect("yaml");
+        let mut editor = editor(&yaml, SettingsTab::Yaml);
+        switch_tab(&mut editor, SettingsTab::Claude);
+        assert!(editor.active_tab == SettingsTab::Claude);
+        assert!(editor.editing_config.is_some());
+    }
+
+    #[test]
+    fn invalid_yaml_keeps_the_user_on_the_yaml_tab_with_the_parse_error() {
+        let mut editor = editor("window: [unclosed", SettingsTab::Yaml);
+        switch_tab(&mut editor, SettingsTab::Claude);
+        assert!(editor.active_tab == SettingsTab::Yaml);
+        assert!(matches!(editor.status, SettingsStatus::Error(_)));
+    }
+
+    #[test]
+    fn switching_between_gui_tabs_does_not_touch_the_buffer_config() {
+        let mut editor = editor("window: [unclosed", SettingsTab::General);
+        switch_tab(&mut editor, SettingsTab::Claude);
+        assert!(editor.active_tab == SettingsTab::Claude);
+        assert!(editor.editing_config.is_none());
+    }
 }

@@ -88,6 +88,7 @@ pub(in crate::app) fn show_chips(
     let (group, _) = ui.allocate_exact_size(Vec2::new(total, CHIP_HEIGHT), Sense::hover());
     let refreshing = usage.is_refreshing(now);
     let tokens_today = usage.tokens_today();
+    let tokens_pending = usage.tokens_scan_pending(now);
     let mut output = ChipsOutput::default();
     let mut x = group.min.x;
     for index in 0..plan.visible {
@@ -106,6 +107,7 @@ pub(in crate::app) fn show_chips(
             refreshing,
             now_ms,
             tokens_today,
+            tokens_pending,
         };
         show_chip(ui, rect, entry, layout, frame, &mut output);
     }
@@ -119,6 +121,8 @@ struct ChipFrame<'a> {
     refreshing: bool,
     now_ms: i64,
     tokens_today: Option<&'a str>,
+    /// The stats scan may still deliver `tokens_today`: keep repainting while the card is open.
+    tokens_pending: bool,
 }
 
 fn show_chip(
@@ -134,6 +138,7 @@ fn show_chip(
         refreshing,
         now_ms,
         tokens_today,
+        tokens_pending,
     } = frame;
     let status = chip_status(entry.usage.as_ref(), now_ms);
     let accent = hub_ui::accent_color(layout.accent_slot);
@@ -162,7 +167,7 @@ fn show_chip(
     }
     let response = response.on_hover_ui_at_pointer(|ui| {
         output.wants_tokens = true;
-        show_tooltip(ui, entry, accent, status, now_ms, tokens_today);
+        show_tooltip(ui, entry, accent, status, now_ms, tokens_today, tokens_pending);
     });
     if response.clicked() {
         output.launch = Some(entry.name.clone());
@@ -342,14 +347,16 @@ fn show_tooltip(
     status: ChipStatus,
     now_ms: i64,
     tokens_today: Option<&str>,
+    tokens_pending: bool,
 ) {
     Frame::NONE
         .inner_margin(Margin::same(TOOLTIP_MARGIN - POPUP_FRAME_MARGIN))
         .show(ui, |ui| {
             tooltip_body(ui, entry, accent, status, now_ms, tokens_today);
         });
-    if tokens_today.is_none() {
-        // The stats poll is still scanning: look again shortly, only while the card is open.
+    if tokens_today.is_none() && tokens_pending {
+        // The stats poll is still scanning: look again shortly, only while the card is open
+        // and until the scan answers or its patience window ends.
         ui.ctx().request_repaint_after(std::time::Duration::from_secs(1));
     }
 }

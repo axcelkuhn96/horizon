@@ -104,7 +104,7 @@ impl ClaudeTabState {
 /// Switches the settings editor to the Claude tab (used by the launcher's
 /// "Manage profiles" entry).
 pub(crate) fn select_claude_tab(editor: &mut SettingsEditor) {
-    editor.active_tab = SettingsTab::Claude;
+    super::switch_tab(editor, SettingsTab::Claude);
 }
 
 pub(super) fn show(ui: &mut Ui, editor: &mut SettingsEditor) {
@@ -588,6 +588,23 @@ mod tests {
         };
         select_claude_tab(&mut editor);
         assert!(editor.active_tab == SettingsTab::Claude);
+    }
+
+    #[test]
+    fn select_claude_tab_from_yaml_reparses_the_unsaved_buffer() {
+        let yaml = horizon_core::Config::default().to_yaml().expect("yaml");
+        let mut editor = SettingsEditor {
+            buffer: yaml,
+            original: String::new(),
+            status: SettingsStatus::None,
+            active_tab: SettingsTab::Yaml,
+            editing_config: None,
+            claude_tab: ClaudeTabState::default(),
+            workspaces_tab: super::super::workspaces::WorkspacesTabState::default(),
+        };
+        select_claude_tab(&mut editor);
+        assert!(editor.active_tab == SettingsTab::Claude);
+        assert!(editor.editing_config.is_some());
     }
 
     #[test]

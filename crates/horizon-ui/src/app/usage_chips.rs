@@ -32,6 +32,8 @@ const POLL_INTERVAL: Duration = Duration::from_secs(300);
 const CACHE_FILE: &str = "claude-usage-cache.json";
 /// How long a requested refresh counts as in flight before the menu offers "Refresh now" again.
 const REFRESH_WINDOW: Duration = Duration::from_secs(30);
+/// How long the tooltip keeps waiting for the first token stats before giving up.
+const TOKENS_SCAN_PATIENCE: Duration = Duration::from_secs(30);
 
 // Chip geometry (spec §1). Heights and gaps are fixed; widths come from the text.
 pub(super) const CHIP_HEIGHT: f32 = 28.0;
@@ -465,6 +467,8 @@ pub(super) struct ClaudeUsageState {
     tokens_poll: Option<UsageDashboard>,
     /// Claude tokens used today across all accounts, formatted on arrival.
     tokens_today: Option<String>,
+    /// When the stats poll started and whether it already answered (even without data).
+    tokens_scan: Option<(Instant, bool)>,
     pub(super) cache: UsageChipsCache,
 }
 
@@ -529,6 +533,7 @@ impl ClaudeUsageState {
     pub(super) fn start_tokens_poll(&mut self) {
         if self.tokens_poll.is_none() {
             self.tokens_poll = Some(UsageDashboard::new());
+            self.tokens_scan = Some((Instant::now(), false));
         }
     }
 
@@ -539,6 +544,9 @@ impl ClaudeUsageState {
         };
         if !dashboard.poll() {
             return false;
+        }
+        if let Some((_, answered)) = self.tokens_scan.as_mut() {
+            *answered = true;
         }
         let tokens = dashboard.snapshot.as_ref().map(|snapshot| snapshot.claude.today_tokens);
         if let Some(tokens) = tokens {
@@ -555,6 +563,14 @@ impl ClaudeUsageState {
     #[must_use]
     pub(super) fn tokens_today(&self) -> Option<&str> {
         self.tokens_today.as_deref()
+    }
+
+    /// The stats scan was started, has not answered yet and is still within its patience window.
+    #[must_use]
+    pub(super) fn tokens_scan_pending(&self, now: Instant) -> bool {
+        self.tokens_scan.is_some_and(|(started, answered)| {
+            !answered && now.saturating_duration_since(started) < TOKENS_SCAN_PATIENCE
+        })
     }
 
     /// A refresh was requested and has not produced fresh data (or timed out).
