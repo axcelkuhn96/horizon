@@ -167,7 +167,7 @@ fn create_checks_out_existing_branch() {
     assert!(!created.created_branch);
     assert!(path.join("a.txt").is_file());
     let checkout = Repository::open(&path).expect("open worktree");
-    assert_eq!(checkout.head().expect("head").shorthand(), Some("existing"));
+    assert_eq!(checkout.head().expect("head").shorthand().ok(), Some("existing"));
 }
 
 #[test]
@@ -481,7 +481,7 @@ fn remove_never_deletes_locked_or_in_use() {
         &fixture.root,
         &[locked.clone(), in_use.clone()],
         true,
-        &[in_use.clone()],
+        std::slice::from_ref(&in_use),
         &[],
     );
 
@@ -634,7 +634,13 @@ fn remove_keeps_ignored_files_unless_confirmed() {
     assert!(matches!(statuses[0], RemoveStatus::IgnoredNotConfirmed(ref found) if found.count == 2));
     assert!(path.join(".env").is_file(), "nothing was deleted");
 
-    let confirmed = remove_worktrees(&fixture.root, &[path.clone()], false, &[], &[path.clone()]);
+    let confirmed = remove_worktrees(
+        &fixture.root,
+        std::slice::from_ref(&path),
+        false,
+        &[],
+        std::slice::from_ref(&path),
+    );
 
     assert_eq!(confirmed[0].status, RemoveStatus::Removed { branch_deleted: false });
     assert!(!path.exists());
@@ -714,6 +720,7 @@ fn invalid_worktree_whose_directory_still_exists_keeps_its_metadata() {
         .worktrees()
         .expect("worktrees")
         .get(0)
+        .expect("get")
         .expect("name")
         .to_owned();
     // Git finds the metadata's common dir missing (a moved repository), yet the
@@ -750,6 +757,7 @@ fn worktree_with_initialized_submodules_is_blocked() {
         .worktrees()
         .expect("worktrees")
         .get(0)
+        .expect("get")
         .expect("name")
         .to_owned();
     let modules = fixture.root.join(".git").join("worktrees").join(&name).join("modules");

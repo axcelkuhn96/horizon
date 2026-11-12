@@ -4,7 +4,7 @@
 use std::time::Instant;
 
 use egui::{Color32, Context};
-use horizon_core::link::{LinkRequest, LinkResponse};
+use horizon_core::link::{LinkRequest, LinkResponse, SendTarget};
 use horizon_core::{PanelId, PanelKind, PromptScope};
 
 use crate::app::HorizonApp;
@@ -207,13 +207,13 @@ impl HorizonApp {
                 .show_failure(panel_id, StartFailure::NoAccount, Instant::now());
             return;
         }
-        let (next, request, inserted) = match expanded.stage.apply_prompts(event, expanded.prompts.len()) {
-            Some((next, insert)) => (next, None, insert),
-            None => {
+        let (next, request, inserted) =
+            if let Some((next, insert)) = expanded.stage.apply_prompts(event, expanded.prompts.len()) {
+                (next, None, insert)
+            } else {
                 let (next, request) = expanded.stage.apply(event, expanded.rows.len());
                 (next, request, None)
-            }
-        };
+            };
         let started = request.and_then(|StartRequest { profile, mode }| {
             expanded.rows.get(profile).map(|row| (row.name.clone(), row.auto, mode))
         });
@@ -274,10 +274,11 @@ impl HorizonApp {
         let command = quick_start_command(&preset, mode, &home, ShellSyntax::NATIVE).ok_or(StartFailure::Unquotable)?;
         let target = panel.local_id.clone();
         let response = self.board.handle_link_request(LinkRequest::Send {
-            target,
+            target: SendTarget::panel(target),
             text: command,
             enter: true,
             from: None,
+            from_id: None,
         });
         if let LinkResponse::Err { message, .. } = response {
             tracing::warn!(%message, "quick start could not write to the panel");
