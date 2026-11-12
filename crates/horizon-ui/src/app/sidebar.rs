@@ -1,14 +1,20 @@
 mod auto_hide;
 mod git_overview;
+mod header;
+mod labels;
 mod menu;
 mod routing;
+mod rows;
 mod toolbar;
 mod workspace_menu;
 mod workspace_rename;
 
+use header::{paint_workspace_row_bg, render_sidebar_workspace_header_row};
+use labels::{LabelInputs, ProfileRef, claude_profile_for};
 use routing::{
     should_focus_workspace_on_row_click, sidebar_workspace_drop_should_dock, sidebar_workspace_insert_dock_side,
 };
+use rows::{GROUP_GAP, GitChipPlacement, HEADER_HEIGHT, RowIcon, SidebarPanelEntry, git_chip_placement};
 
 use std::collections::HashMap;
 use std::time::Instant;
@@ -17,11 +23,10 @@ use egui::{
     Align, Button, Color32, Context, CornerRadius, CursorIcon, Id, Layout, Order, Pos2, Rect, Sense, Stroke, UiBuilder,
     Vec2,
 };
-use horizon_core::{AttentionItem, AttentionSeverity, PanelId, PanelKind, WorkspaceId, WorkspaceLayout};
+use horizon_core::{AttentionSeverity, PanelId, PanelKind, WorkspaceId, WorkspaceLayout};
 
 use crate::theme;
 
-use super::panels::panel_kind_icon;
 use super::root_chrome::effective_sidebar_width;
 use super::util;
 use super::{HorizonApp, TOOLBAR_HEIGHT, WS_BG_PAD, WS_TITLE_HEIGHT};
@@ -32,6 +37,7 @@ use auto_hide::{
     sidebar_reveal_state,
 };
 pub(super) use git_overview::GitSidebarState;
+pub(super) use labels::PanelLabelCache;
 use workspace_menu::{WorkspaceMenuAction, WorkspaceMenuEnv};
 
 struct WorkspaceSidebarEntry {
@@ -43,15 +49,6 @@ struct WorkspaceSidebarEntry {
     panels: Vec<SidebarPanelEntry>,
     attention_count: usize,
     sidebar_collapsed: bool,
-}
-
-#[derive(Clone)]
-struct SidebarPanelEntry {
-    id: PanelId,
-    title: String,
-    kind: PanelKind,
-    is_focused: bool,
-    attention: Option<AttentionItem>,
 }
 
 #[derive(Clone, Default)]
@@ -249,30 +246,9 @@ impl HorizonApp {
             });
     }
 
-    fn sidebar_workspace_data(&self) -> Vec<WorkspaceSidebarEntry> {
+    fn sidebar_workspace_data(&mut self) -> Vec<WorkspaceSidebarEntry> {
         let attention_enabled = self.template_config.features.attention_feed;
-        let panel_data = self
-            .board
-            .panels
-            .iter()
-            .map(|panel| {
-                let attention = if attention_enabled {
-                    self.board.unresolved_attention_for_panel(panel.id).cloned()
-                } else {
-                    None
-                };
-                (
-                    panel.id,
-                    SidebarPanelEntry {
-                        id: panel.id,
-                        title: panel.display_title().into_owned(),
-                        kind: panel.kind,
-                        is_focused: self.board.focused == Some(panel.id),
-                        attention,
-                    },
-                )
-            })
-            .collect::<HashMap<_, _>>();
+        let panel_data = self.sidebar_panel_entries(attention_enabled);
 
         self.board
             .workspaces
@@ -298,6 +274,57 @@ impl HorizonApp {
                 }
             })
             .collect()
+    }
+
+    /// Rows of every panel. Labels and hints come from the label cache, which
+    /// rebuilds a panel's strings only when its title, name, kind or profile changed.
+    fn sidebar_panel_entries(&mut self, attention_enabled: bool) -> HashMap<PanelId, SidebarPanelEntry> {
+        let board = &self.board;
+        let hub = &mut self.hub;
+        let presets = &self.presets;
+        hub.sidebar_labels.begin_frame();
+        let entries = board
+            .panels
+            .iter()
+            .map(|panel| {
+                let attention = if attention_enabled {
+                    board.unresolved_attention_for_panel(panel.id).cloned()
+                } else {
+                    None
+                };
+                let profile = claude_profile_for(panel.kind, &panel.env, presets);
+                let inputs = LabelInputs {
+                    title: &panel.title,
+                    terminal_title: &panel.terminal_title,
+                    custom_name: panel.has_custom_name(),
+                    kind: panel.kind,
+                    profile,
+                    launch_command: panel.launch_command.as_deref(),
+                };
+                let (icon, seven_day) = match profile {
+                    ProfileRef::Named(name) => (
+                        RowIcon::Claude(profile_accent(hub, name)),
+                        hub.usage.usage(name).and_then(|usage| usage.seven_day.percent),
+                    ),
+                    ProfileRef::Default => (RowIcon::Claude(claude_default_accent()), None),
+                    ProfileRef::None => (RowIcon::Kind(panel.kind), None),
+                };
+                let label = hub.sidebar_labels.resolve(panel.id, &inputs, seven_day);
+                (
+                    panel.id,
+                    SidebarPanelEntry {
+                        id: panel.id,
+                        label,
+                        icon,
+                        kind: panel.kind,
+                        is_focused: board.focused == Some(panel.id),
+                        attention,
+                    },
+                )
+            })
+            .collect();
+        hub.sidebar_labels.end_frame();
+        entries
     }
 
     fn paint_sidebar_frame(ui: &mut egui::Ui, sidebar_origin: Pos2, sidebar_size: Vec2, sidebar_width: f32) {
@@ -333,6 +360,8 @@ impl HorizonApp {
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
+                // Rows carry their own height; the theme's 8 px row gap would double them.
+                ui.spacing_mut().item_spacing.y = 0.0;
 
                 for workspace in workspace_data {
                     self.render_sidebar_workspace(ui, workspace, workspace_data, actions, &mut drag_state);
@@ -394,18 +423,18 @@ impl HorizonApp {
         actions: &mut SidebarActions,
         drag_state: &mut SidebarWorkspaceDragState,
     ) {
-        ui.add_space(4.0);
-
-        let row_rect = ui.allocate_space(Vec2::new(ui.available_width(), 32.0)).1;
+        let row_rect = ui.allocate_space(Vec2::new(ui.available_width(), HEADER_HEIGHT)).1;
         if self.workspace_rename_in_sidebar(workspace.id) {
             paint_workspace_row_bg(ui, row_rect, workspace.color, workspace.is_active, false, false);
             self.render_sidebar_rename_editor(ui, row_rect);
-            self.render_sidebar_workspace_panels(ui, workspace, workspace_data, actions);
+            self.render_sidebar_workspace_panels(ui, workspace, workspace_data, actions, false);
             return;
         }
         let mut click_target_hovered = ui.rect_contains_pointer(row_rect);
         let mut row_clicked = false;
         let mut caret_rect = Rect::NOTHING;
+        let mut name_right = row_rect.min.x;
+        let mut count_left = None;
         paint_workspace_row_bg(
             ui,
             row_rect,
@@ -423,10 +452,13 @@ impl HorizonApp {
                 click_target_hovered |= row.hovered;
                 row_clicked |= row.row_clicked;
                 caret_rect = row.caret_rect;
+                name_right = row.name_right;
+                count_left = row.count_left;
             },
         );
         if workspace.sidebar_collapsed {
-            git_overview::paint_collapsed_dirty_dot(ui, &self.hub.git, workspace.id, row_rect);
+            let dot_x = count_left.map_or(row_rect.max.x - 18.0, |left| left - 10.0);
+            git_overview::paint_collapsed_dirty_dot(ui, &self.hub.git, workspace.id, row_rect, dot_x);
         }
 
         let row_response = ui.interact(
@@ -469,7 +501,20 @@ impl HorizonApp {
         };
         Self::show_workspace_context_menu(&row_response, workspace, &menu_env, actions);
 
-        self.render_sidebar_workspace_panels(ui, workspace, workspace_data, actions);
+        // The branch chip sits on the header row when it fits next to the name,
+        // otherwise it stays the first child row. Painted after the row
+        // interaction so its hover card is not shadowed by the row.
+        let chip_in_header = !workspace.sidebar_collapsed
+            && git_chip_placement(
+                row_rect,
+                name_right,
+                git_overview::header_chip_width(ui, &self.hub.git, workspace.id),
+            ) == GitChipPlacement::Header;
+        if chip_in_header {
+            git_overview::paint_header_chip(ui, &self.hub.git, workspace.id, row_rect);
+        }
+
+        self.render_sidebar_workspace_panels(ui, workspace, workspace_data, actions, chip_in_header);
     }
 
     fn render_sidebar_workspace_panels(
@@ -478,17 +523,19 @@ impl HorizonApp {
         workspace: &WorkspaceSidebarEntry,
         workspace_data: &[WorkspaceSidebarEntry],
         actions: &mut SidebarActions,
+        git_line_in_header: bool,
     ) {
         if !workspace.sidebar_collapsed {
-            ui.add_space(2.0);
-            if let Some(action) = git_overview::render_git_section(ui, &mut self.hub.git, &self.presets, workspace.id) {
+            if let Some(action) =
+                git_overview::render_git_section(ui, &mut self.hub.git, &self.presets, workspace.id, git_line_in_header)
+            {
                 actions.git_action = Some(action);
             }
             for panel in &workspace.panels {
                 self.render_sidebar_panel(ui, workspace, workspace_data, panel, actions);
             }
         }
-        ui.add_space(8.0);
+        ui.add_space(GROUP_GAP);
     }
 
     fn handle_sidebar_workspace_drag(
@@ -587,124 +634,6 @@ impl HorizonApp {
                 ui.close();
             }
         });
-    }
-
-    fn render_sidebar_panel(
-        &mut self,
-        ui: &mut egui::Ui,
-        workspace: &WorkspaceSidebarEntry,
-        workspace_data: &[WorkspaceSidebarEntry],
-        panel: &SidebarPanelEntry,
-        actions: &mut SidebarActions,
-    ) {
-        let row_height = if panel.attention.is_some() { 46.0 } else { 30.0 };
-        let row_rect = ui.allocate_space(Vec2::new(ui.available_width(), row_height)).1;
-        let mut click_target_hovered = ui.rect_contains_pointer(row_rect);
-        let mut row_clicked = false;
-        paint_panel_row_bg(ui, row_rect, workspace.color, panel.is_focused, click_target_hovered);
-
-        let mut close_clicked = false;
-        ui.scope_builder(
-            UiBuilder::new().max_rect(row_rect).layout(Layout::top_down(Align::Min)),
-            |ui| {
-                ui.horizontal(|ui| {
-                    ui.set_min_height(30.0);
-                    ui.add_space(30.0);
-
-                    let (icon, icon_color) = panel_kind_icon(panel.kind, workspace.color, panel.is_focused);
-                    let icon_response = ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(icon)
-                                .color(icon_color)
-                                .size(10.0)
-                                .monospace()
-                                .strong(),
-                        )
-                        .sense(Sense::click()),
-                    );
-                    click_target_hovered |= icon_response.hovered();
-                    row_clicked |= icon_response.clicked();
-                    ui.add_space(4.0);
-
-                    let title_width = (ui.available_width() - 28.0).max(48.0);
-                    let title_response = ui.add_sized(
-                        Vec2::new(title_width, 18.0),
-                        egui::Label::new(
-                            egui::RichText::new(&panel.title)
-                                .color(if panel.is_focused {
-                                    theme::FG()
-                                } else {
-                                    theme::FG_SOFT()
-                                })
-                                .size(12.5),
-                        )
-                        .truncate()
-                        .sense(Sense::click()),
-                    );
-                    click_target_hovered |= title_response.hovered();
-                    row_clicked |= title_response.clicked();
-
-                    let close = ui.add(
-                        Button::new(egui::RichText::new("\u{00D7}").size(16.0).color(theme::FG_DIM())).frame(false),
-                    );
-                    if close.clicked() {
-                        close_clicked = true;
-                    }
-                });
-
-                if let Some(attention_item) = &panel.attention {
-                    let (label, color) = sidebar_attention_tag(attention_item.severity);
-                    ui.horizontal(|ui| {
-                        ui.add_space(56.0);
-                        let tag_response = ui.add(
-                            egui::Label::new(egui::RichText::new(label).size(8.5).color(color).strong())
-                                .sense(Sense::click()),
-                        );
-                        click_target_hovered |= tag_response.hovered();
-                        row_clicked |= tag_response.clicked();
-                        ui.add_space(4.0);
-                        let summary_response = ui.add_sized(
-                            Vec2::new(ui.available_width(), 14.0),
-                            egui::Label::new(
-                                egui::RichText::new(&attention_item.summary)
-                                    .size(9.0)
-                                    .color(theme::alpha(color, 180)),
-                            )
-                            .truncate()
-                            .sense(Sense::click()),
-                        );
-                        click_target_hovered |= summary_response.hovered();
-                        row_clicked |= summary_response.clicked();
-                    });
-                }
-            },
-        );
-
-        let row_click_rect = Rect::from_min_max(row_rect.min, Pos2::new(row_rect.max.x - 28.0, row_rect.max.y));
-        let row_response = ui.interact(
-            row_click_rect,
-            ui.make_persistent_id(("sidebar_panel_click", panel.id.0)),
-            Sense::click(),
-        );
-        click_target_hovered |= row_response.hovered();
-        row_clicked |= row_response.clicked();
-
-        if click_target_hovered {
-            ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
-        }
-
-        if close_clicked {
-            actions.close_panel = Some(panel.id);
-        }
-
-        let row_clicked = row_clicked && !close_clicked;
-        if row_clicked {
-            actions.focus_panel = Some(panel.id);
-            actions.pan_to_panel = Some(panel.id);
-        }
-
-        self.show_sidebar_panel_context_menu(&row_response, workspace, workspace_data, panel.id, panel.kind, actions);
-        ui.add_space(1.0);
     }
 
     fn show_sidebar_panel_context_menu(
@@ -872,136 +801,6 @@ impl HorizonApp {
     }
 }
 
-struct SidebarHeaderRowOutcome {
-    hovered: bool,
-    row_clicked: bool,
-    /// Hit-rect of the collapse caret. The caret is painted (not interactive)
-    /// here; the caller runs the click interaction on this rect *after* the
-    /// full-row interaction so the caret sits on top and wins overlapping
-    /// clicks instead of falling through to the workspace-focus handler.
-    caret_rect: Rect,
-}
-
-impl Default for SidebarHeaderRowOutcome {
-    fn default() -> Self {
-        Self {
-            hovered: false,
-            row_clicked: false,
-            caret_rect: Rect::NOTHING,
-        }
-    }
-}
-
-/// Render the inner content of a workspace header row: the collapse caret, the
-/// accent bar, the workspace name, and the optional "NEW WINDOW" badge. Returns
-/// which affordances were interacted with so the caller can route actions.
-fn render_sidebar_workspace_header_row(
-    ui: &mut egui::Ui,
-    workspace: &WorkspaceSidebarEntry,
-) -> SidebarHeaderRowOutcome {
-    let mut outcome = SidebarHeaderRowOutcome::default();
-
-    ui.add_space(8.0);
-    let caret = if workspace.sidebar_collapsed {
-        "\u{25B6}"
-    } else {
-        "\u{25BC}"
-    };
-    // Paint the caret glyph and remember its rect; the click hit-test runs in
-    // the caller (on top of the row) so the row drag region cannot swallow it.
-    // The glyph brightens on hover, mirroring the titlebar collapse caret.
-    let caret_rect = ui.allocate_space(Vec2::new(11.0, 22.0)).1;
-    let caret_color = if ui.rect_contains_pointer(caret_rect.expand(4.0)) || workspace.is_active {
-        theme::FG_SOFT()
-    } else {
-        theme::alpha(theme::FG_DIM(), 200)
-    };
-    ui.painter().text(
-        caret_rect.center(),
-        egui::Align2::CENTER_CENTER,
-        caret,
-        egui::FontId::proportional(9.0),
-        caret_color,
-    );
-    outcome.caret_rect = caret_rect;
-    ui.add_space(4.0);
-
-    let bar_color = if workspace.attention_count > 0 {
-        theme::PALETTE_RED()
-    } else {
-        theme::alpha(workspace.color, if workspace.is_active { 240 } else { 110 })
-    };
-    let bar_rect = ui.allocate_space(Vec2::new(3.0, 22.0)).1;
-    ui.painter().rect_filled(bar_rect, CornerRadius::same(2), bar_color);
-
-    ui.add_space(8.0);
-    let name_response = ui.add(
-        egui::Label::new(
-            egui::RichText::new(&workspace.name)
-                .color(if workspace.is_active {
-                    theme::FG()
-                } else {
-                    theme::FG_SOFT()
-                })
-                .size(13.0)
-                .strong(),
-        )
-        .sense(Sense::click()),
-    );
-    outcome.hovered |= name_response.hovered();
-    outcome.row_clicked |= name_response.clicked();
-
-    if workspace.detached {
-        ui.add_space(4.0);
-        let detached_response = ui.add(
-            egui::Label::new(
-                egui::RichText::new("NEW WINDOW")
-                    .color(theme::FG_DIM())
-                    .size(8.5)
-                    .strong(),
-            )
-            .sense(Sense::click()),
-        );
-        outcome.hovered |= detached_response.hovered();
-        outcome.row_clicked |= detached_response.clicked();
-    }
-
-    outcome
-}
-
-fn paint_workspace_row_bg(
-    ui: &mut egui::Ui,
-    workspace_rect: Rect,
-    workspace_color: Color32,
-    is_active: bool,
-    hovered: bool,
-    dragging: bool,
-) {
-    let workspace_bg = Rect::from_min_max(
-        Pos2::new(workspace_rect.min.x + 6.0, workspace_rect.min.y),
-        Pos2::new(workspace_rect.max.x - 6.0, workspace_rect.max.y),
-    );
-    if dragging {
-        ui.painter_at(workspace_bg).rect_filled(
-            workspace_bg,
-            CornerRadius::same(10),
-            theme::alpha(theme::blend(theme::PANEL_BG_ALT(), workspace_color, 0.18), 180),
-        );
-    } else if is_active {
-        ui.painter_at(workspace_bg).rect_filled(
-            workspace_bg,
-            CornerRadius::same(10),
-            theme::alpha(theme::blend(theme::PANEL_BG_ALT(), workspace_color, 0.12), 140),
-        );
-    } else if hovered {
-        ui.painter_at(workspace_bg).rect_filled(
-            workspace_bg,
-            CornerRadius::same(10),
-            theme::alpha(theme::PANEL_BG_ALT(), 160),
-        );
-    }
-}
-
 fn paint_workspace_drop_indicator(
     ui: &egui::Ui,
     workspace_rect: Rect,
@@ -1038,27 +837,23 @@ fn sidebar_menu_item(label: &str, color: Color32) -> Button<'_> {
         .min_size(Vec2::new(160.0, 0.0))
 }
 
-fn paint_panel_row_bg(ui: &mut egui::Ui, item_rect: Rect, workspace_color: Color32, is_focused: bool, hovered: bool) {
-    let bg_rect = Rect::from_min_max(
-        Pos2::new(item_rect.min.x + 6.0, item_rect.min.y),
-        Pos2::new(item_rect.max.x - 6.0, item_rect.max.y),
-    );
-    if is_focused {
-        ui.painter_at(bg_rect).rect_filled(
-            bg_rect,
-            CornerRadius::same(10),
-            theme::alpha(theme::blend(theme::PANEL_BG_ALT(), workspace_color, 0.22), 200),
-        );
-        let edge = Rect::from_min_size(
-            Pos2::new(bg_rect.min.x, bg_rect.min.y + 4.0),
-            Vec2::new(2.0, bg_rect.height() - 8.0),
-        );
-        ui.painter().rect_filled(edge, CornerRadius::same(1), workspace_color);
-    } else if hovered {
-        ui.painter_at(bg_rect).rect_filled(
-            bg_rect,
-            CornerRadius::same(10),
-            theme::alpha(theme::PANEL_BG_ALT(), 180),
-        );
-    }
+/// Accent of a Claude profile: the slot its usage chip uses, so the sidebar
+/// asterisk and the chip dot match.
+fn profile_accent(hub: &super::hub_state::HubState, name: &str) -> Color32 {
+    let slot = hub
+        .usage
+        .entries()
+        .iter()
+        .position(|entry| entry.name == name)
+        .and_then(|index| hub.usage.cache.chips.get(index))
+        .map_or_else(|| super::hub_ui::accent_index(name, &[]), |chip| chip.accent_slot);
+    super::hub_ui::accent_color(slot)
+}
+
+/// Accent of Claude panels on the default profile.
+fn claude_default_accent() -> Color32 {
+    horizon_core::agent_definition(PanelKind::Claude).map_or_else(theme::ACCENT, |definition| {
+        let [r, g, b] = definition.accent_rgb;
+        Color32::from_rgb(r, g, b)
+    })
 }

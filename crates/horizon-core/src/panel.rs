@@ -339,6 +339,13 @@ impl Panel {
         }
     }
 
+    /// Whether the user (or a preset) named this panel, as opposed to the
+    /// terminal-title fallback.
+    #[must_use]
+    pub const fn has_custom_name(&self) -> bool {
+        self.has_custom_name
+    }
+
     #[must_use]
     pub fn display_title(&self) -> Cow<'_, str> {
         if self.kind == PanelKind::Ssh {
@@ -783,6 +790,12 @@ mod tests {
         let panel = test_panel("Terminal 1", "Build running", false);
 
         assert_eq!(panel.display_title(), "Build running");
+    }
+
+    #[test]
+    fn has_custom_name_reflects_how_the_panel_was_named() {
+        assert!(test_panel("Backend", "", true).has_custom_name());
+        assert!(!test_panel("Terminal 1", "", false).has_custom_name());
     }
 
     #[test]

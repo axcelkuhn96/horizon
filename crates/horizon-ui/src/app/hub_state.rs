@@ -7,7 +7,7 @@ use horizon_core::WorkspaceId;
 use super::claude_launcher::ClaudeLauncherState;
 use super::hub_ui;
 use super::link::LinkUiState;
-use super::sidebar::GitSidebarState;
+use super::sidebar::{GitSidebarState, PanelLabelCache};
 use super::usage_chips::ClaudeUsageState;
 
 /// Accent slots for the visible profile list, recomputed only when the list changes.
@@ -35,6 +35,8 @@ pub(super) struct HubState {
     pub(super) usage: ClaudeUsageState,
     /// Git line and worktrees list state of the sidebar.
     pub(super) git: GitSidebarState,
+    /// Sidebar panel labels and galleys, rebuilt only when a panel's label inputs change.
+    pub(super) sidebar_labels: PanelLabelCache,
     /// Panel-link server, receive badges and the send-to-panel dialog.
     pub(super) link: LinkUiState,
 }

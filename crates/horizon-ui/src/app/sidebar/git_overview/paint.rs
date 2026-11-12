@@ -4,9 +4,10 @@
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
+use egui::text::{LayoutJob, TextFormat};
 use egui::{
-    Align, Align2, Color32, CornerRadius, CursorIcon, FontId, Frame, Id, Label, Layout, Margin, Painter, Pos2, Rect,
-    RichText, Sense, Shape, Stroke, TextWrapMode, Ui, UiBuilder, Vec2, WidgetInfo, WidgetType,
+    Align2, Color32, CornerRadius, CursorIcon, FontId, Frame, Id, Margin, Painter, Pos2, Rect, RichText, Sense, Shape,
+    Stroke, Ui, Vec2, WidgetInfo, WidgetType,
 };
 use horizon_core::git_overview::OverviewPoller;
 use horizon_core::{PresetConfig, WorkspaceId};
@@ -16,16 +17,20 @@ use super::{
     WorktreeRow, row_menu, visible_rows,
 };
 use crate::app::hub_ui;
+use crate::app::sidebar::rows::{BG_INSET, CHILD_X, HEADER_RIGHT_PAD, LABEL_OFFSET};
 use crate::theme;
 
-const GIT_LINE_HEIGHT: f32 = 20.0;
+const GIT_LINE_HEIGHT: f32 = 24.0;
 const ROW_HEIGHT: f32 = 22.0;
-/// Left indent of the git line and the section toggles.
-const LINE_INDENT: f32 = 28.0;
+/// Left indent of the git line and the section toggles: the sidebar-wide child indent.
+const LINE_INDENT: f32 = CHILD_X;
 /// Left indent of the text of a worktree row.
-const ROW_INDENT: f32 = 40.0;
+const ROW_INDENT: f32 = CHILD_X + 12.0;
 /// Left edge of a row's highlight, inside the indent so rows read as nested.
-const ROW_FILL_INDENT: f32 = 30.0;
+const ROW_FILL_INDENT: f32 = CHILD_X + 2.0;
+/// Space between the parts of the branch chip (glyph, branch, counters).
+const CHIP_PART_GAP: f32 = 6.0;
+const CHIP_INNER_GAP: f32 = 3.0;
 const ROW_RIGHT_INSET: f32 = 6.0;
 const ROW_RADIUS: u8 = 6;
 const TOOLTIP_WIDTH: f32 = 300.0;
@@ -49,17 +54,15 @@ pub(in crate::app::sidebar) fn paint_collapsed_dirty_dot(
     state: &GitSidebarState,
     workspace: WorkspaceId,
     row_rect: Rect,
+    center_x: f32,
 ) {
     if state
         .caches
         .get(&workspace)
         .is_some_and(|cache| cache.error.is_none() && cache.dirty_count > 0)
     {
-        ui.painter().circle_filled(
-            Pos2::new(row_rect.max.x - 18.0, row_rect.center().y),
-            3.0,
-            theme::PALETTE_YELLOW(),
-        );
+        ui.painter()
+            .circle_filled(Pos2::new(center_x, row_rect.center().y), 3.0, theme::PALETTE_YELLOW());
     }
 }
 
@@ -71,6 +74,7 @@ pub(in crate::app::sidebar) fn render_git_section(
     state: &mut GitSidebarState,
     presets: &[PresetConfig],
     workspace: WorkspaceId,
+    line_in_header: bool,
 ) -> Option<GitAction> {
     let GitSidebarState {
         caches,
@@ -87,7 +91,9 @@ pub(in crate::app::sidebar) fn render_git_section(
         paint_error_line(ui, cache, workspace);
         return None;
     }
-    paint_git_line(ui, cache, workspace);
+    if !line_in_header {
+        paint_git_line(ui, cache, workspace);
+    }
     if cache.worktree_rows.len() < 2 {
         return None;
     }
@@ -231,69 +237,122 @@ fn paint_branch_glyph(painter: &Painter, area: Rect, color: Color32) {
     painter.circle_stroke(at(9.0, 4.0), 2.0, stroke);
 }
 
-/// Small filled triangle (5 wide, 7 tall) pointing up or down.
-fn paint_arrow(ui: &mut Ui, up: bool, color: Color32) {
-    let (area, _) = ui.allocate_exact_size(Vec2::new(5.0, 7.0), Sense::hover());
+/// Small filled triangle (5 wide, 7 tall) pointing up or down, centred on `center`.
+fn paint_arrow(painter: &Painter, center: Pos2, up: bool, color: Color32) {
+    let (half_w, half_h) = (2.5_f32, 3.5_f32);
     let points = if up {
         vec![
-            Pos2::new(area.center().x, area.min.y),
-            Pos2::new(area.min.x, area.max.y),
-            Pos2::new(area.max.x, area.max.y),
+            Pos2::new(center.x, center.y - half_h),
+            Pos2::new(center.x - half_w, center.y + half_h),
+            Pos2::new(center.x + half_w, center.y + half_h),
         ]
     } else {
         vec![
-            Pos2::new(area.center().x, area.max.y),
-            Pos2::new(area.min.x, area.min.y),
-            Pos2::new(area.max.x, area.min.y),
+            Pos2::new(center.x, center.y + half_h),
+            Pos2::new(center.x - half_w, center.y - half_h),
+            Pos2::new(center.x + half_w, center.y - half_h),
         ]
     };
-    ui.painter().add(Shape::convex_polygon(points, color, Stroke::NONE));
+    painter.add(Shape::convex_polygon(points, color, Stroke::NONE));
 }
 
-fn mono_label(ui: &mut Ui, text: &str, color: Color32) {
-    ui.add(
-        Label::new(RichText::new(text).monospace().size(10.0).color(color))
-            .selectable(false)
-            .wrap_mode(TextWrapMode::Extend),
+/// One chip text: measured, painted when `draw`. Returns the x after it.
+fn chip_text(painter: &Painter, x: f32, cy: f32, text: &str, format: TextFormat, draw: bool) -> f32 {
+    let color = format.color;
+    let galley = painter.layout_job(LayoutJob::single_section(text.to_owned(), format));
+    let width = galley.size().x;
+    if draw {
+        painter.galley(Pos2::new(x, cy - galley.size().y / 2.0), galley, color);
+    }
+    x + width
+}
+
+/// Walks the branch chip (glyph, branch, ahead/behind, dirty) from `left`,
+/// painting it when `draw`. Returns the x after the last part, so a dry run
+/// from 0 measures its width.
+fn walk_chip(painter: &Painter, cache: &GitLineCache, left: f32, cy: f32, draw: bool) -> f32 {
+    let mut x = left;
+    if draw {
+        let area = Rect::from_min_size(Pos2::new(x, cy - 6.0), Vec2::splat(12.0));
+        paint_branch_glyph(painter, area, theme::FG_DIM());
+    }
+    x += 12.0 + 4.0;
+    let mut branch = TextFormat::simple(FontId::proportional(10.5), theme::FG_SOFT());
+    if cache.detached {
+        branch.italics = true;
+        branch.color = theme::FG_DIM();
+    }
+    x = chip_text(painter, x, cy, &cache.branch_label, branch, draw);
+    let mono = |color: Color32| TextFormat::simple(FontId::monospace(10.0), color);
+    for (label, up, color) in [
+        (&cache.ahead_label, true, theme::PALETTE_GREEN()),
+        (&cache.behind_label, false, theme::PALETTE_YELLOW()),
+    ] {
+        if label.is_empty() {
+            continue;
+        }
+        x += CHIP_PART_GAP;
+        if draw {
+            paint_arrow(painter, Pos2::new(x + 2.5, cy), up, color);
+        }
+        x += 5.0 + CHIP_INNER_GAP;
+        x = chip_text(painter, x, cy, label, mono(color), draw);
+    }
+    if !cache.dirty_label.is_empty() {
+        x += CHIP_PART_GAP;
+        if draw {
+            painter.circle_filled(Pos2::new(x + 3.0, cy), 3.0, theme::PALETTE_YELLOW());
+        }
+        x += 6.0 + CHIP_INNER_GAP;
+        x = chip_text(painter, x, cy, &cache.dirty_label, mono(theme::FG_SOFT()), draw);
+    }
+    x
+}
+
+/// Width of the branch chip of `workspace`; `None` without a healthy repository.
+/// Measured once per overview and kept on the cache.
+pub(in crate::app::sidebar) fn header_chip_width(
+    ui: &Ui,
+    state: &GitSidebarState,
+    workspace: WorkspaceId,
+) -> Option<f32> {
+    let cache = state.caches.get(&workspace).filter(|cache| cache.error.is_none())?;
+    if let Some(width) = cache.chip_width.get() {
+        return Some(width);
+    }
+    let width = walk_chip(ui.painter(), cache, 0.0, 0.0, false);
+    cache.chip_width.set(Some(width));
+    Some(width)
+}
+
+/// Branch chip right-aligned on a workspace header row, with its hover card.
+pub(in crate::app::sidebar) fn paint_header_chip(
+    ui: &mut Ui,
+    state: &GitSidebarState,
+    workspace: WorkspaceId,
+    row_rect: Rect,
+) {
+    let Some(width) = header_chip_width(ui, state, workspace) else {
+        return;
+    };
+    let Some(cache) = state.caches.get(&workspace) else {
+        return;
+    };
+    let left = row_rect.max.x - HEADER_RIGHT_PAD - width;
+    let cy = row_rect.center().y;
+    walk_chip(ui.painter(), cache, left, cy, true);
+    let hit = Rect::from_min_max(
+        Pos2::new(left - 4.0, cy - 10.0),
+        Pos2::new(row_rect.max.x - BG_INSET, cy + 10.0),
     );
+    let response = ui.interact(hit, ui.make_persistent_id(("git_line", workspace.0)), Sense::hover());
+    response.on_hover_ui_at_pointer(|ui| show_tooltip(ui, &cache.tooltip, cache.changed_at));
 }
 
+/// Branch chip as the first child row (when it does not fit on the header).
 fn paint_git_line(ui: &mut Ui, cache: &GitLineCache, workspace: WorkspaceId) {
     let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), GIT_LINE_HEIGHT), Sense::hover());
-    ui.scope_builder(
-        UiBuilder::new()
-            .max_rect(rect)
-            .layout(Layout::left_to_right(Align::Center)),
-        |ui| {
-            ui.spacing_mut().item_spacing.x = 4.0;
-            ui.add_space(LINE_INDENT);
-            let (glyph, _) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
-            paint_branch_glyph(ui.painter(), glyph, theme::FG_DIM());
-            let mut text = RichText::new(&cache.branch_label).size(10.5);
-            text = if cache.detached {
-                text.italics().color(theme::FG_DIM())
-            } else {
-                text.color(theme::FG_SOFT())
-            };
-            ui.add(Label::new(text).selectable(false).wrap_mode(TextWrapMode::Extend));
-            if !cache.ahead_label.is_empty() {
-                ui.add_space(4.0);
-                paint_arrow(ui, true, theme::PALETTE_GREEN());
-                mono_label(ui, &cache.ahead_label, theme::PALETTE_GREEN());
-            }
-            if !cache.behind_label.is_empty() {
-                ui.add_space(4.0);
-                paint_arrow(ui, false, theme::PALETTE_YELLOW());
-                mono_label(ui, &cache.behind_label, theme::PALETTE_YELLOW());
-            }
-            if !cache.dirty_label.is_empty() {
-                ui.add_space(4.0);
-                let (dot, _) = ui.allocate_exact_size(Vec2::splat(6.0), Sense::hover());
-                ui.painter().circle_filled(dot.center(), 3.0, theme::PALETTE_YELLOW());
-                mono_label(ui, &cache.dirty_label, theme::FG_SOFT());
-            }
-        },
-    );
+    walk_chip(ui.painter(), cache, rect.min.x + LINE_INDENT, rect.center().y, true);
     let response = ui.interact(rect, ui.make_persistent_id(("git_line", workspace.0)), Sense::hover());
     response.on_hover_ui_at_pointer(|ui| show_tooltip(ui, &cache.tooltip, cache.changed_at));
 }
@@ -316,7 +375,7 @@ fn toggle_row(ui: &mut Ui, id: Id, indent: f32, label: &str, count: &str, open: 
     response.widget_info(|| WidgetInfo::labeled(WidgetType::CollapsingHeader, true, label));
     let hovered = response.hovered();
     let painter = ui.painter();
-    let bg = inset_rect(rect, indent - 6.0);
+    let bg = inset_rect(rect, BG_INSET);
     if hovered {
         painter.rect_filled(
             bg,
@@ -341,7 +400,7 @@ fn toggle_row(ui: &mut Ui, id: Id, indent: f32, label: &str, count: &str, open: 
     };
     painter.add(Shape::convex_polygon(points, color, Stroke::NONE));
     let text = painter.text(
-        Pos2::new(x + 14.0, cy),
+        Pos2::new(x + LABEL_OFFSET, cy),
         Align2::LEFT_CENTER,
         label,
         FontId::proportional(10.5),
