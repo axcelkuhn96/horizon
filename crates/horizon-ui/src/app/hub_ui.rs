@@ -150,18 +150,20 @@ const PILL_RADIUS: u8 = 9;
 const PILL_PADDING_X: f32 = 8.0;
 const PILL_FONT_SIZE: f32 = 10.5;
 
-/// Width a pill needs for `text` (height is always [`PILL_HEIGHT`]).
+/// Total pill width for `text`, horizontal padding included (height is always
+/// [`PILL_HEIGHT`]). Feed the result straight into [`pill_rect`].
 #[must_use]
 pub(crate) fn pill_width(painter: &Painter, text: &str) -> f32 {
     let galley = painter.layout_no_wrap(text.to_owned(), FontId::proportional(PILL_FONT_SIZE), Color32::WHITE);
     galley.size().x + PILL_PADDING_X * 2.0
 }
 
-/// Rect of a pill whose top-left is `min` and whose text is `text_width` wide
-/// (horizontal padding is added; height is always [`PILL_HEIGHT`]).
+/// Rect of a pill whose top-left is `min` and whose total width is
+/// `padded_width` (as returned by [`pill_width`]; no padding is added here).
+/// Height is always [`PILL_HEIGHT`] and the width never drops below it.
 #[must_use]
-pub(crate) fn pill_rect(min: Pos2, text_width: f32) -> Rect {
-    Rect::from_min_size(min, Vec2::new(text_width.max(0.0) + PILL_PADDING_X * 2.0, PILL_HEIGHT))
+pub(crate) fn pill_rect(min: Pos2, padded_width: f32) -> Rect {
+    Rect::from_min_size(min, Vec2::new(padded_width.max(PILL_HEIGHT), PILL_HEIGHT))
 }
 
 /// Status pill (ok / expired / missing / danger) painted into `rect`; build
@@ -592,6 +594,10 @@ pub(crate) fn show_modal(
             ui.interact(framed.response.rect, sink, Sense::focusable_noninteractive());
         });
     ctx.move_to_top(modal.response.layer_id);
+    // Focus trap: widgets on layers below the modal (terminals included) stop
+    // being focusable and surrender focus, so Tab and terminal
+    // `request_focus` calls cannot pull keystrokes out from behind the scrim.
+    ctx.memory_mut(|memory| memory.set_modal_layer(modal.response.layer_id));
 
     if first_frame {
         ctx.memory_mut(|memory| memory.request_focus(initial_focus.unwrap_or(sink)));
@@ -735,12 +741,55 @@ mod tests {
     }
 
     #[test]
-    fn pill_rect_enforces_height_and_adds_padding() {
-        let rect = pill_rect(Pos2::new(10.0, 20.0), 30.0);
+    fn pill_rect_uses_padded_width_as_is() {
+        let rect = pill_rect(Pos2::new(10.0, 20.0), 46.0);
         assert_width(rect.height(), PILL_HEIGHT);
         assert_width(rect.height(), 18.0);
-        assert_width(rect.width(), 30.0 + PILL_PADDING_X * 2.0);
+        assert_width(rect.width(), 46.0);
         assert_eq!(rect.min, Pos2::new(10.0, 20.0));
-        assert_width(pill_rect(Pos2::ZERO, -5.0).width(), PILL_PADDING_X * 2.0);
+        assert_width(pill_rect(Pos2::ZERO, -5.0).width(), PILL_HEIGHT);
+    }
+
+    #[test]
+    fn modal_traps_focus_below_its_layer() {
+        let ctx = egui::Context::default();
+        let background = egui::Id::new("terminal_behind");
+        let mut raw = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0))),
+            ..Default::default()
+        };
+        let mut frame = |ctx: &egui::Context, raw: &egui::RawInput, request: bool| {
+            ctx.run(raw.clone(), |ctx| {
+                egui::Area::new(egui::Id::new("bg"))
+                    .order(egui::Order::Middle)
+                    .show(ctx, |ui| {
+                        let response = ui.interact(
+                            Rect::from_min_size(Pos2::new(5.0, 5.0), Vec2::splat(40.0)),
+                            background,
+                            Sense::focusable_noninteractive(),
+                        );
+                        if request {
+                            // What terminal_widget does on Tab.
+                            response.request_focus();
+                        }
+                    });
+                show_modal(ctx, egui::Id::new("trap"), 300.0, ModalPlacement::Center, None, |ui| {
+                    ui.label("modal");
+                });
+            });
+        };
+        // Frame 1 opens the modal; the modal layer takes effect from frame 2.
+        frame(&ctx, &raw, false);
+        raw.time = Some(0.1);
+        frame(&ctx, &raw, false);
+        assert!(ctx.memory(|m| m.top_modal_layer()).is_some());
+        // A request from the layer behind the modal is surrendered next frame
+        // and focus lands on the modal's sink.
+        raw.time = Some(0.2);
+        frame(&ctx, &raw, true);
+        raw.time = Some(0.3);
+        frame(&ctx, &raw, false);
+        assert!(!ctx.memory(|m| m.has_focus(background)));
+        assert!(ctx.memory(|m| m.focused()).is_some());
     }
 }
