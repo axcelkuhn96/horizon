@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use egui::{
     Align, Align2, Context, CornerRadius, FontId, Id, Layout, Order, Pos2, Rect, Sense, Stroke, UiBuilder, Vec2,
 };
@@ -6,6 +8,7 @@ use crate::app::root_chrome::{
     ROOT_TOOLBAR_BUTTON_GAP, ROOT_TOOLBAR_BUTTON_HEIGHT, ROOT_TOOLBAR_FPS_WIDTH, RootToolbarLayout, ToolbarAction,
     ToolbarItem, root_toolbar_layout,
 };
+use crate::app::usage_chips::{self, ChipsPlan};
 use crate::app::util;
 use crate::app::{HorizonApp, TOOLBAR_HEIGHT};
 use crate::{branding, theme};
@@ -13,7 +16,15 @@ use crate::{branding, theme};
 impl HorizonApp {
     pub(in crate::app) fn render_toolbar(&mut self, ctx: &Context) {
         let viewport = util::viewport_local_rect(ctx);
-        let layout = root_toolbar_layout(viewport, self.has_available_update());
+        let usage_bar = self.template_config.features.claude_usage_bar;
+        if usage_bar {
+            self.hub.ensure_usage_chip_cache(ctx);
+        }
+        let layout = root_toolbar_layout(
+            viewport,
+            self.has_available_update(),
+            self.hub.usage.chip_widths(usage_bar),
+        );
 
         egui::Area::new(Id::new("toolbar"))
             .fixed_pos(viewport.min)
@@ -84,13 +95,30 @@ impl HorizonApp {
 
                 for item in &layout.visible_items {
                     match *item {
+                        ToolbarItem::UsageChips => self.render_toolbar_usage_chips(ui, layout.chips),
                         ToolbarItem::FpsMeter => self.render_toolbar_fps_meter(ui),
                         ToolbarItem::Action(action) => self.render_toolbar_action_button(ui, action),
-                        ToolbarItem::OverflowMenu => self.render_toolbar_overflow_menu(ui, &layout.overflow_actions),
+                        ToolbarItem::OverflowMenu => {
+                            self.render_toolbar_overflow_menu(ui, &layout.overflow_actions, layout.chips);
+                        }
                     }
                 }
             },
         );
+    }
+
+    fn render_toolbar_usage_chips(&mut self, ui: &mut egui::Ui, plan: ChipsPlan) {
+        let output = usage_chips::show_chips(ui, &self.hub.usage, plan, Instant::now(), usage_chips::now_unix_ms());
+        if let Some(profile) = output.launch {
+            self.launch_claude_profile(ui.ctx(), &profile);
+        }
+        if output.wants_tokens {
+            self.hub.usage.start_tokens_poll();
+        }
+        if output.refresh {
+            self.hub.usage.request_refresh();
+            ui.ctx().request_repaint();
+        }
     }
 
     fn render_toolbar_fps_meter(&self, ui: &mut egui::Ui) {
@@ -193,11 +221,23 @@ impl HorizonApp {
         }
     }
 
-    fn render_toolbar_overflow_menu(&mut self, ui: &mut egui::Ui, overflow_actions: &[ToolbarAction]) {
+    fn render_toolbar_overflow_menu(
+        &mut self,
+        ui: &mut egui::Ui,
+        overflow_actions: &[ToolbarAction],
+        chips: ChipsPlan,
+    ) {
         ui.scope(|ui| {
             ui.style_mut().spacing.button_padding = Vec2::new(12.0, 7.0);
             ui.menu_button(egui::RichText::new("More").size(11.0).color(theme::FG_SOFT()), |ui| {
                 ui.set_min_width(160.0);
+
+                if let Some(profile) = usage_chips::show_overflow_rows(ui, &self.hub.usage, chips) {
+                    self.launch_claude_profile(ui.ctx(), &profile);
+                }
+                if chips.overflowing() && !overflow_actions.is_empty() {
+                    ui.separator();
+                }
 
                 for action in overflow_actions {
                     let button =

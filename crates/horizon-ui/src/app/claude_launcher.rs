@@ -95,12 +95,19 @@ fn initial_selection(profiles: &[String], preferred: Option<&str>) -> usize {
         .unwrap_or(0)
 }
 
-/// Derived preset of `profile_name` (`PanelKind::Claude`, alias == profile name).
+/// Derived profile presets are Claude presets carrying `CLAUDE_CONFIG_DIR`;
+/// the built-in base preset (`Claude Code` / `cc`) is not a profile.
+fn is_profile_preset(preset: &PresetConfig) -> bool {
+    preset.kind == PanelKind::Claude && preset.env.contains_key("CLAUDE_CONFIG_DIR")
+}
+
+/// Derived preset of `profile_name` (`PanelKind::Claude`, alias == profile name,
+/// carrying `CLAUDE_CONFIG_DIR`).
 #[must_use]
 fn find_profile_preset<'a>(presets: &'a [PresetConfig], profile_name: &str) -> Option<&'a PresetConfig> {
     presets
         .iter()
-        .find(|preset| preset.kind == PanelKind::Claude && preset.alias.as_deref() == Some(profile_name))
+        .find(|preset| is_profile_preset(preset) && preset.alias.as_deref() == Some(profile_name))
 }
 
 /// Profile names the picker lists: only derived profile presets (they carry
@@ -111,7 +118,7 @@ fn claude_profile_names(presets: &[PresetConfig]) -> Vec<String> {
     let mut names: Vec<String> = Vec::new();
     for alias in presets
         .iter()
-        .filter(|preset| preset.kind == PanelKind::Claude && preset.env.contains_key("CLAUDE_CONFIG_DIR"))
+        .filter(|preset| is_profile_preset(preset))
         .filter_map(|preset| preset.alias.as_deref())
     {
         if !names.iter().any(|name| name == alias) {
@@ -142,16 +149,15 @@ struct LauncherRow {
 
 impl HorizonApp {
     /// Account e-mail of `profile_name`, once the usage snapshot knows it.
-    #[expect(clippy::unused_self, reason = "seam: the usage snapshot is read here")]
-    fn profile_account_email(&self, _profile_name: &str) -> Option<&str> {
-        None
+    fn profile_account_email(&self, profile_name: &str) -> Option<&str> {
+        self.hub.usage.account_email(profile_name)
     }
 
-    /// Usage summary of `profile_name` from the usage snapshot, when present.
-    /// Whoever fills this calls `HubState::invalidate_launcher_rows` when it changes.
-    #[expect(clippy::unused_self, reason = "seam: the usage snapshot is read here")]
-    fn profile_usage_label(&self, _profile_name: &str) -> Option<&str> {
-        None
+    /// Usage summary of `profile_name` from the usage snapshot, when present
+    /// (formatted once when the snapshot arrives). The usage poller calls
+    /// `HubState::invalidate_launcher_rows` when it changes.
+    fn profile_usage_label(&self, profile_name: &str) -> Option<&str> {
+        self.hub.usage.usage_summary(profile_name)
     }
 
     fn active_workspace_label(&self) -> String {
@@ -583,15 +589,7 @@ fn paint_usage_column(painter: &Painter, rect: Rect, left: f32, usage: Option<&s
     }
 }
 
-/// One-line galley truncated with an ellipsis at `max_width`. Laid out with
-/// `Color32::PLACEHOLDER`: the paint call supplies the (theme) colour.
-fn elided(painter: &Painter, text: &str, font: FontId, max_width: f32) -> Arc<Galley> {
-    let mut job = egui::text::LayoutJob::simple_singleline(text.to_owned(), font, Color32::PLACEHOLDER);
-    job.wrap = egui::text::TextWrapping::truncate_at_width(max_width.max(1.0));
-    painter.layout_job(job)
-}
-
-/// [`elided`] reused from `slot` while `key` is unchanged.
+/// [`hub_ui::elided`] reused from `slot` while `key` is unchanged.
 fn cached_elided(
     slot: &mut Option<CachedGalley>,
     key: LayoutKey,
@@ -605,7 +603,7 @@ fn cached_elided(
     {
         return Arc::clone(&cached.galley);
     }
-    let galley = elided(painter, text, font, max_width);
+    let galley = hub_ui::elided(painter, text, font, max_width);
     *slot = Some(CachedGalley {
         key,
         galley: Arc::clone(&galley),
@@ -689,12 +687,19 @@ mod tests {
         let presets = vec![
             preset("Shell", None, PanelKind::Shell),
             preset("Other", Some("conta2"), PanelKind::Codex),
-            preset("Claude \u{b7} conta2", Some("conta2"), PanelKind::Claude),
+            with_config_dir(preset("Claude \u{b7} conta2", Some("conta2"), PanelKind::Claude)),
         ];
 
         let found = find_profile_preset(&presets, "conta2").expect("derived preset");
         assert_eq!(found.name, "Claude \u{b7} conta2");
         assert!(find_profile_preset(&presets, "conta3").is_none());
+    }
+
+    #[test]
+    fn find_profile_preset_ignores_the_base_preset_even_when_a_profile_shares_its_alias() {
+        let presets = vec![preset("Claude Code", Some("cc"), PanelKind::Claude)];
+
+        assert!(find_profile_preset(&presets, "cc").is_none());
     }
 
     #[test]

@@ -374,6 +374,7 @@ impl HorizonApp {
         self.poll_ssh_upload_flow();
         self.poll_git_watchers();
         self.poll_config_reload();
+        self.poll_claude_usage(ctx);
         self.poll_update_check();
         self.maybe_start_update_check();
 

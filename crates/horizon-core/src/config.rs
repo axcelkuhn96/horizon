@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 mod claude_profiles;
+mod features;
 mod input;
 mod workspace_template;
 pub use workspace_template::{
@@ -14,6 +15,7 @@ pub use claude_profiles::{
     CLAUDE_BASE_PRESET_NAME, ClaudeProfile, claude_profile_preset, discover_claude_profiles, expand_config_dir,
     validate_claude_profiles,
 };
+pub use features::FeaturesConfig;
 pub use input::{InputConfig, scroll_should_pan_canvas};
 
 use crate::config_migration::{self, CURRENT_CONFIG_VERSION};
@@ -516,22 +518,6 @@ impl Default for OverlaysConfig {
             minimap_height: 180.0,
             minimap_width: 320.0,
             sidebar_auto_hide: false,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(default)]
-pub struct FeaturesConfig {
-    pub attention_feed: bool,
-    pub speech: SpeechConfig,
-}
-
-impl Default for FeaturesConfig {
-    fn default() -> Self {
-        Self {
-            attention_feed: true,
-            speech: SpeechConfig::default(),
         }
     }
 }
