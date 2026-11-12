@@ -19,6 +19,9 @@ const TEXT_MAX_ROWS: usize = 8;
 /// Pixel height of one monospace text row, with a little slack for the edit margin.
 const TEXT_ROW_HEIGHT: f32 = 16.0;
 const DEFAULT_NAME: &str = "New prompt";
+/// How the saved prompts are used; shown above the list.
+const HELP: &str = "Run \"Prompt: <name>\" from the command palette. Enter inserts the text into the focused \
+terminal; Ctrl+Enter inserts it and presses Enter.";
 
 /// What the editor shows under one prompt.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -69,6 +72,11 @@ pub(super) fn remove_prompt(prompts: &mut Vec<SavedPrompt>, index: usize) -> boo
     true
 }
 
+/// `\r\n` and lone `\r` as `\n`: pasted Windows text must not trip the control-character rule.
+fn normalize_newlines(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\r', "\n")
+}
+
 /// Rows the text box shows for `text`: its line count, within the allowed range.
 fn text_rows(text: &str) -> usize {
     text.lines().count().clamp(TEXT_MIN_ROWS, TEXT_MAX_ROWS)
@@ -81,6 +89,20 @@ const fn counter_over(bytes: usize) -> bool {
 
 fn error_label(ui: &mut Ui, message: &str) {
     ui.label(RichText::new(message).size(11.0).color(theme::PALETTE_RED()));
+}
+
+/// Inline message for `kind`: red for a real error, dim for an unfinished draft that is merely
+/// skipped until it is filled in.
+fn issue_label(ui: &mut Ui, kind: PromptIssueKind) {
+    if kind.is_hard() {
+        error_label(ui, kind.message());
+    } else {
+        ui.label(
+            RichText::new(format!("{} \u{2014} skipped until filled in", kind.message()))
+                .size(11.0)
+                .color(theme::FG_DIM()),
+        );
+    }
 }
 
 fn outline(ui: &Ui, response: &egui::Response) {
@@ -102,6 +124,8 @@ pub(super) fn show(ui: &mut Ui, id_salt: impl Hash, prompts: &mut Vec<SavedPromp
     let mut changed = false;
     let mut remove = None;
 
+    super::dim_label(ui, HELP);
+    ui.add_space(6.0);
     if prompts.is_empty() {
         super::dim_label(ui, "No saved prompts yet.");
         ui.add_space(6.0);
@@ -153,13 +177,13 @@ fn prompt_card(ui: &mut Ui, prompt: &mut SavedPrompt, marks: RowMarks, focus_nam
                     name.scroll_to_me(Some(Align::Center));
                 }
                 changed |= name.changed();
-                if marks.name.is_some() {
+                if marks.name.is_some_and(PromptIssueKind::is_hard) {
                     outline(ui, &name);
                 }
                 delete = hub_ui::icon_button(ui, IconKind::Remove, "Delete prompt").clicked();
             });
             if let Some(kind) = marks.name {
-                error_label(ui, kind.message());
+                issue_label(ui, kind);
             }
 
             let rows = text_rows(&prompt.text);
@@ -178,13 +202,17 @@ fn prompt_card(ui: &mut Ui, prompt: &mut SavedPrompt, marks: RowMarks, focus_nam
                 })
                 .inner;
             changed |= text.changed();
-            if marks.text.is_some_and(|kind| kind != PromptIssueKind::EmptyText) {
+            if prompt.text.contains('\r') {
+                prompt.text = normalize_newlines(&prompt.text);
+                changed = true;
+            }
+            if marks.text.is_some_and(PromptIssueKind::is_hard) {
                 outline(ui, &text);
             }
 
             ui.horizontal(|ui| {
-                if let Some(kind) = marks.text.filter(|kind| *kind != PromptIssueKind::EmptyText) {
-                    error_label(ui, kind.message());
+                if let Some(kind) = marks.text {
+                    issue_label(ui, kind);
                 }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     let bytes = prompt.text.len();
@@ -255,6 +283,23 @@ mod tests {
 
         assert_eq!(marks[1].name, None);
         assert_eq!(marks[1].text, Some(PromptIssueKind::EmptyText));
+    }
+
+    #[test]
+    fn pasted_line_endings_become_plain_newlines() {
+        assert_eq!(normalize_newlines("a\r\nb\rc\nd"), "a\nb\nc\nd");
+        assert_eq!(normalize_newlines("no returns"), "no returns");
+        assert!(validate_prompts(&[prompt("n", &normalize_newlines("a\r\nb"))]).is_empty());
+    }
+
+    #[test]
+    fn drafts_are_hinted_but_not_hard_errors() {
+        let marks = row_marks(&[prompt("", "x"), prompt("n", "")]);
+
+        assert_eq!(marks[0].name, Some(PromptIssueKind::EmptyName));
+        assert_eq!(marks[1].text, Some(PromptIssueKind::EmptyText));
+        assert!(!PromptIssueKind::EmptyName.is_hard() && !PromptIssueKind::EmptyText.is_hard());
+        assert!(HELP.contains("Ctrl+Enter"));
     }
 
     #[test]

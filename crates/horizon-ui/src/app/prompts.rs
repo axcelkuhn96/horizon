@@ -3,22 +3,16 @@
 //! terminal through the same path `link send` uses. Editing lives in `settings/prompts_section`.
 //! Visual spec: `docs/design/claude-hub-ui.md` §14.
 
-use std::time::{Duration, Instant};
-
-use egui::{Align2, Context, Id, Margin, Order, Rect, Stroke, Vec2};
+use egui::Context;
 use horizon_core::{
-    Board, Config, EffectivePrompt, PanelId, PromptScope, SavedPrompt, WorkspaceConfig, effective_prompts,
+    Board, Config, EffectivePrompt, PanelId, PromptScope, SavedPrompt, WorkspaceConfig, WorkspaceTemplateRef,
+    effective_prompts,
 };
 
 use super::HorizonApp;
+use super::hub_toast::{Toast, ToastKind};
 use crate::command_palette::PromptEntry;
-use crate::theme;
 
-/// How long a refusal stays on screen.
-const NOTICE_TTL: Duration = Duration::from_secs(4);
-const NOTICE_EDGE: f32 = 12.0;
-const NOTICE_WIDTH: f32 = 320.0;
-const NOTICE_BAR_WIDTH: f32 = 3.0;
 /// Longest slice of a prompt's first line kept as a palette search keyword.
 const KEYWORD_CHARS: usize = 120;
 
@@ -43,8 +37,9 @@ impl Refusal {
 
 /// Whether `text` may be typed into a terminal whose bracketed-paste state is `bracketed`.
 /// Lines are never flattened: multi-line text needs bracketed paste, with or without Enter.
+/// Trailing blank space does not make a prompt multi-line (it is trimmed before it is typed).
 pub(super) fn check_insertable(text: &str, bracketed: bool) -> Result<(), Refusal> {
-    if !bracketed && text.contains('\n') {
+    if !bracketed && text.trim_end().contains('\n') {
         return Err(Refusal::MultilineWithoutPaste);
     }
     Ok(())
@@ -56,14 +51,22 @@ pub(super) fn target_panel(board: &Board) -> Option<PanelId> {
     board.panel(id)?.terminal().map(|_| id)
 }
 
-/// Prompts of the template named like the workspace (case-insensitively), if there is one.
-fn workspace_prompts<'a>(workspaces: &'a [WorkspaceConfig], name: Option<&str>) -> &'a [SavedPrompt] {
-    name.and_then(|name| workspaces.iter().find(|w| w.name.eq_ignore_ascii_case(name)))
+/// Prompts of the template behind a workspace: the one its template link names (which survives
+/// renaming the live workspace), else the one named like the workspace (case-insensitively).
+fn workspace_prompts<'a>(
+    workspaces: &'a [WorkspaceConfig],
+    live_name: Option<&str>,
+    template: Option<&WorkspaceTemplateRef>,
+) -> &'a [SavedPrompt] {
+    let named = |name: &str| workspaces.iter().find(|w| w.name.eq_ignore_ascii_case(name));
+    template
+        .and_then(|template| named(&template.workspace_name))
+        .or_else(|| live_name.and_then(named))
         .map_or(&[][..], |workspace| workspace.prompts.as_slice())
 }
 
 /// First line of `text`, cut to [`KEYWORD_CHARS`]: what the palette also matches on.
-fn first_line(text: &str) -> String {
+pub(super) fn first_line(text: &str) -> String {
     text.lines()
         .next()
         .unwrap_or_default()
@@ -85,11 +88,6 @@ fn palette_entries(list: &[EffectivePrompt]) -> Vec<PromptEntry> {
         .collect()
 }
 
-struct Notice {
-    text: &'static str,
-    until: Instant,
-}
-
 /// Prompt state owned by `HubState`.
 #[derive(Default)]
 pub(super) struct PromptsUi {
@@ -100,7 +98,6 @@ pub(super) struct PromptsUi {
     /// Palette rows for `effective`, same order.
     pub(super) entries: Vec<PromptEntry>,
     builds: u64,
-    notice: Option<Notice>,
 }
 
 impl PromptsUi {
@@ -117,36 +114,65 @@ impl PromptsUi {
         self.builds += 1;
     }
 
-    /// [`Self::sync`] for the workspace of the focused panel (else the active workspace).
-    pub(super) fn refresh(&mut self, config: &Config, board: &Board) {
-        let workspace = board
-            .focused
+    /// [`Self::sync`] for the workspace of `panel` (else of the focused panel, else the active
+    /// workspace).
+    pub(super) fn refresh_for(&mut self, config: &Config, board: &Board, panel: Option<PanelId>) {
+        let workspace = panel
+            .or(board.focused)
             .and_then(|id| board.panel(id))
             .map(|panel| panel.workspace_id)
             .or(board.active_workspace)
             .and_then(|id| board.workspace(id));
-        let local = workspace_prompts(&config.workspaces, workspace.map(|w| w.name.as_str()));
+        let local = workspace_prompts(
+            &config.workspaces,
+            workspace.map(|w| w.name.as_str()),
+            workspace.and_then(|w| w.template.as_ref()),
+        );
         self.sync(&config.prompts, local);
     }
 
-    pub(super) fn notify(&mut self, text: &'static str, now: Instant) {
-        self.notice = Some(Notice {
-            text,
-            until: now + NOTICE_TTL,
-        });
+    /// [`Self::refresh_for`] the focused panel.
+    pub(super) fn refresh(&mut self, config: &Config, board: &Board) {
+        self.refresh_for(config, board, None);
+    }
+
+    /// The effective prompts as of the last refresh.
+    pub(super) fn effective(&self) -> &[EffectivePrompt] {
+        &self.effective
     }
 }
 
 impl HorizonApp {
+    fn prompt_refusal(&mut self, text: &str) {
+        self.hub.toasts.push(Toast {
+            kind: ToastKind::Warn,
+            text: text.to_owned(),
+            panel: None,
+        });
+    }
+
     /// Inserts the effective prompt `index` into the focused terminal, without Enter unless
     /// `enter`. Palette entry points call this.
     pub(in crate::app) fn insert_prompt_by_index(&mut self, ctx: &Context, index: usize, enter: bool) {
         let Some(panel) = target_panel(&self.board) else {
-            self.hub.prompts.notify(Refusal::NoTerminal.message(), Instant::now());
+            self.prompt_refusal(Refusal::NoTerminal.message());
             return;
         };
         self.hub.prompts.refresh(&self.template_config, &self.board);
         let Some(prompt) = self.hub.prompts.effective.get(index).cloned() else {
+            return;
+        };
+        self.insert_prompt(ctx, panel, &prompt, enter);
+    }
+
+    /// Inserts the prompt called `name` (as the workspace of `panel` sees it) into `panel`. The
+    /// titlebar strip uses this; it looks the prompt up by name because the list may have moved
+    /// since the strip listed it.
+    pub(in crate::app) fn insert_prompt_named(&mut self, ctx: &Context, panel: PanelId, name: &str, enter: bool) {
+        self.hub
+            .prompts
+            .refresh_for(&self.template_config, &self.board, Some(panel));
+        let Some(prompt) = self.hub.prompts.effective.iter().find(|p| p.name == name).cloned() else {
             return;
         };
         self.insert_prompt(ctx, panel, &prompt, enter);
@@ -161,12 +187,14 @@ impl HorizonApp {
         prompt: &EffectivePrompt,
         enter: bool,
     ) {
+        // Trailing newlines would be typed as extra Enters on a terminal without bracketed paste.
+        let text = prompt.text.trim_end();
         let bracketed = self.board.bracketed_paste_enabled(panel);
-        if let Err(refusal) = check_insertable(&prompt.text, bracketed) {
-            self.hub.prompts.notify(refusal.message(), Instant::now());
+        if let Err(refusal) = check_insertable(text, bracketed) {
+            self.prompt_refusal(refusal.message());
             return;
         }
-        match self.board.deliver_text(panel, &prompt.text, enter) {
+        match self.board.deliver_text(panel, text, enter) {
             Ok(()) => {
                 if let Some(body) = crate::terminal_widget::terminal_focus_id(ctx, panel) {
                     ctx.memory_mut(|memory| memory.request_focus(body));
@@ -174,60 +202,16 @@ impl HorizonApp {
             }
             Err(error) => {
                 tracing::debug!(%error, "saved prompt was not delivered");
-                self.hub
-                    .prompts
-                    .notify("Could not write to this terminal", Instant::now());
+                self.prompt_refusal("Could not write to this terminal");
             }
         }
-    }
-
-    /// Paints the refusal notice, bottom-right, until it expires.
-    pub(in crate::app) fn render_prompt_notice(&mut self, ctx: &Context) {
-        let now = Instant::now();
-        let Some(notice) = self.hub.prompts.notice.as_ref() else {
-            return;
-        };
-        if now >= notice.until {
-            self.hub.prompts.notice = None;
-            return;
-        }
-        let (text, left) = (notice.text, notice.until - now);
-        let shown = egui::Area::new(Id::new("saved_prompt_notice"))
-            .anchor(Align2::RIGHT_BOTTOM, Vec2::new(-NOTICE_EDGE, -NOTICE_EDGE))
-            .order(Order::Tooltip)
-            .interactable(false)
-            .show(ctx, |ui| {
-                egui::Frame::default()
-                    .fill(theme::PANEL_BG_ALT())
-                    .stroke(Stroke::new(1.0_f32, theme::alpha(theme::FG_DIM(), 90)))
-                    .corner_radius(8)
-                    .inner_margin(Margin {
-                        left: 14,
-                        right: 12,
-                        top: 8,
-                        bottom: 8,
-                    })
-                    .show(ui, |ui| {
-                        ui.set_max_width(NOTICE_WIDTH);
-                        ui.label(egui::RichText::new(text).size(12.0).strong().color(theme::FG()));
-                    })
-                    .response
-                    .rect
-            });
-        let card = shown.inner;
-        let bar = Rect::from_min_max(card.min, egui::pos2(card.min.x + NOTICE_BAR_WIDTH, card.max.y));
-        ctx.layer_painter(shown.response.layer_id).rect_filled(
-            bar,
-            egui::CornerRadius::same(2),
-            theme::PALETTE_YELLOW(),
-        );
-        ctx.request_repaint_after(left);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use std::path::Path;
+    use std::time::{Duration, Instant};
 
     use super::*;
     use crate::app::test_support::{command_options, test_app};
@@ -284,21 +268,53 @@ mod tests {
         assert_eq!(Refusal::NoTerminal.message(), "Focus a terminal first");
     }
 
-    #[test]
-    fn workspace_prompts_are_found_by_name_ignoring_case() {
-        let workspaces = [WorkspaceConfig {
-            name: "Alpha".to_owned(),
+    fn template(name: &str, prompts: Vec<SavedPrompt>) -> WorkspaceConfig {
+        WorkspaceConfig {
+            name: name.to_owned(),
             color: None,
             cwd: None,
             position: None,
             terminals: Vec::new(),
             sidebar_collapsed: false,
-            prompts: vec![prompt("p", "t")],
-        }];
+            prompts,
+        }
+    }
 
-        assert_eq!(workspace_prompts(&workspaces, Some("alpha")).len(), 1);
-        assert!(workspace_prompts(&workspaces, Some("beta")).is_empty());
-        assert!(workspace_prompts(&workspaces, None).is_empty());
+    #[test]
+    fn workspace_prompts_are_found_by_name_ignoring_case() {
+        let workspaces = [template("Alpha", vec![prompt("p", "t")])];
+
+        assert_eq!(workspace_prompts(&workspaces, Some("alpha"), None).len(), 1);
+        assert!(workspace_prompts(&workspaces, Some("beta"), None).is_empty());
+        assert!(workspace_prompts(&workspaces, None, None).is_empty());
+    }
+
+    #[test]
+    fn workspace_prompts_survive_renaming_the_live_workspace() {
+        let workspaces = [template("Alpha", vec![prompt("p", "t")]), template("Beta", Vec::new())];
+        let link = WorkspaceTemplateRef {
+            workspace_index: 0,
+            workspace_name: "alpha".to_owned(),
+        };
+
+        let found = workspace_prompts(&workspaces, Some("renamed by the user"), Some(&link));
+
+        assert_eq!(found.len(), 1, "the template link wins over the live name");
+        let stale = WorkspaceTemplateRef {
+            workspace_index: 0,
+            workspace_name: "deleted template".to_owned(),
+        };
+        assert!(workspace_prompts(&workspaces, Some("Beta"), Some(&stale)).is_empty());
+        assert_eq!(workspace_prompts(&workspaces, Some("Alpha"), Some(&stale)).len(), 1);
+    }
+
+    #[test]
+    fn trailing_newlines_do_not_make_a_prompt_multiline() {
+        assert_eq!(check_insertable("one line\n\n", false), Ok(()));
+        assert_eq!(
+            check_insertable("one\ntwo\n", false),
+            Err(Refusal::MultilineWithoutPaste)
+        );
     }
 
     fn wait_until(mut condition: impl FnMut() -> bool) -> bool {
@@ -391,14 +407,35 @@ mod tests {
     }
 
     #[test]
-    fn inserting_without_a_focused_terminal_raises_the_notice() {
+    fn inserting_without_a_focused_terminal_raises_a_warn_toast() {
         let mut app = test_app();
         app.template_config.prompts = vec![prompt("review", "Review this.")];
         let ctx = Context::default();
 
         app.execute_command(&ctx, &CommandId::InsertPrompt(0));
 
-        let notice = app.hub.prompts.notice.as_ref().expect("a notice is shown");
-        assert_eq!(notice.text, "Focus a terminal first");
+        let toasts = app.hub.toasts.drain_visible(Instant::now());
+        assert_eq!(toasts.len(), 1);
+        assert_eq!(toasts[0].kind, ToastKind::Warn);
+        assert_eq!(toasts[0].text, "Focus a terminal first");
+    }
+
+    #[test]
+    fn insert_named_types_into_the_given_panel_and_trims_trailing_newlines() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("in");
+        let mut app = test_app();
+        app.template_config.prompts = vec![prompt("review", "Review this.\n\n")];
+        let id = sink_panel(&mut app, "sink", &file);
+        let ctx = Context::default();
+
+        app.insert_prompt_named(&ctx, id, "review", true);
+        app.insert_prompt_named(&ctx, id, "missing", true);
+
+        assert!(
+            file_equals(&file, "\u{1b}[200~Review this.\u{1b}[201~\r"),
+            "{:?}",
+            std::fs::read(&file)
+        );
     }
 }

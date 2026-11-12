@@ -52,6 +52,14 @@ impl PromptIssueKind {
         }
     }
 
+    /// Whether the problem makes the prompt unsafe or unusable to keep (control characters,
+    /// oversize, duplicate name), as opposed to an unfinished draft (empty name or text), which
+    /// the editor only hints at.
+    #[must_use]
+    pub const fn is_hard(self) -> bool {
+        !matches!(self, Self::EmptyName | Self::EmptyText)
+    }
+
     /// Whether the problem is with the name field (else with the text field).
     #[must_use]
     pub const fn is_name_issue(self) -> bool {
@@ -139,14 +147,28 @@ pub struct EffectivePrompt {
     pub scope: PromptScope,
 }
 
+/// Whether a prompt is complete enough to offer (draft rows with an empty name or text are not).
+fn is_usable(prompt: &SavedPrompt) -> bool {
+    !prompt.name.trim().is_empty() && !prompt.text.trim().is_empty()
+}
+
 /// The prompts available in a workspace: its own first, then the global ones it does not
 /// shadow. A workspace prompt hides the global prompt of the same name (case-insensitively).
+/// Unfinished drafts (empty name or text) are skipped, so inserting one can never send a bare Enter.
 #[must_use]
 pub fn effective_prompts(global: &[SavedPrompt], workspace: &[SavedPrompt]) -> Vec<EffectivePrompt> {
-    let shadowed: HashSet<String> = workspace.iter().map(|prompt| name_key(&prompt.name)).collect();
-    let own = workspace.iter().map(|prompt| (prompt, PromptScope::Workspace));
+    let shadowed: HashSet<String> = workspace
+        .iter()
+        .filter(|prompt| is_usable(prompt))
+        .map(|prompt| name_key(&prompt.name))
+        .collect();
+    let own = workspace
+        .iter()
+        .filter(|prompt| is_usable(prompt))
+        .map(|prompt| (prompt, PromptScope::Workspace));
     let inherited = global
         .iter()
+        .filter(|prompt| is_usable(prompt))
         .filter(|prompt| !shadowed.contains(&name_key(&prompt.name)))
         .map(|prompt| (prompt, PromptScope::Global));
     own.chain(inherited)
@@ -158,14 +180,51 @@ pub fn effective_prompts(global: &[SavedPrompt], workspace: &[SavedPrompt]) -> V
         .collect()
 }
 
-/// Validates the global list and every workspace template's list.
+/// Drops the prompts of `list` that are unsafe to keep (control characters, oversize, duplicate
+/// name; unfinished drafts stay), logging each one. Used at load so a hand-edited bad prompt
+/// never stops the whole config from loading.
+pub fn drop_invalid_prompts(list: &mut Vec<SavedPrompt>, scope: &str) {
+    let mut seen = HashSet::new();
+    let mut index = 0;
+    list.retain(|prompt| {
+        index += 1;
+        let issue = validate_prompts(std::slice::from_ref(prompt))
+            .into_iter()
+            .map(|issue| issue.kind)
+            .find(|kind| kind.is_hard())
+            .or_else(|| {
+                let name = prompt.name.trim();
+                (!name.is_empty() && !seen.insert(name_key(name))).then_some(PromptIssueKind::DuplicateName)
+            });
+        if let Some(kind) = issue {
+            tracing::warn!(
+                scope,
+                prompt = index,
+                problem = kind.message(),
+                "ignoring invalid saved prompt"
+            );
+        }
+        issue.is_none()
+    });
+}
+
+/// Applies [`drop_invalid_prompts`] to the global list and every workspace template's list.
+pub fn drop_invalid_all_prompts(global: &mut Vec<SavedPrompt>, workspaces: &mut [WorkspaceConfig]) {
+    drop_invalid_prompts(global, "prompts");
+    for workspace in workspaces {
+        drop_invalid_prompts(&mut workspace.prompts, &format!("workspace '{}'", workspace.name));
+    }
+}
+
+/// Validates the global list and every workspace template's list. Only hard problems fail;
+/// unfinished drafts (empty name or text) are allowed so a half-written row can be saved.
 ///
 /// # Errors
 ///
 /// Returns [`Error::Config`] naming the first offending prompt.
 pub fn validate_all_prompts(global: &[SavedPrompt], workspaces: &[WorkspaceConfig]) -> Result<()> {
     let describe = |scope: &str, list: &[SavedPrompt]| -> Result<()> {
-        match validate_prompts(list).first() {
+        match validate_prompts(list).iter().find(|issue| issue.kind.is_hard()) {
             None => Ok(()),
             Some(issue) => Err(Error::Config(format!(
                 "{scope} prompt #{}: {}",
@@ -291,5 +350,41 @@ mod tests {
 
         assert_eq!(list.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["b", "a"]);
         assert!(list.iter().all(|p| p.scope == PromptScope::Global));
+    }
+
+    #[test]
+    fn empty_name_or_text_is_a_draft_not_a_hard_error() {
+        assert!(!PromptIssueKind::EmptyName.is_hard());
+        assert!(!PromptIssueKind::EmptyText.is_hard());
+        assert!(PromptIssueKind::DuplicateName.is_hard());
+        assert!(PromptIssueKind::TextTooLong.is_hard());
+        assert!(PromptIssueKind::TextHasControlChars.is_hard());
+        assert!(validate_all_prompts(&[prompt("", ""), prompt("a", "")], &[]).is_ok());
+        assert!(validate_all_prompts(&[prompt("a", "x"), prompt("A", "y")], &[]).is_err());
+    }
+
+    #[test]
+    fn effective_prompts_skip_drafts_and_they_do_not_shadow() {
+        let list = effective_prompts(&[prompt("a", "global")], &[prompt("a", ""), prompt("", "x")]);
+
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].scope, PromptScope::Global);
+    }
+
+    #[test]
+    fn drop_invalid_keeps_drafts_and_the_first_of_a_duplicate() {
+        let mut list = vec![
+            prompt("a", "one"),
+            prompt("A", "dup"),
+            prompt("b", "x\r\ny"),
+            prompt("c", &"z".repeat(MAX_PROMPT_TEXT_BYTES + 1)),
+            prompt("draft", ""),
+            prompt("d", "fine"),
+        ];
+
+        drop_invalid_prompts(&mut list, "prompts");
+
+        let names: Vec<_> = list.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["a", "draft", "d"]);
     }
 }

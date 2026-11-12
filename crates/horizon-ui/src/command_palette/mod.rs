@@ -55,6 +55,9 @@ pub struct PromptEntry {
     pub keywords: Vec<String>,
 }
 
+/// Footer hint while a saved prompt is selected.
+const PROMPT_HINT: &str = "  Enter  insert    Ctrl+Enter  insert & send";
+
 // ── Palette state ───────────────────────────────────────────────────
 
 pub struct CommandPalette {
@@ -200,7 +203,7 @@ impl CommandPalette {
         ui.allocate_space(Vec2::new(layout.inner.width(), INPUT_HEIGHT));
         ui.add_space(4.0);
 
-        self.render_hint(ui, layout.inner.width());
+        self.render_hint(ui, layout.inner.width(), items);
         ui.add_space(4.0);
 
         match self.render_results(ui, items, layout) {
@@ -248,13 +251,18 @@ impl CommandPalette {
         }
     }
 
-    fn render_hint(&self, ui: &mut egui::Ui, width: f32) {
+    fn render_hint(&self, ui: &mut egui::Ui, width: f32, items: &[ResultItem]) {
         let (mode, _) = parse_mode(&self.query);
-        if mode != PaletteMode::All {
+        let on_prompt = items
+            .get(self.selected)
+            .is_some_and(|item| item.category == Category::Prompt);
+        let hint = if on_prompt {
+            PROMPT_HINT
+        } else if mode == PaletteMode::All {
+            "  >  presets + actions    @  panels"
+        } else {
             return;
-        }
-
-        let hint = "  >  presets + actions    @  panels";
+        };
         let rect = Rect::from_min_size(ui.cursor().min, Vec2::new(width, 16.0));
         ui.painter().text(
             rect.left_center() + Vec2::new(4.0, 0.0),
@@ -653,5 +661,11 @@ mod tests {
             CommandId::InsertPromptAndSend(2)
         );
         assert_eq!(enter_command(&CommandId::ToggleSidebar, true), CommandId::ToggleSidebar);
+    }
+
+    #[test]
+    fn the_prompt_hint_names_both_keys() {
+        assert!(PROMPT_HINT.contains("Enter  insert"));
+        assert!(PROMPT_HINT.contains("Ctrl+Enter  insert & send"));
     }
 }

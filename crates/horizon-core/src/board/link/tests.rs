@@ -1027,7 +1027,10 @@ fn deliver_text_without_enter_leaves_the_text_unsent() {
 
     board.deliver_text(id, "a\u{1b}[31mb", false).expect("deliver");
     assert!(
-        matches!(board.deliver_text(id, "x\ny", false), Err(crate::link::LinkError::BadRequest(_))),
+        matches!(
+            board.deliver_text(id, "x\ny", false),
+            Err(crate::link::LinkError::BadRequest(_))
+        ),
         "multi-line text without bracketed paste must not be typed"
     );
 
@@ -1045,6 +1048,9 @@ fn deliver_text_closed_panel_errors() {
     }));
 
     assert_eq!(board.deliver_text(id, "x", true), Err(crate::link::LinkError::Closed));
-    assert_eq!(board.deliver_text(PanelId(9_999), "x", true), Err(crate::link::LinkError::Closed));
+    assert_eq!(
+        board.deliver_text(PanelId(9_999), "x", true),
+        Err(crate::link::LinkError::Closed)
+    );
     assert!(!board.bracketed_paste_enabled(id));
 }

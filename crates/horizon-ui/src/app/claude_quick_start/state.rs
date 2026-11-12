@@ -82,8 +82,24 @@ impl Expanded {
             panel_id,
             stage: Stage::Profiles,
             rows,
+            prompts: Vec::new(),
             rows_version,
             layout: None,
+        }
+    }
+
+    /// Replaces the prompt rows; the cached layout may include them, so it is dropped.
+    pub(super) fn set_prompts(&mut self, prompts: Vec<Row>) {
+        self.prompts = prompts;
+        self.layout = None;
+    }
+
+    /// The rows `stage` lists: prompts on the prompt pages, profiles elsewhere.
+    pub(super) fn rows_for(&self, stage: Stage) -> &[Row] {
+        if stage.is_prompt_stage() {
+            &self.prompts
+        } else {
+            &self.rows
         }
     }
 
@@ -202,7 +218,7 @@ impl QuickStartUi {
             {
                 return Arc::clone(layout);
             }
-            let layout = Arc::new(build_layout(painter, stage, &expanded.rows, room));
+            let layout = Arc::new(build_layout(painter, stage, &expanded.rows, &expanded.prompts, room));
             expanded.layout = Some((key, Arc::clone(&layout)));
             return layout;
         }
@@ -235,6 +251,17 @@ mod tests {
 
     fn row(snapshot: Option<&ProfileUsage>, email: Option<&str>) -> Row {
         Row::new("claude2".to_owned(), Color32::WHITE, email, &RowUsage::new(snapshot))
+    }
+
+    #[test]
+    fn prompt_pages_list_the_prompt_rows_and_the_others_the_profiles() {
+        let mut expanded = Expanded::new(PanelId(1), vec![row(None, None)], 0);
+        expanded.set_prompts(vec![row(None, None), row(None, None)]);
+
+        assert_eq!(expanded.rows_for(Stage::Profiles).len(), 1);
+        assert_eq!(expanded.rows_for(Stage::Modes { profile: 0 }).len(), 1);
+        assert_eq!(expanded.rows_for(Stage::Prompts).len(), 2);
+        assert_eq!(expanded.rows_for(Stage::PromptModes { prompt: 1 }).len(), 2);
     }
 
     #[test]

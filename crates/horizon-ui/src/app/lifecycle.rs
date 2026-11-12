@@ -952,7 +952,6 @@ impl HorizonApp {
         self.render_command_palette(ctx);
         self.render_claude_launcher(ctx);
         self.render_send_to_panel(ctx);
-        self.render_prompt_notice(ctx);
         self.poll_link(ctx);
         self.render_remote_hosts_overlay(ctx);
         self.render_session_manager(ctx);

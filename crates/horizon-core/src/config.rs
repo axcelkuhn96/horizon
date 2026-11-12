@@ -650,6 +650,9 @@ impl Config {
             config_migration::migrate_if_needed(&mut config, config_path)?;
         }
 
+        // A bad hand-edited prompt must not make the whole file unloadable (the app would fall
+        // back to defaults and a later save would overwrite it): drop it with a warning instead.
+        prompts::drop_invalid_all_prompts(&mut config.prompts, &mut config.workspaces);
         config.validate()?;
         Ok(config)
     }
