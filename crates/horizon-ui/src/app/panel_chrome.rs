@@ -254,6 +254,12 @@ pub(super) fn paint_panel_chrome(ui: &mut egui::Ui, chrome: PanelChrome<'_>) {
         );
     }
 
+    // The agent chip stays on collapsed panels: a hidden Claude that waits for the user must
+    // still show it.
+    if let Some(chip) = chrome.agent {
+        paint_agent_chip(ui, &painter, chrome.panel_id, chip, chrome.focused);
+    }
+
     // Collapsed panels are titlebar-only: skip the badges/history meter that
     // describe the (hidden) body. The caret + close button stay visible.
     if !chrome.collapsed {
@@ -287,10 +293,6 @@ pub(super) fn paint_panel_chrome(ui: &mut egui::Ui, chrome: PanelChrome<'_>) {
 
         if let Some(view) = chrome.link_badge {
             paint_link_badge_stacked(&painter, &chrome, view);
-        }
-
-        if let Some(chip) = chrome.agent {
-            paint_agent_chip(ui, &painter, chrome.panel_id, chip, chrome.focused);
         }
 
         if chrome.scrollback_limit > 0 {

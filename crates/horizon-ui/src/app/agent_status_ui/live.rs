@@ -6,17 +6,22 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
+
+use egui::{Galley, Painter};
 
 use horizon_core::agent_detect::{ClaudeProcess, detect_claude_process};
 use horizon_core::agent_status::{
-    AgentStatus, LiveSessionInfo, LiveSessionRead, LiveSessionTracker, StatusEvent, read_live_session_if_changed,
+    AgentStatus, LiveSessionInfo, LiveSessionRead, LiveSessionTracker, StatusEvent, StatusSource,
+    read_live_session_if_changed,
 };
 use horizon_core::{ClaudeProfile, Config, PanelId, PanelKind, expand_config_dir};
 
 use super::toast::{StatusToast, toast_for_notice};
 use crate::app::HorizonApp;
 use crate::app::claude_quick_start::titlebar::shell_is_busy;
+use crate::app::hub_toast::Toast;
 
 /// Re-check interval of a panel whose Claude process is known.
 const KNOWN_INTERVAL: Duration = Duration::from_secs(2);
@@ -24,6 +29,8 @@ const KNOWN_INTERVAL: Duration = Duration::from_secs(2);
 const PROBE_INTERVAL: Duration = Duration::from_secs(3);
 /// Panels refreshed per frame at most.
 const MAX_REFRESHES_PER_FRAME: usize = 4;
+/// Longest wait between two process walks of a busy shell that hosts no Claude.
+const MAX_WALK_BACKOFF_SHIFT: u32 = 3;
 /// How long the profile list is reused.
 const PROFILES_TTL: Duration = Duration::from_secs(30);
 /// Toast requests kept while nobody takes them.
@@ -93,12 +100,23 @@ fn process_alive(_pid: u32) -> bool {
 struct Entry {
     next_check: Instant,
     live: Option<PanelLiveSession>,
+    /// Process walks in a row that found no Claude in a busy shell (drives the back-off).
+    fruitless_walks: u32,
+}
+
+/// The session name of a titlebar chip laid out for a scale; relaid only when either moves.
+struct CachedName {
+    text: String,
+    ppp_bits: u32,
+    galley: Arc<Galley>,
 }
 
 /// Agent-status state owned by `HubState`.
 #[derive(Default)]
 pub(in crate::app) struct StatusUi {
     entries: HashMap<PanelId, Entry>,
+    /// Galleys of the chips' session names, one per panel.
+    name_galleys: HashMap<PanelId, CachedName>,
     /// Panel count at the last eviction sweep.
     swept_for: usize,
     profiles: Option<(Instant, Vec<ClaudeProfile>)>,
@@ -112,6 +130,13 @@ impl StatusUi {
         self.entries.get(&panel_id)?.live.as_ref()
     }
 
+    /// Forgets the Claude of a panel whose process exited. Returns whether there was one.
+    fn forget_live(&mut self, panel_id: PanelId) -> bool {
+        self.entries
+            .get_mut(&panel_id)
+            .is_some_and(|entry| entry.live.take().is_some())
+    }
+
     fn is_due(&self, panel_id: PanelId, now: Instant) -> bool {
         self.entries.get(&panel_id).is_none_or(|entry| now >= entry.next_check)
     }
@@ -123,6 +148,45 @@ impl StatusUi {
         }
         self.swept_for = panel_count;
         self.entries.retain(|panel_id, _| live(*panel_id));
+        self.name_galleys.retain(|panel_id, _| live(*panel_id));
+    }
+
+    /// The galley of `panel_id`'s session name for its titlebar chip: laid out when the name or
+    /// the scale changed, shared from the cache otherwise. `None` while the name is unknown or
+    /// `visible` is false (narrow panel).
+    pub(in crate::app) fn name_galley(
+        &mut self,
+        painter: &Painter,
+        panel_id: PanelId,
+        visible: bool,
+    ) -> Option<Arc<Galley>> {
+        let name = self
+            .entries
+            .get(&panel_id)
+            .and_then(|entry| entry.live.as_ref())
+            .and_then(PanelLiveSession::session_name)
+            .filter(|_| visible);
+        let Some(name) = name else {
+            self.name_galleys.remove(&panel_id);
+            return None;
+        };
+        let ppp_bits = painter.ctx().pixels_per_point().to_bits();
+        if let Some(cached) = self.name_galleys.get(&panel_id)
+            && cached.ppp_bits == ppp_bits
+            && cached.text == name
+        {
+            return Some(Arc::clone(&cached.galley));
+        }
+        let galley = super::elided_name(painter, name);
+        self.name_galleys.insert(
+            panel_id,
+            CachedName {
+                text: name.to_owned(),
+                ppp_bits,
+                galley: Arc::clone(&galley),
+            },
+        );
+        Some(galley)
     }
 
     pub(super) fn queue_capped(&mut self, toast: StatusToast) {
@@ -158,6 +222,7 @@ impl StatusUi {
         let entry = self.entries.entry(panel_id).or_insert_with(|| Entry {
             next_check: now,
             live: None,
+            fruitless_walks: 0,
         });
         let mut events = Vec::new();
         if let Some(live) = entry.live.as_mut() {
@@ -174,25 +239,40 @@ impl StatusUi {
         if entry.live.is_none() {
             // A shell only has a Claude when something holds its terminal's foreground.
             let may_host_claude = kind == PanelKind::Claude || shell_is_busy(child_pid);
-            if may_host_claude && let Some(process) = detect_claude_process(child_pid, profiles) {
-                let profile = profile_name_for(profiles, home, &process.agent.config_dir);
-                let mut live = PanelLiveSession::new(&process, profile);
-                let (read_events, gone) = live.read_step();
-                // Without a readable session file there is nothing to follow (the hooks, if
-                // installed, still report); try the walk again next time.
-                if !gone && live.info.is_some() {
-                    events.extend(read_events);
-                    entry.live = Some(live);
+            if may_host_claude {
+                if let Some(process) = detect_claude_process(child_pid, profiles) {
+                    let profile = profile_name_for(profiles, home, &process.agent.config_dir);
+                    let mut live = PanelLiveSession::new(&process, profile);
+                    let (read_events, gone) = live.read_step();
+                    // Without a readable session file there is nothing to follow (the hooks, if
+                    // installed, still report); try the walk again next time.
+                    if !gone && live.info.is_some() {
+                        events.extend(read_events);
+                        entry.live = Some(live);
+                    }
                 }
-            }
-        }
-        entry.next_check = now
-            + if entry.live.is_some() {
-                KNOWN_INTERVAL
+                if entry.live.is_none() && kind != PanelKind::Claude {
+                    entry.fruitless_walks = entry.fruitless_walks.saturating_add(1);
+                }
             } else {
-                PROBE_INTERVAL
-            };
+                entry.fruitless_walks = 0;
+            }
+        } else {
+            entry.fruitless_walks = 0;
+        }
+        entry.next_check = now + next_interval(entry.live.is_some(), entry.fruitless_walks);
         events
+    }
+}
+
+/// Wait before the next check: short while a Claude is followed, [`PROBE_INTERVAL`] while none
+/// is expected, and doubling (up to 8x) for a busy shell whose process walks keep finding none
+/// (a long-running build), so that shell is not walked every few seconds.
+fn next_interval(has_live: bool, fruitless_walks: u32) -> Duration {
+    if has_live {
+        KNOWN_INTERVAL
+    } else {
+        PROBE_INTERVAL * (1_u32 << fruitless_walks.saturating_sub(1).min(MAX_WALK_BACKOFF_SHIFT))
     }
 }
 
@@ -216,19 +296,29 @@ impl HorizonApp {
             .evict_closed(self.board.panels.len(), |panel_id| self.board.panel(panel_id).is_some());
 
         let mut due: Vec<(PanelId, PanelKind, i32)> = Vec::new();
+        let mut exited: Vec<PanelId> = Vec::new();
         for panel in &self.board.panels {
-            if !matches!(panel.kind, PanelKind::Shell | PanelKind::Command | PanelKind::Claude) || panel.child_exited()
-            {
+            if !matches!(panel.kind, PanelKind::Shell | PanelKind::Command | PanelKind::Claude) {
+                continue;
+            }
+            if panel.child_exited() {
+                if self.hub.status_ui.live(panel.id).is_some() {
+                    exited.push(panel.id);
+                }
                 continue;
             }
             let Some(child_pid) = panel.child_pid() else {
                 continue;
             };
-            if self.hub.status_ui.is_due(panel.id, now) {
+            if due.len() < MAX_REFRESHES_PER_FRAME && self.hub.status_ui.is_due(panel.id, now) {
                 due.push((panel.id, panel.kind, child_pid));
-                if due.len() >= MAX_REFRESHES_PER_FRAME {
-                    break;
-                }
+            }
+        }
+        // A panel whose process exited has no Claude and no session name any more.
+        for panel_id in exited {
+            self.hub.status_ui.forget_live(panel_id);
+            if let Some(panel) = self.board.panel_mut(panel_id) {
+                panel.set_agent_session_name(None);
             }
         }
         if due.is_empty() {
@@ -242,7 +332,8 @@ impl HorizonApp {
                 .status_ui
                 .refresh(panel_id, kind, child_pid, &profiles, home.as_deref(), now);
             for event in events {
-                self.board.apply_agent_status(panel_id, event);
+                self.board
+                    .apply_agent_status_from(panel_id, event, StatusSource::SessionFile);
             }
             // The session name also lives on the panel, where the link list and labels read it.
             let name = self
@@ -268,6 +359,13 @@ impl HorizonApp {
                 toast_for_notice(&notice, account, subject)
             };
             self.hub.status_ui.queue_capped(toast);
+        }
+        for toast in self.hub.status_ui.take_toasts() {
+            self.hub.toasts.push(Toast {
+                kind: toast.kind.hub_kind(),
+                text: toast.text,
+                panel: Some(toast.panel),
+            });
         }
     }
 }
@@ -371,6 +469,7 @@ mod tests {
             Entry {
                 next_check: now + KNOWN_INTERVAL,
                 live: None,
+                fruitless_walks: 0,
             },
         );
         assert!(!ui.is_due(PanelId(1), now));
@@ -384,10 +483,78 @@ mod tests {
             Entry {
                 next_check: now,
                 live: None,
+                fruitless_walks: 0,
             },
         );
         ui.evict_closed(1, |_| false);
         assert_eq!(ui.entries.len(), 1, "no sweep while the panel count is unchanged");
+    }
+
+    #[test]
+    fn busy_shells_without_a_claude_are_walked_less_and_less_often() {
+        assert_eq!(next_interval(true, 0), KNOWN_INTERVAL);
+        assert_eq!(next_interval(false, 0), PROBE_INTERVAL);
+        assert_eq!(next_interval(false, 1), PROBE_INTERVAL);
+        assert_eq!(next_interval(false, 2), PROBE_INTERVAL * 2);
+        assert_eq!(next_interval(false, 3), PROBE_INTERVAL * 4);
+        assert_eq!(next_interval(false, 4), PROBE_INTERVAL * 8);
+        assert_eq!(next_interval(false, 500), PROBE_INTERVAL * 8, "the wait is capped");
+        assert_eq!(
+            next_interval(true, 9),
+            KNOWN_INTERVAL,
+            "a followed Claude keeps its pace"
+        );
+    }
+
+    #[test]
+    fn forgetting_the_live_session_of_an_exited_panel_reports_it_once() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut ui = StatusUi::default();
+        ui.entries.insert(
+            PanelId(1),
+            Entry {
+                next_check: Instant::now(),
+                live: Some(PanelLiveSession::new(&process(42, dir.path()), None)),
+                fruitless_walks: 0,
+            },
+        );
+
+        assert!(ui.live(PanelId(1)).is_some());
+        assert!(ui.forget_live(PanelId(1)));
+        assert!(ui.live(PanelId(1)).is_none());
+        assert!(!ui.forget_live(PanelId(1)));
+        assert!(!ui.forget_live(PanelId(2)));
+    }
+
+    #[test]
+    fn the_name_galley_is_laid_out_once_per_name_and_scale() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pid = std::process::id();
+        write_session(dir.path(), pid, "busy");
+        let mut live = PanelLiveSession::new(&process(pid, dir.path()), None);
+        let _ = live.read_step();
+        let mut ui = StatusUi::default();
+        ui.entries.insert(
+            PanelId(1),
+            Entry {
+                next_check: Instant::now(),
+                live: Some(live),
+                fruitless_walks: 0,
+            },
+        );
+        let ctx = egui::Context::default();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            let painter = Painter::new(ctx.clone(), egui::LayerId::background(), egui::Rect::EVERYTHING);
+
+            let first = ui.name_galley(&painter, PanelId(1), true).expect("galley");
+            let again = ui.name_galley(&painter, PanelId(1), true).expect("galley");
+            assert!(Arc::ptr_eq(&first, &again), "same name and scale: no new layout");
+
+            assert!(ui.name_galley(&painter, PanelId(1), false).is_none(), "narrow panel");
+            assert!(ui.name_galley(&painter, PanelId(2), true).is_none(), "unknown panel");
+            let relaid = ui.name_galley(&painter, PanelId(1), true).expect("galley");
+            assert!(!Arc::ptr_eq(&first, &relaid), "hiding the name drops its cache");
+        });
     }
 
     #[test]

@@ -5,6 +5,7 @@ use crate::panel::{PanelId, current_unix_millis};
 use crate::workspace::WorkspaceId;
 
 use super::Board;
+use super::agent_status::STATUS_ATTENTION_SOURCE;
 
 impl Board {
     pub(super) fn update_attention(&mut self) {
@@ -63,7 +64,9 @@ impl Board {
                 let ids_to_resolve: Vec<_> = self
                     .attention
                     .iter()
-                    .filter(|item| item.panel_id == Some(panel_id) && item.is_open())
+                    .filter(|item| {
+                        item.panel_id == Some(panel_id) && item.is_open() && item.source != STATUS_ATTENTION_SOURCE
+                    })
                     .map(|item| item.id)
                     .collect();
                 for id in ids_to_resolve {
@@ -100,11 +103,13 @@ impl Board {
         }
     }
 
+    /// Resolves the panel's open entries except the agent-status one, which only the status
+    /// machine resolves (when the agent works again or is gone).
     fn resolve_open_attention_for_panel(&mut self, panel_id: PanelId) {
         let ids_to_resolve: Vec<_> = self
             .attention
             .iter()
-            .filter(|item| item.panel_id == Some(panel_id) && item.is_open())
+            .filter(|item| item.panel_id == Some(panel_id) && item.is_open() && item.source != STATUS_ATTENTION_SOURCE)
             .map(|item| item.id)
             .collect();
         for id in ids_to_resolve {

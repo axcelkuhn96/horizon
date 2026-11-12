@@ -1,7 +1,7 @@
 //! Board side of the agent status: routes status events to panels, raises the attention entry
 //! and queues the toast requests the interface drains.
 
-use crate::agent_status::{AgentStatus, StatusAttention, StatusEvent};
+use crate::agent_status::{AgentStatus, StatusAttention, StatusEvent, StatusSource};
 use crate::attention::AttentionSeverity;
 use crate::panel::PanelId;
 use crate::workspace::WorkspaceId;
@@ -36,12 +36,18 @@ impl Board {
     /// (source [`STATUS_ATTENTION_SOURCE`]) and a [`StatusNotice`] are raised. Entries of this
     /// source resolve when the agent is `Working` again or gone. Unknown panels are ignored.
     pub fn apply_agent_status(&mut self, panel_id: PanelId, event: StatusEvent) {
-        let focused = self.focused == Some(panel_id);
+        self.apply_agent_status_from(panel_id, event, StatusSource::Hook);
+    }
+
+    /// [`Self::apply_agent_status`] for an event of a known `source`.
+    pub fn apply_agent_status_from(&mut self, panel_id: PanelId, event: StatusEvent, source: StatusSource) {
+        // A panel only counts as looked at while its window has the OS focus too.
+        let focused = self.focused == Some(panel_id) && self.window_focused;
         let Some(panel) = self.panel_mut(panel_id) else {
             return;
         };
         let workspace_id = panel.workspace_id;
-        let attention = panel.apply_status_event(event, focused);
+        let attention = panel.apply_status_event_from(event, focused, source);
         let status = panel.agent_status();
 
         if matches!(status, AgentStatus::Working | AgentStatus::Unknown) {
@@ -89,7 +95,9 @@ impl Board {
         for (panel_id, event) in events {
             self.apply_agent_status(panel_id, event);
         }
-        if let Some(panel) = self.focused.and_then(|id| self.panel_mut(id)) {
+        if self.window_focused
+            && let Some(panel) = self.focused.and_then(|id| self.panel_mut(id))
+        {
             panel.mark_agent_status_seen();
         }
     }
@@ -105,7 +113,7 @@ impl Board {
 
 #[cfg(test)]
 mod tests {
-    use crate::agent_status::{AgentStatus, StatusEvent};
+    use crate::agent_status::{AgentStatus, StatusEvent, StatusSource};
     use crate::attention::AttentionSeverity;
     use crate::board::Board;
     use crate::panel::{PanelId, PanelKind, PanelOptions};
@@ -220,6 +228,126 @@ mod tests {
             AgentStatus::Unknown
         );
         assert_eq!(board.unresolved_attention().count(), 0);
+    }
+
+    #[test]
+    fn a_focused_panel_in_an_unfocused_window_still_notifies() {
+        let (mut board, panel_id, _) = editor_board();
+        board.focused = Some(panel_id);
+        board.attention_enabled = true;
+        board.set_window_focused(false);
+
+        board.apply_agent_status(panel_id, event(AgentStatus::Working));
+        board.apply_agent_status(panel_id, event(AgentStatus::Done));
+        board.process_agent_status();
+
+        assert_eq!(board.take_status_notices().len(), 1);
+        assert!(!board.panel(panel_id).expect("panel").agent_status_seen());
+
+        board.set_window_focused(true);
+        board.process_agent_status();
+        assert!(board.panel(panel_id).expect("panel").agent_status_seen());
+    }
+
+    #[test]
+    fn a_session_file_done_does_not_overwrite_an_error_until_working_again() {
+        let (mut board, panel_id, other_id) = editor_board();
+        board.focused = Some(other_id);
+
+        board.apply_agent_status(panel_id, event(AgentStatus::Working));
+        board.apply_agent_status(panel_id, event(AgentStatus::Error));
+        board.apply_agent_status_from(panel_id, event(AgentStatus::Done), StatusSource::SessionFile);
+        assert_eq!(board.panel(panel_id).expect("panel").agent_status(), AgentStatus::Error);
+
+        board.apply_agent_status_from(panel_id, event(AgentStatus::Working), StatusSource::SessionFile);
+        board.apply_agent_status_from(panel_id, event(AgentStatus::Done), StatusSource::SessionFile);
+        assert_eq!(board.panel(panel_id).expect("panel").agent_status(), AgentStatus::Done);
+    }
+
+    #[test]
+    fn a_hook_done_still_replaces_an_error() {
+        let (mut board, panel_id, other_id) = editor_board();
+        board.focused = Some(other_id);
+
+        board.apply_agent_status(panel_id, event(AgentStatus::Error));
+        board.apply_agent_status(panel_id, event(AgentStatus::Done));
+
+        assert_eq!(board.panel(panel_id).expect("panel").agent_status(), AgentStatus::Done);
+    }
+
+    /// Runs `process_output` until `done` holds, or panics after a deadline.
+    #[cfg(unix)]
+    fn pump_until(board: &mut Board, what: &str, done: impl Fn(&Board) -> bool) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while std::time::Instant::now() < deadline {
+            board.process_output();
+            if done(board) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        panic!("timed out waiting for {what}");
+    }
+
+    fn open_status_entries(board: &Board, panel_id: PanelId) -> usize {
+        board
+            .unresolved_attention()
+            .filter(|item| item.panel_id == Some(panel_id) && item.source == STATUS_ATTENTION_SOURCE)
+            .count()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_status_entry_survives_the_blanket_attention_resolvers_of_a_terminal_panel() {
+        let mut board = Board::new();
+        let workspace_id = board.create_workspace("work");
+        let script = "printf '\\033]2;HORIZON_STATUS:working\\007'; sleep 0.3; \
+                      printf '\\033]2;HORIZON_STATUS:waiting\\007'; sleep 1; \
+                      printf 'after-marker\\n'; sleep 30";
+        let panel_id = board
+            .create_panel(
+                PanelOptions {
+                    kind: PanelKind::Command,
+                    command: Some("/bin/sh".to_owned()),
+                    args: vec!["-c".to_owned(), script.to_owned()],
+                    ..PanelOptions::default()
+                },
+                workspace_id,
+            )
+            .expect("command panel");
+        board.focused = None;
+        board.attention_enabled = true;
+
+        pump_until(&mut board, "the status entry", |board| {
+            open_status_entries(board, panel_id) == 1
+        });
+        // Later output makes `update_attention` run again (the shell prompt's detector finds
+        // nothing, which used to resolve every open entry of the panel).
+        pump_until(&mut board, "later terminal output", |board| {
+            board
+                .panel(panel_id)
+                .and_then(|panel| panel.terminal())
+                .is_some_and(|terminal| terminal.last_lines_text(16).contains("after-marker"))
+        });
+        board.process_output();
+
+        assert_eq!(open_status_entries(&board, panel_id), 1);
+        board.shutdown_terminal_panels();
+    }
+
+    #[test]
+    fn the_agent_signal_reconciler_leaves_the_status_entry_open() {
+        let (mut board, panel_id, other_id) = editor_board();
+        board.focused = Some(other_id);
+        board.attention_enabled = true;
+        board.apply_agent_status(panel_id, event(AgentStatus::Working));
+        board.apply_agent_status(panel_id, event(AgentStatus::Waiting));
+        let workspace_id = board.panel(panel_id).expect("panel").workspace_id;
+
+        board.reconcile_agent_attention_signal(panel_id, workspace_id, "Ready for input");
+        board.reconcile_agent_attention_signal(panel_id, workspace_id, "");
+
+        assert_eq!(open_status_entries(&board, panel_id), 1);
     }
 
     #[test]

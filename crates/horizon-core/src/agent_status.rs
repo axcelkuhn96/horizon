@@ -116,6 +116,15 @@ pub fn status_osc_title(state: AgentStatus, session_id: Option<&str>) -> String 
     }
 }
 
+/// Where a status event came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StatusSource {
+    /// A Claude hook (`horizon hook`), reported through the terminal title.
+    Hook,
+    /// The busy/idle field of Claude's live-session file.
+    SessionFile,
+}
+
 /// What a status change asks of the user interface.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StatusAttention {
@@ -196,6 +205,17 @@ impl AgentStatusState {
     /// every tool call is a no-op); `Unknown` clears everything. Returns what the user
     /// interface should do about the change.
     pub fn apply(&mut self, event: StatusEvent, panel_focused: bool) -> StatusAttention {
+        self.apply_from(event, panel_focused, StatusSource::Hook)
+    }
+
+    /// [`Self::apply`] for an event of a known `source`. The session file cannot tell an
+    /// error from a normal stop (both end idle), so its `Done` never overwrites an `Error`
+    /// the hooks reported; only a new `Working` leaves `Error`.
+    pub fn apply_from(&mut self, event: StatusEvent, panel_focused: bool, source: StatusSource) -> StatusAttention {
+        if source == StatusSource::SessionFile && event.state == AgentStatus::Done && self.status == AgentStatus::Error
+        {
+            return StatusAttention::None;
+        }
         if event.state == AgentStatus::Unknown {
             self.clear_on_exit();
             return StatusAttention::None;
@@ -449,5 +469,33 @@ mod tests {
         for pair in order.windows(2) {
             assert!(pair[0].priority() > pair[1].priority());
         }
+    }
+
+    #[test]
+    fn a_session_file_done_cannot_leave_error_but_working_can() {
+        let mut state = AgentStatusState::default();
+        state.apply(event(AgentStatus::Working), false);
+        state.apply(event(AgentStatus::Error), false);
+
+        let attention = state.apply_from(event(AgentStatus::Done), false, StatusSource::SessionFile);
+        assert_eq!(attention, StatusAttention::None);
+        assert_eq!(state.status(), AgentStatus::Error);
+
+        state.apply_from(event(AgentStatus::Working), false, StatusSource::SessionFile);
+        assert_eq!(state.status(), AgentStatus::Working);
+        state.apply_from(event(AgentStatus::Done), false, StatusSource::SessionFile);
+        assert_eq!(state.status(), AgentStatus::Done);
+    }
+
+    #[test]
+    fn a_hook_done_leaves_error_and_an_unknown_file_event_clears_it() {
+        let mut state = AgentStatusState::default();
+        state.apply(event(AgentStatus::Error), false);
+        state.apply_from(event(AgentStatus::Unknown), false, StatusSource::SessionFile);
+        assert_eq!(state.status(), AgentStatus::Unknown);
+
+        state.apply(event(AgentStatus::Error), false);
+        state.apply_from(event(AgentStatus::Done), false, StatusSource::Hook);
+        assert_eq!(state.status(), AgentStatus::Done);
     }
 }

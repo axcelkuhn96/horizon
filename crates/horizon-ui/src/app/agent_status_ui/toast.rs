@@ -1,18 +1,14 @@
 //! Toast requests for agent status changes.
 //!
-//! The text and kind are decided here; the request waits in [`StatusUi`] until the hub toast
-//! queue takes it (`StatusUi::take_toasts`). The queue (`HubToasts`, task 27) pushes one
-//! `Toast { kind, text, panel: Some(panel) }` per request.
-
-#![cfg_attr(
-    not(test),
-    expect(dead_code, reason = "drained into HubToasts once the hub toast queue is merged")
-)]
+//! The text and kind are decided here; the request waits in [`StatusUi`] until
+//! `HorizonApp::poll_agent_status` drains it (`StatusUi::take_toasts`) into the hub toast queue
+//! (`HubToasts`) as one `Toast { kind, text, panel: Some(panel) }` per request.
 
 use horizon_core::agent_status::AgentStatus;
 use horizon_core::{PanelId, StatusNotice};
 
 use super::StatusUi;
+use crate::app::hub_toast::ToastKind;
 
 /// Longest subject (session name or panel title) in a toast title.
 const SUBJECT_MAX_CHARS: usize = 40;
@@ -31,6 +27,17 @@ pub(in crate::app) struct StatusToast {
     pub(in crate::app) text: String,
     /// Panel a click on the toast focuses.
     pub(in crate::app) panel: PanelId,
+}
+
+impl StatusToastKind {
+    /// The kind the hub toast queue draws.
+    pub(in crate::app) const fn hub_kind(self) -> ToastKind {
+        match self {
+            Self::Info => ToastKind::Info,
+            Self::Warn => ToastKind::Warn,
+            Self::Error => ToastKind::Error,
+        }
+    }
 }
 
 fn elide(text: &str) -> String {
@@ -124,6 +131,13 @@ mod tests {
         assert!(!title.chars().any(char::is_control));
         assert!(title.chars().count() <= SUBJECT_MAX_CHARS + " finished".chars().count());
         assert!(title.contains('\u{2026}'));
+    }
+
+    #[test]
+    fn status_kinds_map_to_the_hub_kinds() {
+        assert_eq!(StatusToastKind::Info.hub_kind(), ToastKind::Info);
+        assert_eq!(StatusToastKind::Warn.hub_kind(), ToastKind::Warn);
+        assert_eq!(StatusToastKind::Error.hub_kind(), ToastKind::Error);
     }
 
     #[test]

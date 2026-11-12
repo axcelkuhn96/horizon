@@ -599,17 +599,27 @@ impl HorizonApp {
                     self.board.panel(panel_id).map(|p| p.display_title())
                 };
 
-                // The agent chip (status dot and session name) sits left of the quick-start strip.
-                let agent_chip = if snapshot.collapsed || snapshot.is_renaming {
+                // The agent chip (status dot and session name) sits left of the quick-start strip;
+                // collapsed panels keep it (their history meter is not painted, so it moves right).
+                let name_galley = if snapshot.is_renaming {
                     None
                 } else {
-                    self.agent_chip(ui.painter(), panel_id, snapshot.canvas_size.x)
+                    self.hub.status_ui.name_galley(
+                        ui.painter(),
+                        panel_id,
+                        super::agent_status_ui::name_visible(snapshot.canvas_size.x),
+                    )
+                };
+                let agent_chip = if snapshot.is_renaming {
+                    None
+                } else {
+                    self.agent_chip(panel_id, snapshot.canvas_size.x, name_galley)
                         .map(|chip| {
                             let rect = agent_chip_rect(
                                 rects.titlebar,
                                 if mic_eligible { rects.mic } else { rects.close },
                                 rects.collapse,
-                                snapshot.scrollback_limit > 0,
+                                snapshot.scrollback_limit > 0 && !snapshot.collapsed,
                                 quick_start.as_ref().map(|strip| strip.rect),
                                 chip.width(),
                             );

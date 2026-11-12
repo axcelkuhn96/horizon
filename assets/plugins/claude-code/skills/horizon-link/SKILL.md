@@ -16,8 +16,8 @@ through `HORIZON_BIN`:
   "${HORIZON_BIN:-horizon}" link read <target> [--lines N]
 
 `<target>` is a panel id or a panel name from `link list` (use the panel id
-shown by `list` when a name is ambiguous). `list` prints id, name, workspace, kind and whether
-the panel is an agent.
+shown by `list` when a name is ambiguous). `list` prints id, name, workspace, kind, the Claude
+session name (`-` when there is none) and whether the panel is an agent.
 
 How to use it:
 

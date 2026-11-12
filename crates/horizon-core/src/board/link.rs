@@ -133,6 +133,7 @@ impl Board {
                     .unwrap_or_default(),
                 kind: kind_label(panel.kind).to_owned(),
                 is_agent: detect_agents && Self::panel_runs_agent(panel),
+                session: panel.agent_session_name().map(strip_escapes),
             })
             .collect()
     }

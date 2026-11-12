@@ -51,6 +51,7 @@ mod tests {
             workspace: workspace.to_owned(),
             kind: "shell".to_owned(),
             is_agent: false,
+            session: None,
         }
     }
 

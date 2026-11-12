@@ -176,18 +176,22 @@ pub(super) struct ChipInputs<'a> {
     pub(super) account: Option<&'a str>,
     /// `false` in narrow panels: only the dot is drawn.
     pub(super) show_name: bool,
+    /// The elided name laid out and cached by [`StatusUi::name_galley`]; the name is not drawn
+    /// without it.
+    pub(super) name_galley: Option<Arc<Galley>>,
 }
 
 impl<'a> AgentChip<'a> {
     /// The chip for `inputs`, or `None` when there is nothing to show (no status and no name).
-    pub(super) fn build(painter: &Painter, inputs: &ChipInputs<'a>) -> Option<Self> {
-        let name_text = inputs.session_name.filter(|_| inputs.show_name);
+    pub(super) fn build(inputs: &ChipInputs<'a>) -> Option<Self> {
+        let name = inputs
+            .session_name
+            .filter(|_| inputs.show_name)
+            .and(inputs.name_galley.clone());
         let has_dot = inputs.status != AgentStatus::Unknown;
-        if !has_dot && name_text.is_none() {
+        if !has_dot && name.is_none() {
             return None;
         }
-        let name =
-            name_text.map(|text| hub_ui::elided(painter, text, FontId::proportional(NAME_FONT_SIZE), NAME_MAX_WIDTH));
         let name_width = name.as_ref().map_or(0.0, |galley| galley.size().x);
         let width = chip_width(has_dot, name.is_some().then_some(name_width));
         Some(Self {
@@ -249,26 +253,41 @@ impl<'a> AgentChip<'a> {
 /// Panels narrower than this show the status dot but not the session name.
 const NAME_MIN_PANEL_WIDTH: f32 = 520.0;
 
+/// Whether a panel `panel_width` wide has room for the session name next to the dot.
+#[must_use]
+pub(super) fn name_visible(panel_width: f32) -> bool {
+    panel_width >= NAME_MIN_PANEL_WIDTH
+}
+
+/// The session name as the chip draws it: one line, elided at [`NAME_MAX_WIDTH`].
+fn elided_name(painter: &Painter, text: &str) -> Arc<Galley> {
+    hub_ui::elided(painter, text, FontId::proportional(NAME_FONT_SIZE), NAME_MAX_WIDTH)
+}
+
 impl HorizonApp {
     /// The agent chip of `panel_id` (not placed yet), or `None` when the panel has no agent
-    /// status and no known session name.
-    pub(super) fn agent_chip(&self, painter: &Painter, panel_id: PanelId, panel_width: f32) -> Option<AgentChip<'_>> {
+    /// status and no known session name. `name_galley` is the cached layout from
+    /// [`StatusUi::name_galley`].
+    pub(super) fn agent_chip(
+        &self,
+        panel_id: PanelId,
+        panel_width: f32,
+        name_galley: Option<Arc<Galley>>,
+    ) -> Option<AgentChip<'_>> {
         let panel = self.board.panel(panel_id)?;
         let live = self.hub.status_ui.live(panel_id);
         let info = live.and_then(|live| live.info.as_ref());
-        AgentChip::build(
-            painter,
-            &ChipInputs {
-                status: panel.agent_status(),
-                seen: panel.agent_status_seen(),
-                session_name: info.and_then(|info| info.name.as_deref()),
-                session_id: panel
-                    .agent_session_id()
-                    .or_else(|| info.map(|info| info.session_id.as_str())),
-                account: live.and_then(|live| live.profile.as_deref()),
-                show_name: panel_width >= NAME_MIN_PANEL_WIDTH,
-            },
-        )
+        AgentChip::build(&ChipInputs {
+            status: panel.agent_status(),
+            seen: panel.agent_status_seen(),
+            session_name: info.and_then(|info| info.name.as_deref()),
+            session_id: panel
+                .agent_session_id()
+                .or_else(|| info.map(|info| info.session_id.as_str())),
+            account: live.and_then(|live| live.profile.as_deref()),
+            show_name: name_visible(panel_width),
+            name_galley,
+        })
     }
 }
 
@@ -372,19 +391,34 @@ mod tests {
     #[test]
     fn chip_is_absent_without_status_or_name() {
         let ctx = egui::Context::default();
-        let painter = egui::Painter::new(ctx, egui::LayerId::background(), Rect::EVERYTHING);
-        let inputs = |status, name: Option<&'static str>, show_name| ChipInputs {
-            status,
-            seen: true,
-            session_name: name,
-            session_id: None,
-            account: None,
-            show_name,
-        };
+        // Text layout needs fonts, which exist after the first frame.
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            let painter = egui::Painter::new(ctx.clone(), egui::LayerId::background(), Rect::EVERYTHING);
+            let galley = elided_name(&painter, "n");
+            let inputs = |status, name: Option<&'static str>, show_name| ChipInputs {
+                status,
+                seen: true,
+                session_name: name,
+                session_id: None,
+                account: None,
+                show_name,
+                name_galley: Some(Arc::clone(&galley)),
+            };
 
-        assert!(AgentChip::build(&painter, &inputs(AgentStatus::Unknown, None, true)).is_none());
-        assert!(AgentChip::build(&painter, &inputs(AgentStatus::Unknown, Some("n"), false)).is_none());
-        let dot_only = AgentChip::build(&painter, &inputs(AgentStatus::Working, Some("n"), false)).expect("dot");
-        assert!((dot_only.width() - DOT_SLOT).abs() < f32::EPSILON);
+            assert!(AgentChip::build(&inputs(AgentStatus::Unknown, None, true)).is_none());
+            assert!(AgentChip::build(&inputs(AgentStatus::Unknown, Some("n"), false)).is_none());
+            let dot_only = AgentChip::build(&inputs(AgentStatus::Working, Some("n"), false)).expect("dot");
+            assert!((dot_only.width() - DOT_SLOT).abs() < f32::EPSILON);
+            let named = AgentChip::build(&inputs(AgentStatus::Working, Some("n"), true)).expect("dot and name");
+            assert!(named.width() > DOT_SLOT, "a visible name widens the chip");
+            let name_only = AgentChip::build(&inputs(AgentStatus::Unknown, Some("n"), true)).expect("name");
+            assert!((name_only.width() - galley.size().x).abs() < f32::EPSILON);
+        });
+    }
+
+    #[test]
+    fn the_name_needs_a_wide_panel() {
+        assert!(!name_visible(NAME_MIN_PANEL_WIDTH - 1.0));
+        assert!(name_visible(NAME_MIN_PANEL_WIDTH));
     }
 }

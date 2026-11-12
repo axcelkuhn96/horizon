@@ -11,8 +11,11 @@ use std::process::ExitCode;
 
 use horizon_core::agent_status::{AgentStatus, is_valid_session_id, status_osc_title};
 
-/// Largest hook payload read from stdin.
-const MAX_STDIN_BYTES: u64 = 64 * 1024;
+/// Largest hook payload kept from stdin (Claude puts `session_id` first, but payloads such as a
+/// tool response can be large).
+const MAX_STDIN_BYTES: u64 = 1024 * 1024;
+/// Largest remainder read and thrown away, so Claude never sees a broken pipe on a big payload.
+const MAX_DRAIN_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Status a hook event reports. A fresh session is ready for input (`Done`); its end clears the
 /// status.
@@ -27,21 +30,43 @@ fn status_for_event(event: &str) -> Option<AgentStatus> {
     }
 }
 
-/// The `session_id` of a hook payload, when it is JSON with a well-formed one. Everything else
-/// in the payload is ignored.
+/// A top-level-looking string field of a hook payload: through JSON when the payload parses,
+/// otherwise (truncated at the cap) by scanning for `"key"`, `:` and the quoted value. Only
+/// values of plain characters are returned; the callers validate them further.
+fn string_field(stdin: &[u8], key: &str) -> Option<String> {
+    if let Ok(value) = serde_json::from_slice::<serde_json::Value>(stdin) {
+        return value.get(key)?.as_str().map(str::to_owned);
+    }
+    let text = String::from_utf8_lossy(stdin);
+    let rest = &text[text.find(&format!("\"{key}\""))? + key.len() + 2..];
+    let rest = rest.trim_start().strip_prefix(':')?.trim_start().strip_prefix('"')?;
+    let value = &rest[..rest.find('"')?];
+    (value.len() <= 128 && !value.contains('\\')).then(|| value.to_owned())
+}
+
+/// The `session_id` of a hook payload, when it has a well-formed one. Everything else in the
+/// payload is ignored.
 fn session_id_from_stdin(stdin: &[u8]) -> Option<String> {
-    let value: serde_json::Value = serde_json::from_slice(stdin).ok()?;
-    let session_id = value.get("session_id")?.as_str()?;
-    is_valid_session_id(session_id).then(|| session_id.to_owned())
+    string_field(stdin, "session_id").filter(|session_id| is_valid_session_id(session_id))
+}
+
+/// `true` for the `SessionStart` that follows a context compaction: the agent was mid-turn, so
+/// it must not read as a finished session. (The hook's matcher already leaves `compact` out;
+/// this covers a hooks file written by an older version.)
+fn is_compact_restart(event: &str, stdin: &[u8]) -> bool {
+    event == "session-start" && string_field(stdin, "source").as_deref() == Some("compact")
 }
 
 /// The bytes to write to the terminal, or `None` when the hook must do nothing: an unknown
-/// event, or no `HORIZON_PANEL_ID` (Claude running outside Horizon).
+/// event, a compaction restart, or no `HORIZON_PANEL_ID` (Claude running outside Horizon).
 fn osc_bytes(event: &str, panel_id: Option<&str>, stdin: &[u8]) -> Option<Vec<u8>> {
     if panel_id.is_none_or(str::is_empty) {
         return None;
     }
     let status = status_for_event(event)?;
+    if is_compact_restart(event, stdin) {
+        return None;
+    }
     let session_id = session_id_from_stdin(stdin);
     let title = status_osc_title(status, session_id.as_deref());
     Some(format!("\x1b]2;{title}\x07").into_bytes())
@@ -52,9 +77,12 @@ fn read_stdin() -> Vec<u8> {
     if stdin.is_terminal() {
         return Vec::new();
     }
+    let mut lock = stdin.lock();
     let mut bytes = Vec::new();
     // A failed read leaves whatever arrived; the status is sent without a session id.
-    let _ = stdin.lock().take(MAX_STDIN_BYTES).read_to_end(&mut bytes);
+    let _ = (&mut lock).take(MAX_STDIN_BYTES).read_to_end(&mut bytes);
+    // Whatever Claude still writes is consumed, or its write would fail with a broken pipe.
+    let _ = std::io::copy(&mut (&mut lock).take(MAX_DRAIN_BYTES), &mut std::io::sink());
     bytes
 }
 
@@ -116,6 +144,26 @@ mod tests {
         // Invalid UTF-8 and truncated JSON must not panic either.
         assert_eq!(session_id_from_stdin(&[0xff, 0xfe, 0x00]), None);
         assert_eq!(session_id_from_stdin(br#"{"session_id":"f054f32b-78"#), None);
+    }
+
+    #[test]
+    fn hook_cli_finds_the_session_id_in_a_payload_cut_at_the_cap() {
+        let truncated = format!(r#"{{"session_id": "{SESSION}", "tool_response":"aaaaaaaaaaaaaaaa"#);
+
+        assert_eq!(session_id_from_stdin(truncated.as_bytes()).as_deref(), Some(SESSION));
+        assert_eq!(session_id_from_stdin(br#"{"session_id":"short-"#), None);
+        assert_eq!(session_id_from_stdin(br#"{"x":"session_id"#), None);
+    }
+
+    #[test]
+    fn a_compaction_restart_reports_nothing() {
+        let compact = br#"{"session_id":"f054f32b-7840-4c95-9f84-e61f37db5f5c","source":"compact"}"#;
+        let startup = br#"{"session_id":"f054f32b-7840-4c95-9f84-e61f37db5f5c","source":"startup"}"#;
+
+        assert_eq!(osc_bytes("session-start", Some("p1"), compact), None);
+        assert!(osc_bytes("session-start", Some("p1"), startup).is_some());
+        // The source only matters for the session-start event.
+        assert!(osc_bytes("working", Some("p1"), compact).is_some());
     }
 
     #[test]

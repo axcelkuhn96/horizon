@@ -110,7 +110,7 @@ pub(crate) fn render_hooks_json(exe: &Path) -> String {
             "Notification": hook("waiting", Some("permission_prompt|elicitation_dialog")),
             "Stop": hook("done", None),
             "StopFailure": hook("error", None),
-            "SessionStart": hook("session-start", None),
+            "SessionStart": hook("session-start", Some("startup|resume|clear")),
             "SessionEnd": hook("session-end", None),
         },
     });
@@ -304,6 +304,8 @@ mod tests {
             "permission_prompt|elicitation_dialog"
         );
         assert!(document["hooks"]["Stop"][0].get("matcher").is_none());
+        // `compact` also fires SessionStart mid-turn; it must not read as a finished session.
+        assert_eq!(document["hooks"]["SessionStart"][0]["matcher"], "startup|resume|clear");
     }
 
     #[test]
