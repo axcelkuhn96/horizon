@@ -26,6 +26,7 @@ fn search_shortcut_command(focused_kind: Option<PanelKind>) -> CommandId {
 
 impl HorizonApp {
     pub(in crate::app) fn open_command_palette(&mut self) {
+        self.hub.claude_launcher = None;
         self.command_palette = Some(CommandPalette::new());
     }
 
@@ -33,6 +34,7 @@ impl HorizonApp {
         self.command_palette = if self.command_palette.is_some() {
             None
         } else {
+            self.hub.claude_launcher = None;
             Some(CommandPalette::new())
         };
     }
@@ -215,6 +217,7 @@ impl HorizonApp {
             }
             CommandId::SearchFileContents => self.open_explorer_search(),
             CommandId::PasteIntoExplorer => self.paste_files_into_explorer(),
+            CommandId::OpenClaudeLauncher => self.toggle_claude_launcher(),
             CommandId::ToggleScrollPan => {
                 self.scroll_pans_over_panels = !self.scroll_pans_over_panels;
                 tracing::info!(
@@ -290,6 +293,7 @@ impl HorizonApp {
             (self.shortcuts.toggle_sessions, CommandId::ToggleSessions),
             (self.shortcuts.new_terminal, CommandId::NewPanel),
             (self.shortcuts.toggle_scroll_pan, CommandId::ToggleScrollPan),
+            (self.shortcuts.claude_launcher, CommandId::OpenClaudeLauncher),
         ];
 
         // The search shortcut (Ctrl+Shift+F) is handled separately so it can be

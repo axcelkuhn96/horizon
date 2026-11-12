@@ -44,6 +44,10 @@ pub enum CommandId {
     /// Flip whether 2-finger scroll over a panel pans the canvas or scrolls
     /// the terminal scrollback.
     ToggleScrollPan,
+
+    // Claude
+    /// Open the Claude profile launcher overlay.
+    OpenClaudeLauncher,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -188,6 +192,12 @@ fn view_commands(shortcuts: &AppShortcuts, primary_label: &str) -> Vec<CommandEn
 
 fn global_commands(shortcuts: &AppShortcuts, primary_label: &str) -> Vec<CommandEntry> {
     vec![
+        command_entry(
+            CommandId::OpenClaudeLauncher,
+            "Claude launcher",
+            shortcuts.claude_launcher.display_label(primary_label),
+            &["claude", "session", "profile", "account", "launch"],
+        ),
         command_entry(
             CommandId::ToggleSettings,
             "Settings",

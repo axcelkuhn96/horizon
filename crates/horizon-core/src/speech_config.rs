@@ -294,6 +294,7 @@ fn validate_speech_binding(
         ("fullscreen_window", shortcuts.fullscreen_window),
         ("save_editor", shortcuts.save_editor),
         ("search", shortcuts.search),
+        ("claude_launcher", shortcuts.claude_launcher),
     ];
     if let Some((name, _)) = global_bindings.iter().find(|(_, global)| binding.overlaps(*global)) {
         return Err(Error::Config(format!(
@@ -506,5 +507,15 @@ features:
         config.features.speech.hotkey = "F11".to_string(); // fullscreen_panel default
         let error = config.validate().expect_err("overlapping hotkey must be rejected");
         assert!(error.to_string().contains("fullscreen_panel"));
+    }
+
+    #[test]
+    fn validate_rejects_speech_hotkey_overlapping_claude_launcher() {
+        let mut config = Config::default();
+        config.features.speech.enabled = true;
+        config.features.speech.model = "/m.gguf".to_string();
+        config.features.speech.hotkey = "Ctrl+Shift+L".to_string(); // claude_launcher default
+        let error = config.validate().expect_err("overlapping hotkey must be rejected");
+        assert!(error.to_string().contains("claude_launcher"), "{error}");
     }
 }
