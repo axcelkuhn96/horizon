@@ -70,7 +70,7 @@ pub(in crate::app) struct StripView {
     pub(super) items: ViewItems,
     pub(super) notice: Option<NoticeView>,
     /// `false` while the button cannot be used: drawn faded and inert.
-    pub(super) enabled: bool,
+    pub(in crate::app) enabled: bool,
     /// An item was clicked this frame.
     pub(in crate::app) clicked: bool,
 }

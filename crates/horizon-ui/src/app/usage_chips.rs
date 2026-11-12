@@ -23,7 +23,7 @@ use super::hub_state::HubState;
 use super::hub_ui::{self, Severity};
 
 pub(super) use paint::{show_chips, show_overflow_rows};
-pub(super) use time::{format_clock, local_offset_secs};
+pub(super) use time::{format_clock, format_relative, local_offset_secs};
 
 const IDENT_MAX_FULL: usize = 10;
 const IDENT_MAX_COMPACT: usize = 5;
@@ -571,6 +571,16 @@ impl ClaudeUsageState {
 
     pub(super) fn entries(&self) -> &[ChipEntry] {
         &self.entries
+    }
+
+    /// Profiles being polled, in the order of [`Self::entries`].
+    pub(super) fn profiles(&self) -> &[ClaudeProfile] {
+        &self.profiles
+    }
+
+    /// Moves whenever the entries (snapshot or profile list) change; keys per-panel caches.
+    pub(super) fn version(&self) -> u64 {
+        self.version
     }
 
     /// Account e-mail of `name` from the snapshot, once known.
