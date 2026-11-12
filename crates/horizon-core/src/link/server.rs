@@ -44,10 +44,18 @@ impl PendingRequest {
         (pending, answer, abandoned)
     }
 
-    /// True once the connection stopped waiting for the answer (timeout or shutdown).
+    /// True once the connection stopped waiting for the answer (timeout, shutdown, or the
+    /// client of an `ask` went away).
     #[must_use]
     pub fn is_abandoned(&self) -> bool {
         self.abandoned.load(Ordering::Acquire)
+    }
+
+    /// The flag behind [`Self::is_abandoned`], for a request that outlives this call (a
+    /// pending `ask`) and must notice later that its client left.
+    #[must_use]
+    pub fn abandoned_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.abandoned)
     }
 }
 

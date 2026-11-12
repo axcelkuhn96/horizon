@@ -3,11 +3,14 @@
 //! The "Send to panel" dialog lives in [`send_dialog`].
 //! Visual spec: `docs/design/claude-hub-ui.md` §6.
 
+mod asks;
 mod send_dialog;
+mod visual;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
 use egui::{Align2, Context, CornerRadius, FontId, Id, Painter, Pos2, Rect, Stroke, StrokeKind, Ui, Vec2};
@@ -18,6 +21,7 @@ use horizon_core::link::{
 use horizon_core::{PanelId, Waker};
 
 use self::send_dialog::SendToPanelState;
+pub(super) use self::visual::LinkVisual;
 use super::HorizonApp;
 use crate::theme;
 
@@ -103,18 +107,23 @@ fn drain_capped<T>(mut next: impl FnMut() -> Option<T>, cap: usize) -> Vec<T> {
     taken
 }
 
-/// Answers each queued request through `run` and sends the response back.
-/// Returns true when the UI should repaint: something was handled, or the
+/// Hands each queued request to `run`, which answers through the sender it is given (an
+/// `ask` is answered later, not now) and keeps the `abandoned` flag of an ask to notice its
+/// client leaving. Returns true when the UI should repaint: something was handled, or the
 /// batch hit `cap` so more may be waiting for the next frame.
-fn answer_batch(batch: Vec<PendingRequest>, cap: usize, mut run: impl FnMut(LinkRequest) -> LinkResponse) -> bool {
+fn answer_batch(
+    batch: Vec<PendingRequest>,
+    cap: usize,
+    mut run: impl FnMut(LinkRequest, &std::sync::mpsc::Sender<LinkResponse>, &Arc<AtomicBool>),
+) -> bool {
     let mut repaint = batch.len() >= cap;
     for pending in batch {
         // The client was already told "no answer"; acting now could double a retried send.
         if pending.is_abandoned() {
             continue;
         }
-        let response = run(pending.request);
-        let _ = pending.reply.send(response);
+        let abandoned = pending.abandoned_flag();
+        run(pending.request, &pending.reply, &abandoned);
         repaint = true;
     }
     repaint
@@ -138,6 +147,14 @@ fn sender_label(from: Option<&str>) -> String {
     }
 }
 
+/// Badge label of a `send` request's sender (`link` for other requests).
+fn send_label(request: &LinkRequest) -> String {
+    match request {
+        LinkRequest::Send { from, .. } => sender_label(from.as_deref()),
+        _ => FALLBACK_SENDER.to_owned(),
+    }
+}
+
 /// Name shortened to `max` characters, ending in an ellipsis when cut.
 fn truncate_chars(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
@@ -152,15 +169,37 @@ fn truncate_chars(text: &str, max: usize) -> String {
 // State
 // ---------------------------------------------------------------------------
 
+/// What the badge says about the message: a plain one, a question, or an answer.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BadgeKind {
+    Message,
+    AskReceived,
+    Reply,
+}
+
+impl BadgeKind {
+    const fn prefix(self) -> &'static str {
+        match self {
+            Self::Message => "from",
+            Self::AskReceived => "ask from",
+            Self::Reply => "reply from",
+        }
+    }
+}
+
 struct LinkBadge {
     received_at: Instant,
     from: String,
+    kind: BadgeKind,
 }
 
-/// What the titlebar paints for a panel that just received a message.
+/// What the titlebar paints: for a panel that just received a message, or one that waits
+/// for the answer to its ask (`pending`: yellow, static).
 pub(super) struct LinkBadgeView {
     pub(super) from: String,
     pub(super) opacity: f32,
+    prefix: &'static str,
+    pending: bool,
 }
 
 /// Panel-link state owned by `HubState`.
@@ -184,6 +223,8 @@ impl LinkUiState {
         (opacity > 0.0).then(|| LinkBadgeView {
             from: badge.from.clone(),
             opacity,
+            prefix: badge.kind.prefix(),
+            pending: false,
         })
     }
 
@@ -226,15 +267,22 @@ impl HorizonApp {
         self.hub.link.server = None;
     }
 
-    /// Per-frame link work: answer queued requests, then schedule the single
-    /// wake-up the badges need and draw the "Copied" notice.
+    /// Per-frame link work: answer queued requests, fail the asks whose panel closed or
+    /// whose time ran out, then schedule the single wake-up the badges and lines need and
+    /// draw the "Copied" notice and the hub toasts.
     pub(super) fn poll_link(&mut self, ctx: &Context) {
         self.drain_link_requests(ctx);
         let now = Instant::now();
-        if let Some(wake) = self.hub.link.prune_and_next_wake(now) {
+        self.sweep_link_asks(ctx, now);
+        let wakes = [
+            self.hub.link.prune_and_next_wake(now),
+            visual::prune_visuals(&mut self.hub.link_visuals, now),
+        ];
+        if let Some(wake) = wakes.into_iter().flatten().min() {
             ctx.request_repaint_after(wake);
         }
         self.render_copied_notice(ctx, now);
+        self.render_hub_toasts(ctx);
     }
 
     fn drain_link_requests(&mut self, ctx: &Context) {
@@ -242,50 +290,49 @@ impl HorizonApp {
             return;
         };
         let batch = drain_capped(|| server.try_recv(), MAX_REQUESTS_PER_FRAME);
-        if answer_batch(batch, MAX_REQUESTS_PER_FRAME, |request| {
-            self.execute_link_request(request)
-        }) {
+        let now = Instant::now();
+        let mut effects = Vec::new();
+        let repaint = answer_batch(batch, MAX_REQUESTS_PER_FRAME, |request, reply, abandoned| {
+            let label = send_label(&request);
+            if let Some(effect) = self
+                .board
+                .serve_link(&mut self.hub.link_asks, request, reply, abandoned, now)
+            {
+                effects.push((effect, label));
+            }
+        });
+        for (effect, label) in effects {
+            self.apply_link_effect(&effect, &label);
+        }
+        if repaint {
             ctx.request_repaint();
         }
     }
 
-    /// Runs one request on the board (the same sanitizing path for the socket
-    /// and the dialog) and flags the receiving panel's badge after a delivery.
+    /// Runs one `send` on the board (the same sanitizing path as the socket) for the
+    /// dialog, and badges the receivers after a delivery.
     fn execute_link_request(&mut self, request: LinkRequest) -> LinkResponse {
-        let (receiver, sender) = match &request {
-            LinkRequest::Send { target, from, .. } => (self.link_receiver(target), sender_label(from.as_deref())),
-            _ => (None, FALLBACK_SENDER.to_owned()),
-        };
-        let response = self.board.handle_link_request(request);
-        if matches!(response, LinkResponse::Ok(LinkOk::Sent))
-            && let Some(panel_id) = receiver
-        {
-            self.hub.link.badges.insert(
-                panel_id,
-                LinkBadge {
-                    received_at: Instant::now(),
-                    from: sender,
-                },
-            );
+        let label = send_label(&request);
+        let (response, effect) = self.board.handle_link_request_with_effect(request);
+        if let Some(effect) = effect {
+            self.apply_link_effect(&effect, &label);
         }
         response
     }
 
-    /// Panel a `send` to `target` would reach, resolved the way the board does.
-    fn link_receiver(&mut self, target: &str) -> Option<PanelId> {
-        let LinkResponse::Ok(LinkOk::Panels(panels)) = self.board.handle_link_request(LinkRequest::List) else {
-            return None;
-        };
-        let info = resolve_target(&panels, target).ok()?;
-        self.board.panel_id_by_local_id(&info.id)
-    }
-
     /// Badge to paint on `panel_id`'s titlebar this frame, if any.
     pub(super) fn link_badge_view(&self, panel_id: PanelId) -> Option<LinkBadgeView> {
-        if self.hub.link.badges.is_empty() {
-            return None;
+        if let Some(view) = self.hub.link.badge_view(panel_id, Instant::now()) {
+            return Some(view);
         }
-        self.hub.link.badge_view(panel_id, Instant::now())
+        let target = self.hub.link_asks.waiting_on(panel_id)?;
+        let name = self.board.panel(target)?.display_title();
+        Some(LinkBadgeView {
+            from: sender_label(Some(&name)),
+            opacity: 1.0,
+            prefix: "asking",
+            pending: true,
+        })
     }
 
     /// "Send to panel…" and "Copy panel address" entries of the panel context menu.
@@ -367,8 +414,17 @@ pub(super) fn paint_link_badge(
     stack_offset: f32,
     view: &LinkBadgeView,
 ) {
-    let accent = theme::ACCENT();
-    let text = format!("from {}", truncate_chars(&strip_escapes(&view.from), BADGE_NAME_CHARS));
+    let accent = if view.pending {
+        theme::PALETTE_YELLOW()
+    } else {
+        theme::ACCENT()
+    };
+    let ellipsis = if view.pending { "\u{2026}" } else { "" };
+    let text = format!(
+        "{} {}{ellipsis}",
+        view.prefix,
+        truncate_chars(&strip_escapes(&view.from), BADGE_NAME_CHARS)
+    );
     let galley = painter.layout_no_wrap(text, FontId::proportional(10.0), accent.gamma_multiply(view.opacity));
     let badge_width = galley.size().x + 8.0 + 5.0 + 5.0 + 8.0;
     let badge_height = 18.0;
@@ -406,6 +462,8 @@ pub(super) fn paint_link_badge(
 
 #[cfg(test)]
 mod tests {
+    use horizon_core::link::SendTarget;
+
     use super::*;
     use crate::app::test_support::command_options;
 
@@ -469,6 +527,7 @@ mod tests {
             LinkBadge {
                 received_at: start,
                 from: "a".to_owned(),
+                kind: BadgeKind::Message,
             },
         );
         link.badges.insert(
@@ -476,6 +535,7 @@ mod tests {
             LinkBadge {
                 received_at: start + Duration::from_secs(2),
                 from: "b".to_owned(),
+                kind: BadgeKind::Message,
             },
         );
 
@@ -496,6 +556,7 @@ mod tests {
             LinkBadge {
                 received_at: start,
                 from: "api".to_owned(),
+                kind: BadgeKind::Message,
             },
         );
         assert!(link.badge_view(PanelId(7), start).is_some());
@@ -565,28 +626,29 @@ mod tests {
         std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) {
         PendingRequest::for_test(LinkRequest::Send {
-            target: "a".to_owned(),
+            target: SendTarget::panel("a"),
             text: text.to_owned(),
             enter: false,
             from: None,
+            from_id: None,
         })
     }
 
-    fn ok_sent(_: LinkRequest) -> LinkResponse {
-        LinkResponse::Ok(LinkOk::Sent)
+    fn ok_sent(_: LinkRequest, reply: &std::sync::mpsc::Sender<LinkResponse>, _: &Arc<AtomicBool>) {
+        let _ = reply.send(LinkResponse::Ok(LinkOk::sent_to("a")));
     }
 
     #[test]
     fn answer_batch_sends_the_reply_and_asks_for_a_repaint() {
         let (request, answer, _) = pending("hi");
         let mut seen = Vec::new();
-        let repaint = answer_batch(vec![request], MAX_REQUESTS_PER_FRAME, |request| {
+        let repaint = answer_batch(vec![request], MAX_REQUESTS_PER_FRAME, |request, reply, abandoned| {
             seen.push(request.clone());
-            ok_sent(request)
+            ok_sent(request, reply, abandoned);
         });
         assert!(repaint);
         assert_eq!(seen.len(), 1);
-        assert_eq!(answer.try_recv().ok(), Some(LinkResponse::Ok(LinkOk::Sent)));
+        assert_eq!(answer.try_recv().ok(), Some(LinkResponse::Ok(LinkOk::sent_to("a"))));
     }
 
     #[test]
@@ -594,9 +656,9 @@ mod tests {
         let (request, answer, abandoned) = pending("late");
         abandoned.store(true, std::sync::atomic::Ordering::Release);
         let mut ran = 0;
-        let repaint = answer_batch(vec![request], MAX_REQUESTS_PER_FRAME, |request| {
+        let repaint = answer_batch(vec![request], MAX_REQUESTS_PER_FRAME, |request, reply, abandoned| {
             ran += 1;
-            ok_sent(request)
+            ok_sent(request, reply, abandoned);
         });
         assert!(!repaint, "nothing handled, batch below the cap");
         assert_eq!(ran, 0);
@@ -702,10 +764,11 @@ mod tests {
 
     fn send_from(app: &mut HorizonApp, from: Option<&str>) -> LinkResponse {
         app.execute_link_request(LinkRequest::Send {
-            target: "receiver".to_owned(),
+            target: SendTarget::panel("receiver"),
             text: "hi".to_owned(),
             enter: false,
             from: from.map(str::to_owned),
+            from_id: None,
         })
     }
 
@@ -715,7 +778,8 @@ mod tests {
 
         let response = send_from(&mut app, Some("backend"));
 
-        assert_eq!(response, LinkResponse::Ok(LinkOk::Sent));
+        let local_id = app.board.panel(panel).expect("panel").local_id.clone();
+        assert_eq!(response, LinkResponse::Ok(LinkOk::sent_to(&local_id)));
         let view = app.link_badge_view(panel).expect("badge");
         assert_eq!(view.from, "backend");
     }
@@ -734,10 +798,11 @@ mod tests {
         let (mut app, panel) = app_with_command_panel();
 
         let response = app.execute_link_request(LinkRequest::Send {
-            target: "nobody".to_owned(),
+            target: SendTarget::panel("nobody"),
             text: "hi".to_owned(),
             enter: false,
             from: Some("backend".to_owned()),
+            from_id: None,
         });
 
         assert!(matches!(response, LinkResponse::Err { .. }));

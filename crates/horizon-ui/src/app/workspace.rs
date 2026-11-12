@@ -209,6 +209,10 @@ impl HorizonApp {
             }
         }
 
+        if visible_detached_workspace.is_none() {
+            self.render_link_visuals(ctx, canvas_transform, canvas_clip_rect);
+        }
+
         if let Some((workspace_id, current_name)) = start_rename_workspace {
             self.clear_panel_rename();
             self.renaming_workspace = Some(workspace_id);

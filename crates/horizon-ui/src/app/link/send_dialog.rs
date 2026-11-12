@@ -5,8 +5,8 @@ use egui::{
     Align, Align2, Context, CornerRadius, EventFilter, FontId, Id, Key, Layout, Margin, Modifiers, Painter, Pos2, Rect,
     Sense, Ui, UiBuilder, Vec2, WidgetInfo, WidgetType,
 };
-use horizon_core::link::{LinkOk, LinkRequest, LinkResponse, MAX_REQUEST_BYTES, strip_escapes};
-use horizon_core::{Board, PanelId, PanelKind};
+use horizon_core::link::{LinkOk, LinkRequest, LinkResponse, MAX_REQUEST_BYTES, SendTarget, strip_escapes};
+use horizon_core::{Board, PanelId, PanelKind, WorkspaceId};
 
 use super::super::HorizonApp;
 use super::super::hub_ui::{self, ModalPlacement};
@@ -56,6 +56,53 @@ fn clip_message(text: &str) -> String {
     text[..end].to_owned()
 }
 
+/// Names joined for the "reaches" line, cut to `max_chars` with `+N` for the rest.
+fn members_summary(names: &[String], max_chars: usize) -> String {
+    let mut text = String::new();
+    for (shown, name) in names.iter().enumerate() {
+        let separator = if shown == 0 { "" } else { ", " };
+        let rest = names.len() - shown;
+        let candidate = format!("{text}{separator}{name}");
+        if shown > 0 && candidate.chars().count() > max_chars {
+            return format!("{text} +{rest}");
+        }
+        text = candidate;
+    }
+    text
+}
+
+/// "All Claudes in <workspace> (N)" row for `names`, `None` when there is nobody to reach.
+fn group_row(workspace: &str, names: Vec<String>) -> Option<TargetRow> {
+    if names.is_empty() {
+        return None;
+    }
+    Some(TargetRow {
+        id: String::new(),
+        name: format!("All Claudes in {workspace} ({})", names.len()),
+        workspace: workspace.to_owned(),
+        kind: PanelKind::Claude,
+        is_agent: false,
+        members: names,
+    })
+}
+
+/// The broadcast row for the workspace of `source`: its other live agent panels.
+fn broadcast_row(board: &Board, source: PanelId) -> Option<TargetRow> {
+    let workspace_id = board.panel_workspace_id(source)?;
+    let workspace = board
+        .workspace(workspace_id)
+        .map(|workspace| strip_escapes(&workspace.name))
+        .unwrap_or_default();
+    let names: Vec<String> = board
+        .agent_panels_in_workspace(workspace_id)
+        .into_iter()
+        .filter(|id| *id != source)
+        .filter_map(|id| board.panel(id))
+        .map(|panel| strip_escapes(&panel.display_title()))
+        .collect();
+    group_row(&workspace, names)
+}
+
 // ---------------------------------------------------------------------------
 // Send to panel dialog
 // ---------------------------------------------------------------------------
@@ -68,9 +115,15 @@ struct TargetRow {
     workspace: String,
     kind: PanelKind,
     is_agent: bool,
+    /// Names of the agent panels a broadcast row reaches; empty for a single panel.
+    members: Vec<String>,
 }
 
 impl TargetRow {
+    fn is_broadcast(&self) -> bool {
+        !self.members.is_empty()
+    }
+
     fn matches(&self, filter: &str) -> bool {
         filter.is_empty()
             || [self.name.as_str(), self.workspace.as_str(), self.kind.display_name()]
@@ -93,6 +146,8 @@ enum SendAction {
 pub(super) struct SendToPanelState {
     source_label: String,
     source_name: String,
+    /// Panel-link id of the panel the dialog was opened from: the sender of the message.
+    source_id: String,
     rows: Vec<TargetRow>,
     filter: String,
     applied_filter: String,
@@ -145,13 +200,19 @@ impl SendToPanelState {
                     workspace: info.workspace,
                     kind,
                     is_agent: info.is_agent,
+                    members: Vec::new(),
                 }
             })
             .collect();
+        let mut rows = rows;
+        if let Some(group) = broadcast_row(board, source) {
+            rows.insert(0, group);
+        }
         let filtered = filter_rows(&rows, "");
         Some(Self {
             source_label,
             source_name,
+            source_id: source_local_id,
             rows,
             filter: String::new(),
             applied_filter: String::new(),
@@ -163,6 +224,30 @@ impl SendToPanelState {
             focus_pending: false,
             reveal_selected: false,
         })
+    }
+
+    /// Dialog opened from a workspace-level entry: preselects "All Claudes in <workspace>".
+    /// The panel it sends from (and leaves out) is the workspace's focused terminal panel,
+    /// else its first one. `None` when the workspace has no terminal panel.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "wired by the workspace menu entry \"Send to all Claudes\"")
+    )]
+    pub(super) fn open_for_workspace(board: &mut Board, workspace: WorkspaceId) -> Option<Self> {
+        let in_workspace = |id: &PanelId| {
+            board
+                .panel(*id)
+                .is_some_and(|panel| panel.workspace_id == workspace && panel.terminal().is_some())
+        };
+        let source = board
+            .focused
+            .filter(in_workspace)
+            .or_else(|| board.panels.iter().map(|panel| panel.id).find(in_workspace))?;
+        let mut state = Self::open(board, source)?;
+        if state.rows.first().is_some_and(TargetRow::is_broadcast) {
+            state.selected = 0;
+        }
+        Some(state)
     }
 
     fn refilter(&mut self) {
@@ -272,11 +357,17 @@ fn send_request(state: &SendToPanelState, enter: bool) -> Result<LinkRequest, Se
         return Err(SendBlocked::TooLarge);
     }
     let row = state.selected_row().ok_or(SendBlocked::Missing)?;
+    let target = if row.is_broadcast() {
+        SendTarget::AllInWorkspace
+    } else {
+        SendTarget::Panel(row.id.clone())
+    };
     Ok(LinkRequest::Send {
-        target: row.id.clone(),
+        target,
         text: state.message.clone(),
         enter,
         from: Some(state.source_name.clone()),
+        from_id: Some(state.source_id.clone()),
     })
 }
 
@@ -330,6 +421,7 @@ fn show_send_contents(ui: &mut Ui, state: &mut SendToPanelState) -> SendAction {
     paint_separator(ui, width);
     show_filter(ui, state);
     show_target_list(ui, state);
+    show_broadcast_members(ui, state);
     paint_separator(ui, width);
     show_message(ui, state);
     if let Some(error) = &state.error {
@@ -482,6 +574,32 @@ fn show_target_list(ui: &mut Ui, state: &mut SendToPanelState) {
         });
 }
 
+/// Under the list: who a selected broadcast row reaches.
+fn show_broadcast_members(ui: &mut Ui, state: &SendToPanelState) {
+    let Some(row) = state.selected_row().filter(|row| row.is_broadcast()) else {
+        return;
+    };
+    let summary = members_summary(&row.members, 64);
+    padded(ui, 4, |ui| {
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(format!("to  {summary}"))
+                    .size(10.5)
+                    .color(theme::FG_DIM()),
+            )
+            .truncate(),
+        );
+    });
+    ui.add_space(8.0);
+}
+
+/// Three dots in a triangle: the "group" icon of the broadcast row.
+fn paint_group_icon(painter: &Painter, center: Pos2, color: egui::Color32) {
+    for offset in [Vec2::new(-3.5, 2.5), Vec2::new(3.5, 2.5), Vec2::new(0.0, -3.5)] {
+        painter.circle_filled(center + offset, 2.0, color);
+    }
+}
+
 fn paint_target_row(painter: &Painter, rect: Rect, row: &TargetRow, selected: bool, hovered: bool) {
     if selected || hovered {
         let tint = if selected { 0.22 } else { 0.12 };
@@ -495,14 +613,22 @@ fn paint_target_row(painter: &Painter, rect: Rect, row: &TargetRow, selected: bo
         let bar = Rect::from_center_size(Pos2::new(rect.left() + 4.5, rect.center().y), Vec2::new(3.0, 24.0));
         painter.rect_filled(bar, CornerRadius::same(2), theme::ACCENT());
     }
-    let (icon, icon_color) = panel_kind_icon(row.kind, theme::FG_SOFT(), selected);
-    painter.text(
-        Pos2::new(rect.left() + 12.0, rect.center().y),
-        Align2::LEFT_CENTER,
-        icon,
-        FontId::monospace(10.0),
-        icon_color,
-    );
+    if row.is_broadcast() {
+        paint_group_icon(
+            painter,
+            Pos2::new(rect.left() + 16.0, rect.center().y),
+            theme::FG_SOFT(),
+        );
+    } else {
+        let (icon, icon_color) = panel_kind_icon(row.kind, theme::FG_SOFT(), selected);
+        painter.text(
+            Pos2::new(rect.left() + 12.0, rect.center().y),
+            Align2::LEFT_CENTER,
+            icon,
+            FontId::monospace(10.0),
+            icon_color,
+        );
+    }
     let name_left = rect.left() + 46.0;
     let kind_left = rect.right() - 12.0 - KIND_COLUMN_WIDTH;
     let workspace_left = kind_left - WORKSPACE_COLUMN_WIDTH;
@@ -528,6 +654,14 @@ fn paint_target_row(painter: &Painter, rect: Rect, row: &TargetRow, selected: bo
         workspace,
         theme::FG_DIM(),
     );
+    if row.is_broadcast() {
+        let pill_rect = hub_ui::pill_rect(
+            Pos2::new(kind_left, rect.center().y - 9.0),
+            hub_ui::pill_width(painter, "broadcast"),
+        );
+        hub_ui::pill(painter, pill_rect, "broadcast", theme::FG_DIM());
+        return;
+    }
     let kind_text = painter.layout_no_wrap(
         row.kind.display_name().to_owned(),
         FontId::proportional(10.5),
@@ -585,7 +719,11 @@ fn show_footer(ui: &mut Ui, state: &SendToPanelState) -> SendAction {
     // `new_child`, not `scope_builder`: the latter would allocate again in `ui`.
     let mut footer = ui.new_child(builder);
     footer.spacing_mut().item_spacing.x = 8.0;
-    let send = hub_ui::primary_button(&mut footer, "Send", missing.is_none());
+    let send_label = match state.selected_row().filter(|row| row.is_broadcast()) {
+        Some(row) => format!("Send to {}", row.members.len()),
+        None => "Send".to_owned(),
+    };
+    let send = hub_ui::primary_button(&mut footer, &send_label, missing.is_none());
     let send = match missing {
         Some(reason) => send.on_hover_text(reason),
         None => send,
@@ -625,6 +763,7 @@ mod tests {
             workspace: workspace.to_owned(),
             kind,
             is_agent: false,
+            members: Vec::new(),
         }
     }
 
@@ -656,6 +795,7 @@ mod tests {
         SendToPanelState {
             source_label: "Claude".to_owned(),
             source_name: "src".to_owned(),
+            source_id: "7".to_owned(),
             rows,
             filter: String::new(),
             applied_filter: String::new(),
@@ -690,10 +830,11 @@ mod tests {
         assert_eq!(
             send_request(&state, false),
             Ok(LinkRequest::Send {
-                target: "b".to_owned(),
+                target: SendTarget::panel("b"),
                 text: "hello".to_owned(),
                 enter: false,
                 from: Some("src".to_owned()),
+                from_id: Some("7".to_owned()),
             })
         );
     }
@@ -865,5 +1006,100 @@ mod tests {
             action.1,
             "Enter is left to the focused widget (a newline in the message)"
         );
+    }
+
+    #[test]
+    fn members_summary_truncates_with_a_remainder_count() {
+        let names: Vec<String> = ["api", "web", "db", "worker"]
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect();
+        assert_eq!(members_summary(&names, 64), "api, web, db, worker");
+        assert_eq!(members_summary(&names, 10), "api, web +2");
+        assert_eq!(members_summary(&names[..1], 1), "api");
+        assert_eq!(members_summary(&[], 10), "");
+    }
+
+    #[test]
+    fn group_row_is_omitted_without_targets_and_counts_them() {
+        assert!(group_row("api", Vec::new()).is_none());
+        let row = group_row("api", vec!["a".to_owned(), "b".to_owned(), "c".to_owned()]).expect("row");
+        assert_eq!(row.name, "All Claudes in api (3)");
+        assert!(row.is_broadcast());
+        assert!(row.matches("claudes"));
+    }
+
+    #[test]
+    fn broadcast_row_send_request_uses_the_workspace_target_and_sender_id() {
+        let group = group_row("api", vec!["a".to_owned()]).expect("row");
+        let state = state_with(vec![group, row("a", "w", PanelKind::Claude)], "heads up");
+        assert_eq!(
+            send_request(&state, true),
+            Ok(LinkRequest::Send {
+                target: SendTarget::AllInWorkspace,
+                text: "heads up".to_owned(),
+                enter: true,
+                from: Some("src".to_owned()),
+                from_id: Some("7".to_owned()),
+            })
+        );
+    }
+
+    fn agent_options(name: &str, script: &std::path::Path) -> horizon_core::PanelOptions {
+        horizon_core::PanelOptions {
+            name: Some(name.to_owned()),
+            kind: PanelKind::Claude,
+            command: Some(script.display().to_string()),
+            ..horizon_core::PanelOptions::default()
+        }
+    }
+
+    #[test]
+    fn send_dialog_all_claudes_row_count() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let script = dir.path().join("agent.sh");
+        std::fs::write(&script, "#!/bin/sh\nexec cat >/dev/null\n").expect("script");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let mut board = Board::new();
+        let workspace = board.ensure_workspace();
+        let source = board
+            .create_panel(agent_options("source", &script), workspace)
+            .expect("source");
+        for name in ["one", "two"] {
+            board
+                .create_panel(agent_options(name, &script), workspace)
+                .expect("agent");
+        }
+        board
+            .create_panel(
+                crate::app::test_support::command_options("shell", "exec cat"),
+                workspace,
+            )
+            .expect("shell");
+
+        let state = SendToPanelState::open(&mut board, source).expect("dialog");
+        let group = state.rows.first().expect("group row");
+        assert!(group.is_broadcast());
+        assert_eq!(group.name, format!("All Claudes in {} (2)", group.workspace));
+        assert_eq!(group.members.len(), 2, "the source and the shell are left out");
+        assert_eq!(state.rows.len(), 1 + 3, "group row + one/two/shell");
+
+        let alone = {
+            let lone_workspace = board.create_workspace("lone");
+            let only = board
+                .create_panel(agent_options("only", &script), lone_workspace)
+                .expect("only");
+            SendToPanelState::open(&mut board, only).expect("dialog")
+        };
+        assert!(
+            alone.rows.iter().all(|row| !row.is_broadcast()),
+            "no targets, no group row"
+        );
+
+        let preselected = SendToPanelState::open_for_workspace(&mut board, workspace).expect("dialog");
+        assert!(preselected.selected_row().is_some_and(TargetRow::is_broadcast));
+        board.shutdown_terminal_panels();
     }
 }

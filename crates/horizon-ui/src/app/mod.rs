@@ -8,6 +8,7 @@ mod file_drop;
 mod file_drop_highlight;
 mod frame_stats;
 mod hub_state;
+mod hub_toast;
 mod hub_ui;
 mod lifecycle;
 mod link;
