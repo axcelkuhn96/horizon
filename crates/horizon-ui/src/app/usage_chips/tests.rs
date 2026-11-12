@@ -340,6 +340,23 @@ fn profile_change_syncs_the_poller_list_and_invalidates_launcher_rows() {
 }
 
 #[test]
+fn the_poller_only_starts_once_polling_is_enabled_with_the_apps_homes() {
+    let mut hub = HubState::default();
+    hub.sync_usage_profiles(vec![profile("a")], &Context::default());
+    assert!(hub.usage.poller.is_none(), "no poll setup: nothing may start");
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let horizon_home = HorizonHome::from_root(dir.path().join(".horizon"));
+    hub.usage.enable_polling(dir.path().to_path_buf(), &horizon_home);
+    hub.sync_usage_profiles(vec![profile("a"), profile("b")], &Context::default());
+
+    assert!(hub.usage.poller.is_some());
+    let setup = hub.usage.poll_setup.as_ref().expect("setup");
+    assert_eq!(setup.user_home, dir.path());
+    assert_eq!(setup.cache_path, dir.path().join(".horizon").join(CACHE_FILE));
+}
+
+#[test]
 fn emptying_the_profiles_stops_the_refresh_and_the_poller() {
     let mut hub = HubState::default();
     hub.sync_usage_profiles(vec![profile("a")], &Context::default());

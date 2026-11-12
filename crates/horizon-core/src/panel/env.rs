@@ -39,16 +39,20 @@ fn sanitize_name(title: &str) -> String {
 }
 
 /// Panel-link variables Horizon sets on every terminal panel: the panel's local id and
-/// title at spawn, the link socket (when the server runs) and this executable's path, so
-/// an agent can call `"$HORIZON_BIN" link ...` even when `horizon` is not on `PATH`.
+/// title at spawn, the link socket and this executable's path, so an agent can call
+/// `"$HORIZON_BIN" link ...` even when `horizon` is not on `PATH`. Without a running link
+/// server `HORIZON_SOCKET` is set empty: the PTY spawn can only add variables, so an empty
+/// value is how a stale socket inherited from an outer Horizon is overridden (the CLI treats
+/// an empty value as unset).
 pub(crate) fn horizon_injected_env(local_id: &str, title: &str, socket: Option<&Path>) -> HashMap<String, String> {
     let mut env = HashMap::from([
         ("HORIZON_PANEL_ID".to_string(), local_id.to_string()),
         ("HORIZON_PANEL_NAME".to_string(), sanitize_name(title)),
     ]);
-    if let Some(socket) = socket.and_then(Path::to_str) {
-        env.insert("HORIZON_SOCKET".to_string(), socket.to_string());
-    }
+    env.insert(
+        "HORIZON_SOCKET".to_string(),
+        socket.and_then(Path::to_str).unwrap_or_default().to_string(),
+    );
     if let Some(exe) = std::env::current_exe().ok().as_deref().and_then(Path::to_str) {
         env.insert("HORIZON_BIN".to_string(), strip_deleted_suffix(exe).to_string());
     }
@@ -153,7 +157,20 @@ mod tests {
         assert_eq!(merged.get("FOO").map(String::as_str), Some("bar"));
 
         let without_socket = merge_spawn_env(PanelKind::Shell, &preset, &horizon_injected_env("abc", "n", None));
-        assert!(!without_socket.contains_key("HORIZON_SOCKET"));
+        assert_eq!(without_socket.get("HORIZON_SOCKET").map(String::as_str), Some(""));
+    }
+
+    #[test]
+    fn no_link_server_overrides_an_inherited_socket_with_an_empty_value() {
+        let env = horizon_injected_env("id", "name", None);
+        assert_eq!(env.get("HORIZON_SOCKET").map(String::as_str), Some(""));
+
+        let socket = std::path::Path::new("/run/user/1/horizon/7.sock");
+        let env = horizon_injected_env("id", "name", Some(socket));
+        assert_eq!(
+            env.get("HORIZON_SOCKET").map(String::as_str),
+            Some("/run/user/1/horizon/7.sock")
+        );
     }
 
     #[test]

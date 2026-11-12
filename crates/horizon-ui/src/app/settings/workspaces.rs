@@ -453,26 +453,29 @@ fn terminals_section(ui: &mut Ui, config: &mut Config, state: &mut WorkspacesTab
     let terminals = &mut config.workspaces[index].terminals;
 
     let mut row_action: Option<(usize, TerminalRowAction)> = None;
-    ui.spacing_mut().item_spacing.y = 4.0;
-    for (position, terminal) in terminals.iter_mut().enumerate() {
-        let profile_accent = home
-            .as_deref()
-            .and_then(|home| model::terminal_profile_index(terminal, profiles, home))
-            .and_then(|profile| slots.get(profile).copied())
-            .map(hub_ui::accent_color);
-        let kind = terminal.kind;
-        let bar = widgets::kind_bar_color(kind, profile_accent);
-        let icon_accent = profile_accent.unwrap_or_else(theme::ACCENT);
-        let outcome = ui
-            .push_id(("workspace_terminal", index, position), |ui| {
-                widgets::terminal_row(ui, terminal, bar, icon_accent, position == 0, position + 1 == count)
-            })
-            .inner;
-        changed |= outcome.changed;
-        if outcome.action != TerminalRowAction::None {
-            row_action = Some((position, outcome.action));
+    // Scoped: the tighter row spacing must not leak to whatever the caller draws next.
+    ui.scope(|ui| {
+        ui.spacing_mut().item_spacing.y = 4.0;
+        for (position, terminal) in terminals.iter_mut().enumerate() {
+            let profile_accent = home
+                .as_deref()
+                .and_then(|home| model::terminal_profile_index(terminal, profiles, home))
+                .and_then(|profile| slots.get(profile).copied())
+                .map(hub_ui::accent_color);
+            let kind = terminal.kind;
+            let bar = widgets::kind_bar_color(kind, profile_accent);
+            let icon_accent = profile_accent.unwrap_or_else(theme::ACCENT);
+            let outcome = ui
+                .push_id(("workspace_terminal", index, position), |ui| {
+                    widgets::terminal_row(ui, terminal, bar, icon_accent, position == 0, position + 1 == count)
+                })
+                .inner;
+            changed |= outcome.changed;
+            if outcome.action != TerminalRowAction::None {
+                row_action = Some((position, outcome.action));
+            }
         }
-    }
+    });
     if let Some((position, action)) = row_action {
         let template = &mut config.workspaces[index];
         match action {

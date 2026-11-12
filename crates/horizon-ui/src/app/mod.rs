@@ -328,7 +328,7 @@ impl HorizonApp {
     ) -> Self {
         // Started before any session is restored so restored panels get HORIZON_SOCKET.
         let link_server = link::start_link_server(&cc.egui_ctx);
-        Self::with_link_server(
+        let mut app = Self::with_link_server(
             cc,
             config,
             config_path,
@@ -336,7 +336,11 @@ impl HorizonApp {
             startup,
             observed_keyboard_inputs,
             link_server,
-        )
+        );
+        // Only the real app polls Claude usage; `with_link_server` (tests) never does.
+        let user_home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+        app.hub.usage.enable_polling(user_home, app.session_store.home());
+        app
     }
 
     /// `new` with the panel-link server injected; tests pass `None` so no real

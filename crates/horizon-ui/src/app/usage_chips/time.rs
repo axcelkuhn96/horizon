@@ -1,7 +1,5 @@
 //! Clock and duration text for the chip tooltips. Dependency-free: the local
-//! UTC offset comes from `date +%z` once; without it times read as UTC.
-
-use std::sync::OnceLock;
+//! UTC offset comes from `date +%z`; without it times read as UTC.
 
 const MINUTE: i64 = 60;
 const HOUR: i64 = 3_600;
@@ -26,17 +24,16 @@ pub(super) fn parse_utc_offset(text: &str) -> Option<i64> {
 }
 
 /// Local UTC offset in seconds; `None` when it cannot be determined (the
-/// caller then labels times as UTC). The first call may spawn `date`.
+/// caller then labels times as UTC). Spawns `date` on every call, so callers
+/// ask once per snapshot (not per frame): a long-running session then follows
+/// a daylight-saving change instead of keeping the offset from startup.
 #[must_use]
 pub(super) fn local_offset_secs() -> Option<i64> {
-    static OFFSET: OnceLock<Option<i64>> = OnceLock::new();
-    *OFFSET.get_or_init(|| {
-        if !cfg!(unix) {
-            return None;
-        }
-        let output = std::process::Command::new("date").arg("+%z").output().ok()?;
-        parse_utc_offset(std::str::from_utf8(&output.stdout).ok()?)
-    })
+    if !cfg!(unix) {
+        return None;
+    }
+    let output = std::process::Command::new("date").arg("+%z").output().ok()?;
+    parse_utc_offset(std::str::from_utf8(&output.stdout).ok()?)
 }
 
 /// `14:30`, or `Fri 09:00` with `weekday`. Without an offset the time is UTC and says so.

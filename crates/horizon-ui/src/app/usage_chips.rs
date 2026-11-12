@@ -458,10 +458,19 @@ fn build_cache(painter: &Painter, entries: &[ChipEntry], slots: &[usize], key: (
     cache
 }
 
+/// Where the poller reads credentials and keeps its cache. Absent until the app enables
+/// polling, so tests never reach the network or the user's real credentials.
+struct PollSetup {
+    /// The user's home directory; profile directories resolve against it.
+    user_home: PathBuf,
+    cache_path: PathBuf,
+}
+
 /// Usage snapshot and poller of the Claude profiles; lives in [`HubState`].
 #[derive(Default)]
 pub(super) struct ClaudeUsageState {
     poller: Option<UsagePoller>,
+    poll_setup: Option<PollSetup>,
     /// Profiles being polled; the chips follow this list, in order.
     profiles: Vec<ClaudeProfile>,
     snapshot: Vec<ProfileUsage>,
@@ -493,6 +502,15 @@ impl ClaudeUsageState {
             })
             .collect();
         self.version = self.version.wrapping_add(1);
+    }
+
+    /// Lets the profile list start a poller: credentials come from `user_home`, the cache lives
+    /// under `horizon_home`.
+    pub(super) fn enable_polling(&mut self, user_home: PathBuf, horizon_home: &HorizonHome) {
+        self.poll_setup = Some(PollSetup {
+            user_home,
+            cache_path: horizon_home.root().join(CACHE_FILE),
+        });
     }
 
     /// Replaces the polled profile list; returns whether it changed.
@@ -651,18 +669,15 @@ impl HubState {
                 poller.set_profiles(profiles);
                 usage.refresh_started = Some((Instant::now(), now_unix_ms()));
             }
-        } else if !cfg!(test) {
-            // Tests never reach the network or the user's real credentials.
-            let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
-            let cache_path = HorizonHome::resolve().root().join(CACHE_FILE);
+        } else if let Some(setup) = &usage.poll_setup {
             let waker: Waker = {
                 let ctx = ctx.clone();
                 Arc::new(move || ctx.request_repaint())
             };
             usage.poller = Some(UsagePoller::spawn_with_waker(
                 profiles,
-                home,
-                cache_path,
+                setup.user_home.clone(),
+                setup.cache_path.clone(),
                 POLL_INTERVAL,
                 Some(waker),
             ));
