@@ -10,8 +10,10 @@ use crate::theme;
 
 use super::{HorizonApp, MINIMAP_MARGIN, MINIMAP_PAD, WS_BG_PAD, WS_EMPTY_SIZE, WS_TITLE_HEIGHT};
 
+mod auto_hide;
 mod interaction;
 
+pub(super) use auto_hide::MinimapAutoHide;
 use interaction::{minimap_panels_in_paint_order, render_scoped_minimap, scope_includes_workspace};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

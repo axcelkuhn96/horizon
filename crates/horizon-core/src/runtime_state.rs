@@ -1,5 +1,6 @@
 mod agent_sessions;
 mod claude_live_sessions;
+mod ui_prefs;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
@@ -20,6 +21,7 @@ use crate::workspace::workspace_color_hex;
 
 pub use agent_sessions::{AgentSessionCatalog, AgentSessionRecord, most_recent_unclaimed_session_for};
 pub use claude_live_sessions::{claude_config_dir_for_env, claude_transcript_exists_for_env, live_claude_session_ids};
+pub use ui_prefs::UiPrefs;
 
 const RUNTIME_STATE_VERSION: u32 = 2;
 const DEFAULT_ROWS: u16 = 24;
@@ -47,6 +49,8 @@ pub struct RuntimeState {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub detached_workspaces: Vec<DetachedWorkspaceState>,
     pub workspaces: Vec<WorkspaceState>,
+    #[serde(default, skip_serializing_if = "UiPrefs::is_default")]
+    pub ui: UiPrefs,
 }
 
 impl RuntimeState {
@@ -73,6 +77,7 @@ impl RuntimeState {
             focused_panel_local_id: None,
             detached_workspaces: Vec::new(),
             workspaces,
+            ui: UiPrefs::default(),
         }
     }
 
@@ -311,6 +316,7 @@ impl RuntimeState {
                 .map(|panel| panel.local_id.clone()),
             detached_workspaces,
             workspaces,
+            ui: UiPrefs::default(),
         }
     }
 }
@@ -365,6 +371,7 @@ impl Default for RuntimeState {
             focused_panel_local_id: None,
             detached_workspaces: Vec::new(),
             workspaces: Vec::new(),
+            ui: UiPrefs::default(),
         }
     }
 }
