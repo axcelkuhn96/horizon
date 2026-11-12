@@ -348,7 +348,23 @@ fn render(response: LinkResponse) -> Result<String, String> {
             format!("sent to {}, skipped {}", delivered.len(), skipped.len())
         }),
         LinkResponse::Ok(LinkOk::Text(text) | LinkOk::Reply { text, .. }) => Ok(output_safe(&text)),
+        LinkResponse::Err {
+            code: LinkErrorCode::VersionMismatch,
+            message,
+        } => Err(version_mismatch_message(&output_safe(&message))),
         LinkResponse::Err { message, .. } => Err(output_safe(&message)),
+    }
+}
+
+/// A version-mismatch error always says what to do, even when an older Horizon (whose
+/// message has no hint) answered.
+fn version_mismatch_message(message: &str) -> String {
+    if message.contains("restart Horizon") {
+        message.to_owned()
+    } else {
+        format!(
+            "{message}; the `horizon` command and the running Horizon differ, restart Horizon or use the matching binary"
+        )
     }
 }
 
@@ -608,11 +624,11 @@ mod tests {
         .expect("line");
         assert_eq!(
             line,
-            "{\"v\":1,\"op\":\"send\",\"target\":\"a\",\"text\":\"x\\ny\",\"enter\":true}\n"
+            "{\"v\":2,\"op\":\"send\",\"target\":\"a\",\"text\":\"x\\ny\",\"enter\":true}\n"
         );
         assert_eq!(
             request_line(&LinkCommand::List, Some("ignored"), Some("3")).expect("line"),
-            "{\"v\":1,\"op\":\"list\"}\n"
+            "{\"v\":2,\"op\":\"list\"}\n"
         );
     }
 
@@ -625,7 +641,7 @@ mod tests {
         };
         assert_eq!(
             request_line(&send, Some("backend"), None).expect("line"),
-            "{\"v\":1,\"op\":\"send\",\"target\":\"a\",\"text\":\"hi\",\"enter\":false,\"from\":\"backend\"}\n"
+            "{\"v\":2,\"op\":\"send\",\"target\":\"a\",\"text\":\"hi\",\"enter\":false,\"from\":\"backend\"}\n"
         );
         assert_eq!(
             request_line(
@@ -637,7 +653,7 @@ mod tests {
                 Some("3")
             )
             .expect("line"),
-            "{\"v\":1,\"op\":\"read\",\"target\":\"a\",\"lines\":5}\n"
+            "{\"v\":2,\"op\":\"read\",\"target\":\"a\",\"lines\":5}\n"
         );
     }
 
@@ -804,7 +820,7 @@ mod tests {
         };
         assert_eq!(
             request_line(&ask, Some("name"), Some("7")).expect("line"),
-            "{\"v\":1,\"op\":\"ask\",\"from\":\"7\",\"target\":\"b\",\"text\":\"q\",\"timeout_secs\":30}\n"
+            "{\"v\":2,\"op\":\"ask\",\"from\":\"7\",\"target\":\"b\",\"text\":\"q\",\"timeout_secs\":30}\n"
         );
         let error = request_line(&ask, Some("name"), None).expect_err("needs a panel id");
         assert!(error.contains("HORIZON_PANEL_ID"), "{error}");
@@ -814,7 +830,7 @@ mod tests {
         };
         assert_eq!(
             request_line(&reply, None, Some("9")).expect("line"),
-            "{\"v\":1,\"op\":\"reply\",\"from\":\"9\",\"ask_id\":\"a1b2c3\",\"text\":\"a\"}\n"
+            "{\"v\":2,\"op\":\"reply\",\"from\":\"9\",\"ask_id\":\"a1b2c3\",\"text\":\"a\"}\n"
         );
         let broadcast = LinkCommand::Send {
             target: SendTarget::AllInWorkspace,
@@ -823,7 +839,7 @@ mod tests {
         };
         assert_eq!(
             request_line(&broadcast, Some("n"), Some("4")).expect("line"),
-            "{\"v\":1,\"op\":\"send\",\"target\":{\"scope\":\"workspace\"},\"text\":\"hi\",\"enter\":true,\"from\":\"n\",\"from_id\":\"4\"}\n"
+            "{\"v\":2,\"op\":\"send\",\"target\":{\"scope\":\"workspace\"},\"text\":\"hi\",\"enter\":true,\"from\":\"n\",\"from_id\":\"4\"}\n"
         );
     }
 
@@ -870,6 +886,28 @@ mod tests {
         assert_eq!(broadcast(3, 0), Ok("sent to 3".to_owned()));
         assert_eq!(broadcast(3, 1), Ok("sent to 3, skipped 1".to_owned()));
         assert_eq!(broadcast(1, 0), Ok(String::new()));
+    }
+
+    #[test]
+    fn a_version_mismatch_from_an_older_horizon_gets_a_restart_hint() {
+        let older = LinkResponse::Err {
+            code: LinkErrorCode::VersionMismatch,
+            message: "protocol version mismatch: got 2, expected 1".to_owned(),
+        };
+        let message = super::render(older).unwrap_err();
+        assert!(
+            message.starts_with("protocol version mismatch: got 2, expected 1;"),
+            "{message}"
+        );
+        assert!(message.contains("restart Horizon"), "{message}");
+
+        let current = horizon_core::link::LinkError::VersionMismatch { got: 1, expected: 2 };
+        let message = super::render(LinkResponse::Err {
+            code: current.code(),
+            message: current.to_string(),
+        })
+        .unwrap_err();
+        assert_eq!(message.matches("restart Horizon").count(), 1, "{message}");
     }
 
     #[test]

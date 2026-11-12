@@ -315,7 +315,8 @@ fn board_list_strips_escapes_from_names() {
 
 // --- workspace broadcast and ask/reply ---------------------------------------
 
-use std::sync::mpsc;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, mpsc};
 
 use crate::WorkspaceId;
 use crate::link::{AskTable, LinkEffectKind, MAX_ASKS_PER_ASKER};
@@ -518,10 +519,19 @@ fn serve(
     setup: &mut AskSetup,
     request: LinkRequest,
 ) -> (mpsc::Receiver<LinkResponse>, Option<crate::link::LinkEffect>) {
+    let abandoned = Arc::new(AtomicBool::new(false));
+    serve_watched(setup, request, &abandoned)
+}
+
+fn serve_watched(
+    setup: &mut AskSetup,
+    request: LinkRequest,
+    abandoned: &Arc<AtomicBool>,
+) -> (mpsc::Receiver<LinkResponse>, Option<crate::link::LinkEffect>) {
     let (sender, receiver) = mpsc::channel();
     let effect = setup
         .board
-        .serve_link(&mut setup.asks, request, &sender, std::time::Instant::now());
+        .serve_link(&mut setup.asks, request, &sender, abandoned, std::time::Instant::now());
     (receiver, effect)
 }
 
@@ -782,4 +792,208 @@ fn agent_panels_in_workspace_lists_live_agent_terminals_only() {
 
     assert_eq!(board.agent_panels_in_workspace(workspace), vec![agent]);
     board.shutdown_terminal_panels();
+}
+
+#[test]
+fn an_ask_whose_client_vanished_is_cancelled_by_the_sweep() {
+    let mut setup = ask_setup();
+    let request = ask_request(&setup, setup.asker, "target", "anyone?");
+    let gone = Arc::new(AtomicBool::new(false));
+    let (answer, effect) = serve_watched(&mut setup, request, &gone);
+    assert!(effect.is_some());
+    assert!(
+        setup
+            .board
+            .resolve_link_asks(&mut setup.asks, std::time::Instant::now())
+            .is_empty()
+    );
+    assert_eq!(setup.asks.len(), 1, "a client that is still waiting keeps its ask");
+
+    gone.store(true, std::sync::atomic::Ordering::Release);
+    let ended = setup
+        .board
+        .resolve_link_asks(&mut setup.asks, std::time::Instant::now());
+
+    assert_eq!(ended.len(), 1);
+    assert_eq!(setup.asks.waiting_on(setup.asker), None, "the 'asking...' line is gone");
+    assert!(matches!(
+        answer.try_recv(),
+        Ok(LinkResponse::Err {
+            code: LinkErrorCode::AskCancelled,
+            ..
+        })
+    ));
+    setup.board.shutdown_terminal_panels();
+}
+
+#[test]
+fn a_broadcast_without_text_is_refused() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut board = Board::new();
+    let workspace = board.ensure_workspace();
+    let (sender, _) = sink_agent(&mut board, workspace, dir.path(), "sender");
+    let (_peer, peer_file) = sink_agent(&mut board, workspace, dir.path(), "peer");
+
+    let response = {
+        let from_id = panel_local_id(&board, sender);
+        broadcast(&mut board, Some(from_id), "  \n ")
+    };
+
+    assert!(matches!(
+        response,
+        LinkResponse::Err {
+            code: LinkErrorCode::BadRequest,
+            ..
+        }
+    ));
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(std::fs::read(&peer_file).unwrap_or_default().is_empty());
+    board.shutdown_terminal_panels();
+}
+
+// --- agents started by hand inside shell panels (Linux: process-tree detection) ----------
+
+/// Shell panel running `script` through bash (so `exec -a claude ...` can name a process).
+#[cfg(target_os = "linux")]
+fn shell_panel(board: &mut Board, workspace: WorkspaceId, name: &str, script: &str) -> PanelId {
+    board
+        .create_panel(
+            PanelOptions {
+                name: Some(name.to_owned()),
+                kind: PanelKind::Shell,
+                command: Some("bash".to_owned()),
+                args: vec!["-c".to_owned(), script.to_owned()],
+                ..PanelOptions::default()
+            },
+            workspace,
+        )
+        .expect("shell panel should spawn")
+}
+
+#[cfg(target_os = "linux")]
+fn runs_agent(board: &Board, id: PanelId) -> bool {
+    Board::panel_runs_agent(board.panel(id).expect("panel"))
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_shell_running_claude_is_an_agent_and_a_bare_shell_is_not() {
+    let mut board = Board::new();
+    let workspace = board.ensure_workspace();
+    let with_claude = shell_panel(&mut board, workspace, "hand", "exec -a claude cat");
+    let bare = shell_panel(&mut board, workspace, "bare", "exec cat");
+
+    assert!(
+        wait_until(|| runs_agent(&board, with_claude)),
+        "claude was never detected"
+    );
+    assert!(!runs_agent(&board, bare));
+    let LinkResponse::Ok(LinkOk::Panels(panels)) = board.handle_link_request(LinkRequest::List) else {
+        panic!("expected panels");
+    };
+    let flag = |name: &str| {
+        panels
+            .iter()
+            .find(|panel| panel.name == name)
+            .map(|panel| panel.is_agent)
+    };
+    assert_eq!(flag("hand"), Some(true));
+    assert_eq!(flag("bare"), Some(false));
+    assert_eq!(board.agent_panels_in_workspace(workspace), vec![with_claude]);
+    board.shutdown_terminal_panels();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn broadcast_and_ask_reach_claude_started_in_a_shell() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut setup = ask_setup();
+    let workspace = setup.board.panel(setup.asker).expect("asker").workspace_id;
+    let file = dir.path().join("hand.in");
+    let script = format!(
+        "printf '\\033[?2004h'; stty raw -echo; echo ready; exec -a claude cat > '{}'",
+        file.display()
+    );
+    let hand = shell_panel(&mut setup.board, workspace, "hand", &script);
+    assert!(screen_contains(&mut setup.board, hand, "ready"));
+    assert!(
+        wait_until(|| runs_agent(&setup.board, hand)),
+        "claude was never detected"
+    );
+
+    let from_id = panel_local_id(&setup.board, setup.asker);
+    let response = broadcast(&mut setup.board, Some(from_id), "to everyone");
+    let hand_id = panel_local_id(&setup.board, hand);
+    let target_id = panel_local_id(&setup.board, setup.target);
+    let LinkResponse::Ok(LinkOk::Sent { delivered, skipped }) = response else {
+        panic!("expected sent, got {response:?}");
+    };
+    assert!(
+        delivered.contains(&hand_id) && delivered.contains(&target_id),
+        "{delivered:?}"
+    );
+    assert!(skipped.is_empty(), "{skipped:?}");
+    assert!(file_contains(&file, "to everyone"), "{:?}", std::fs::read(&file));
+
+    let request = ask_request(&setup, setup.asker, &hand_id, "are you there?");
+    let (_answer, effect) = serve(&mut setup, request);
+    assert!(effect.is_some(), "an ask to claude in a shell is delivered");
+    assert!(file_contains(&file, "are you there?"), "{:?}", std::fs::read(&file));
+    setup.board.shutdown_terminal_panels();
+}
+
+#[cfg(target_os = "linux")]
+fn file_contains(path: &Path, needle: &str) -> bool {
+    wait_until(|| std::fs::read_to_string(path).is_ok_and(|text| text.contains(needle)))
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_shell_that_stopped_running_claude_is_refused_and_ends_a_pending_ask() {
+    let mut setup = ask_setup();
+    let workspace = setup.board.panel(setup.asker).expect("asker").workspace_id;
+    // claude runs for 3 s as a child, then the shell is back at (a stand-in for) its prompt.
+    let script = "printf '\\033[?2004h'; stty raw -echo; echo ready; \
+                  bash -c 'exec -a claude sleep 3'; exec cat >/dev/null";
+    let hand = shell_panel(&mut setup.board, workspace, "hand", script);
+    assert!(screen_contains(&mut setup.board, hand, "ready"));
+    assert!(
+        wait_until(|| runs_agent(&setup.board, hand)),
+        "claude was never detected"
+    );
+    let hand_id = panel_local_id(&setup.board, hand);
+    let request = ask_request(&setup, setup.asker, &hand_id, "still there?");
+    let (answer, effect) = serve(&mut setup, request);
+    assert!(effect.is_some());
+
+    let mut ended = Vec::new();
+    assert!(wait_until(|| {
+        ended.extend(
+            setup
+                .board
+                .resolve_link_asks(&mut setup.asks, std::time::Instant::now()),
+        );
+        !ended.is_empty()
+    }));
+
+    assert!(matches!(
+        answer.try_recv(),
+        Ok(LinkResponse::Err {
+            code: LinkErrorCode::AskTargetClosed,
+            ..
+        })
+    ));
+    assert!(!runs_agent(&setup.board, hand));
+    let request = ask_request(&setup, setup.asker, &hand_id, "and now?");
+    let (refusal, effect) = serve(&mut setup, request);
+    assert!(effect.is_none());
+    let Ok(LinkResponse::Err { code, message }) = refusal.try_recv() else {
+        panic!("expected a refusal");
+    };
+    assert_eq!(code, LinkErrorCode::BadRequest);
+    assert!(
+        !message.contains("send"),
+        "the refusal must not point at typing into shells: {message}"
+    );
+    setup.board.shutdown_terminal_panels();
 }

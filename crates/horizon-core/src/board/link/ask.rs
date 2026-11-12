@@ -3,7 +3,8 @@
 //! The pending-ask table is owned by the UI and passed in: the board writes the question
 //! into the asked panel, the table remembers who is waiting.
 
-use std::sync::mpsc;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, mpsc};
 use std::time::Instant;
 
 use alacritty_terminal::term::TermMode;
@@ -47,16 +48,20 @@ pub(super) struct AskArgs<'a> {
     pub(super) target: &'a str,
     pub(super) question: &'a str,
     pub(super) timeout_secs: u64,
+    /// Set when the asking client vanished; the table ends the ask when it sees it.
+    pub(super) abandoned: &'a Arc<AtomicBool>,
 }
 
 impl Board {
-    /// Live terminal panels of `workspace` whose kind is an agent (Claude, Codex, ...).
+    /// Live terminal panels of `workspace` that run an agent right now (an agent panel, or a
+    /// shell with `claude` in it; see [`Board::panel_runs_agent`]).
     #[must_use]
     pub fn agent_panels_in_workspace(&self, workspace: WorkspaceId) -> Vec<PanelId> {
         self.panels
             .iter()
-            .filter(|panel| panel.workspace_id == workspace && panel.kind.is_agent() && panel.terminal().is_some())
+            .filter(|panel| panel.workspace_id == workspace && panel.terminal().is_some())
             .filter(|panel| !panel.child_exited())
+            .filter(|panel| Self::panel_runs_agent(panel))
             .map(|panel| panel.id)
             .collect()
     }
@@ -69,6 +74,9 @@ impl Board {
         text: &str,
         enter: bool,
     ) -> Result<(LinkOk, LinkEffect), LinkError> {
+        if text.trim().is_empty() {
+            return Err(LinkError::BadRequest("a broadcast needs text".to_owned()));
+        }
         let sender = sender.ok_or_else(|| {
             LinkError::BadRequest("a workspace broadcast must come from a Horizon panel (HORIZON_PANEL_ID)".to_owned())
         })?;
@@ -122,6 +130,7 @@ impl Board {
             target,
             question,
             timeout_secs,
+            abandoned,
         } = *args;
         if question.len() > MAX_REQUEST_BYTES {
             return Err(LinkError::TooLarge);
@@ -144,19 +153,19 @@ impl Board {
             let target_panel = self.panel(target_id).ok_or(LinkError::Closed)?;
             (
                 clean_name(&asker_panel.display_title(), &format!("panel {from}")),
-                target_panel.kind.is_agent(),
+                Self::panel_runs_agent(target_panel),
             )
         };
         if !target_is_agent {
             return Err(LinkError::BadRequest(format!(
-                "'{target}' is not an agent panel; use `send` for shells"
+                "'{target}' is not running an agent, so there is nobody to answer an ask"
             )));
         }
         let bracketed = {
             let panel = self.panel(target_id).ok_or(LinkError::Closed)?;
             live_terminal_mode(panel)?.contains(TermMode::BRACKETED_PASTE)
         };
-        let id = asks.insert(asker, target_id, timeout_secs, reply, now)?;
+        let id = asks.insert_watched(asker, target_id, timeout_secs, reply, Some(Arc::clone(abandoned)), now)?;
         let message = ask_message(&id, &asker_name, &sanitize_send_text(question), bracketed);
         if let Err(error) = self.link_deliver(target_id, &message, true) {
             asks.discard(&id);
@@ -205,8 +214,13 @@ impl Board {
     /// Fails pending asks whose asker or target is gone (closed panel, exited process) or
     /// whose deadline passed; returns what ended so the UI can drop its markers.
     pub fn resolve_link_asks(&self, asks: &mut AskTable, now: Instant) -> Vec<AskEnd> {
-        let alive = |id: PanelId| self.panel(id).is_some_and(|panel| !panel.child_exited());
-        let mut ended = asks.resolve_closed(alive);
+        let asker_alive = |id: PanelId| self.panel(id).is_some_and(|panel| !panel.child_exited());
+        // An asked shell whose `claude` exited is back at a prompt: it can no longer answer.
+        let target_alive = |id: PanelId| {
+            self.panel(id)
+                .is_some_and(|panel| !panel.child_exited() && Self::panel_runs_agent(panel))
+        };
+        let mut ended = asks.resolve_closed(asker_alive, target_alive);
         ended.extend(asks.sweep_expired(now, SWEEP_CAP));
         ended
     }
@@ -219,6 +233,7 @@ impl Board {
         asks: &mut AskTable,
         request: LinkRequest,
         reply: &mpsc::Sender<LinkResponse>,
+        abandoned: &Arc<AtomicBool>,
         now: Instant,
     ) -> Option<LinkEffect> {
         let (response, effect) = match request {
@@ -234,6 +249,7 @@ impl Board {
                     target: &target,
                     question: &text,
                     timeout_secs,
+                    abandoned,
                 },
                 reply.clone(),
                 now,

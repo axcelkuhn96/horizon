@@ -10,6 +10,7 @@ mod visual;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
 use egui::{Align2, Context, CornerRadius, FontId, Id, Painter, Pos2, Rect, Stroke, StrokeKind, Ui, Vec2};
@@ -107,12 +108,13 @@ fn drain_capped<T>(mut next: impl FnMut() -> Option<T>, cap: usize) -> Vec<T> {
 }
 
 /// Hands each queued request to `run`, which answers through the sender it is given (an
-/// `ask` is answered later, not now). Returns true when the UI should repaint: something
-/// was handled, or the batch hit `cap` so more may be waiting for the next frame.
+/// `ask` is answered later, not now) and keeps the `abandoned` flag of an ask to notice its
+/// client leaving. Returns true when the UI should repaint: something was handled, or the
+/// batch hit `cap` so more may be waiting for the next frame.
 fn answer_batch(
     batch: Vec<PendingRequest>,
     cap: usize,
-    mut run: impl FnMut(LinkRequest, &std::sync::mpsc::Sender<LinkResponse>),
+    mut run: impl FnMut(LinkRequest, &std::sync::mpsc::Sender<LinkResponse>, &Arc<AtomicBool>),
 ) -> bool {
     let mut repaint = batch.len() >= cap;
     for pending in batch {
@@ -120,7 +122,8 @@ fn answer_batch(
         if pending.is_abandoned() {
             continue;
         }
-        run(pending.request, &pending.reply);
+        let abandoned = pending.abandoned_flag();
+        run(pending.request, &pending.reply, &abandoned);
         repaint = true;
     }
     repaint
@@ -289,9 +292,12 @@ impl HorizonApp {
         let batch = drain_capped(|| server.try_recv(), MAX_REQUESTS_PER_FRAME);
         let now = Instant::now();
         let mut effects = Vec::new();
-        let repaint = answer_batch(batch, MAX_REQUESTS_PER_FRAME, |request, reply| {
+        let repaint = answer_batch(batch, MAX_REQUESTS_PER_FRAME, |request, reply, abandoned| {
             let label = send_label(&request);
-            if let Some(effect) = self.board.serve_link(&mut self.hub.link_asks, request, reply, now) {
+            if let Some(effect) = self
+                .board
+                .serve_link(&mut self.hub.link_asks, request, reply, abandoned, now)
+            {
                 effects.push((effect, label));
             }
         });
@@ -628,7 +634,7 @@ mod tests {
         })
     }
 
-    fn ok_sent(_: LinkRequest, reply: &std::sync::mpsc::Sender<LinkResponse>) {
+    fn ok_sent(_: LinkRequest, reply: &std::sync::mpsc::Sender<LinkResponse>, _: &Arc<AtomicBool>) {
         let _ = reply.send(LinkResponse::Ok(LinkOk::sent_to("a")));
     }
 
@@ -636,9 +642,9 @@ mod tests {
     fn answer_batch_sends_the_reply_and_asks_for_a_repaint() {
         let (request, answer, _) = pending("hi");
         let mut seen = Vec::new();
-        let repaint = answer_batch(vec![request], MAX_REQUESTS_PER_FRAME, |request, reply| {
+        let repaint = answer_batch(vec![request], MAX_REQUESTS_PER_FRAME, |request, reply, abandoned| {
             seen.push(request.clone());
-            ok_sent(request, reply);
+            ok_sent(request, reply, abandoned);
         });
         assert!(repaint);
         assert_eq!(seen.len(), 1);
@@ -650,9 +656,9 @@ mod tests {
         let (request, answer, abandoned) = pending("late");
         abandoned.store(true, std::sync::atomic::Ordering::Release);
         let mut ran = 0;
-        let repaint = answer_batch(vec![request], MAX_REQUESTS_PER_FRAME, |request, reply| {
+        let repaint = answer_batch(vec![request], MAX_REQUESTS_PER_FRAME, |request, reply, abandoned| {
             ran += 1;
-            ok_sent(request, reply);
+            ok_sent(request, reply, abandoned);
         });
         assert!(!repaint, "nothing handled, batch below the cap");
         assert_eq!(ran, 0);

@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 use alacritty_terminal::term::TermMode;
 
+use crate::agent_detect::detect_running_agent;
 use crate::link::{
     LinkEffect, LinkEffectKind, LinkError, LinkOk, LinkRequest, LinkResponse, MAX_READ_LINES, MAX_REQUEST_BYTES,
     PanelInfo, SendTarget, resolve_target, sanitize_send_text, strip_escapes,
@@ -53,6 +54,24 @@ fn paste_payload(text: &str, bracketed: bool) -> Vec<u8> {
 }
 
 impl Board {
+    /// Whether `panel` runs an agent right now: an agent panel (Claude, Codex, ...), or a
+    /// shell whose live process tree contains `claude` (started by hand or by a quick-start).
+    ///
+    /// Inspects the process tree each time (Linux `/proc`; other platforms see shells as
+    /// non-agents) and is never cached or inferred from the terminal title, so call it at
+    /// the moment of delivery: a stale "yes" would type text and Enter into a bare shell.
+    #[must_use]
+    pub fn panel_runs_agent(panel: &Panel) -> bool {
+        if panel.kind.is_agent() {
+            return true;
+        }
+        panel.kind == PanelKind::Shell
+            && !panel.child_exited()
+            && panel
+                .child_pid()
+                .is_some_and(|pid| detect_running_agent(pid, &[]).is_some())
+    }
+
     /// Stores the panel-link socket exposed to newly spawned and restarted panels as
     /// `HORIZON_SOCKET`.
     pub fn set_link_socket(&mut self, path: Option<PathBuf>) {
@@ -110,7 +129,7 @@ impl Board {
                     .map(|workspace| strip_escapes(&workspace.name))
                     .unwrap_or_default(),
                 kind: kind_label(panel.kind).to_owned(),
-                is_agent: panel.kind.is_agent(),
+                is_agent: Self::panel_runs_agent(panel),
             })
             .collect()
     }

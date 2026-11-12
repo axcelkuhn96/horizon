@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub const LINK_PROTOCOL_VERSION: u32 = 1;
+/// Version 2: `sent` answers carry `delivered`/`skipped` (version 1 had a bare `sent`).
+pub const LINK_PROTOCOL_VERSION: u32 = 2;
 pub const MAX_REQUEST_BYTES: usize = 64 * 1024;
 pub const MAX_READ_LINES: usize = 500;
 pub const DEFAULT_READ_LINES: usize = 50;
@@ -184,7 +185,10 @@ pub enum LinkResponse {
 pub enum LinkError {
     #[error("bad request: {0}")]
     BadRequest(String),
-    #[error("protocol version mismatch: got {got}, expected {expected}")]
+    #[error(
+        "protocol version mismatch: got {got}, expected {expected}; the `horizon` command and the running Horizon \
+         differ, restart Horizon or use the matching binary"
+    )]
     VersionMismatch { got: u64, expected: u32 },
     #[error("request exceeds {MAX_REQUEST_BYTES} bytes")]
     TooLarge,
@@ -296,16 +300,16 @@ mod tests {
 
     #[test]
     fn parse_accepts_exactly_64k() {
-        let mut line = br#"{"v":1,"op":"list"}"#.to_vec();
+        let mut line = br#"{"v":2,"op":"list"}"#.to_vec();
         line.resize(MAX_REQUEST_BYTES, b' ');
         assert_eq!(parse_request_line(&line), Ok(LinkRequest::List));
     }
 
     #[test]
     fn parse_rejects_wrong_version() {
-        let err = parse_request_line(br#"{"v":2,"op":"list"}"#).unwrap_err();
+        let err = parse_request_line(br#"{"v":3,"op":"list"}"#).unwrap_err();
         assert_eq!(err.code(), LinkErrorCode::VersionMismatch);
-        let err = parse_request_line(br#"{"v":2,"op":"from_the_future"}"#).unwrap_err();
+        let err = parse_request_line(br#"{"v":3,"op":"from_the_future"}"#).unwrap_err();
         assert_eq!(err.code(), LinkErrorCode::VersionMismatch);
     }
 
@@ -315,8 +319,8 @@ mod tests {
             &b"not json"[..],
             br#"{"op":"list"}"#,
             br#"{"v":"1","op":"list"}"#,
-            br#"{"v":1,"op":"explode"}"#,
-            br#"{"v":1,"op":"send","target":"a"}"#,
+            br#"{"v":2,"op":"explode"}"#,
+            br#"{"v":2,"op":"send","target":"a"}"#,
             &[0xff, 0xfe][..],
         ] {
             let err = parse_request_line(line).unwrap_err();
@@ -327,7 +331,7 @@ mod tests {
     #[test]
     fn parse_clamps_lines() {
         let read = |lines: &str| {
-            let raw = format!(r#"{{"v":1,"op":"read","target":"a","lines":{lines}}}"#);
+            let raw = format!(r#"{{"v":2,"op":"read","target":"a","lines":{lines}}}"#);
             parse_request_line(raw.as_bytes())
         };
         let lines_of = |req| match req {
@@ -337,13 +341,13 @@ mod tests {
         assert_eq!(lines_of(read("0")), 1);
         assert_eq!(lines_of(read("100000")), MAX_READ_LINES);
         assert_eq!(lines_of(read("7")), 7);
-        let default = parse_request_line(br#"{"v":1,"op":"read","target":"a"}"#);
+        let default = parse_request_line(br#"{"v":2,"op":"read","target":"a"}"#);
         assert_eq!(lines_of(default), DEFAULT_READ_LINES);
     }
 
     #[test]
     fn parse_send_defaults_enter_false() {
-        let req = parse_request_line(br#"{"v":1,"op":"send","target":"a","text":"hi"}"#);
+        let req = parse_request_line(br#"{"v":2,"op":"send","target":"a","text":"hi"}"#);
         assert_eq!(
             req,
             Ok(LinkRequest::Send {
@@ -358,7 +362,7 @@ mod tests {
 
     #[test]
     fn parse_send_reads_the_optional_sender_name() {
-        let req = parse_request_line(br#"{"v":1,"op":"send","target":"a","text":"hi","from":"backend"}"#);
+        let req = parse_request_line(br#"{"v":2,"op":"send","target":"a","text":"hi","from":"backend"}"#);
         assert_eq!(
             req,
             Ok(LinkRequest::Send {
@@ -387,7 +391,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             json,
-            r#"{"v":1,"op":"send","target":"a","text":"x","enter":false,"from":"api"}"#
+            r#"{"v":2,"op":"send","target":"a","text":"x","enter":false,"from":"api"}"#
         );
         assert_eq!(parse_request_line(json.as_bytes()), Ok(with));
     }
@@ -405,7 +409,7 @@ mod tests {
             },
         };
         let json = serde_json::to_string(&envelope).unwrap();
-        assert_eq!(json, r#"{"v":1,"op":"send","target":"a","text":"x\ny","enter":true}"#);
+        assert_eq!(json, r#"{"v":2,"op":"send","target":"a","text":"x\ny","enter":true}"#);
         assert_eq!(parse_request_line(json.as_bytes()), Ok(envelope.request));
     }
 
@@ -450,7 +454,7 @@ mod tests {
     #[test]
     fn parse_ask_clamps_timeout_range() {
         let ask = |extra: &str| {
-            let raw = format!(r#"{{"v":1,"op":"ask","from":"1","target":"2","text":"q"{extra}}}"#);
+            let raw = format!(r#"{{"v":2,"op":"ask","from":"1","target":"2","text":"q"{extra}}}"#);
             match parse_request_line(raw.as_bytes()) {
                 Ok(LinkRequest::Ask { timeout_secs, .. }) => timeout_secs,
                 other => panic!("unexpected {other:?}"),
@@ -467,10 +471,10 @@ mod tests {
     #[test]
     fn parse_ask_and_reply_require_their_fields() {
         for line in [
-            &br#"{"v":1,"op":"ask","target":"2","text":"q"}"#[..],
-            br#"{"v":1,"op":"ask","from":"1","text":"q"}"#,
-            br#"{"v":1,"op":"reply","from":"1","text":"a"}"#,
-            br#"{"v":1,"op":"reply","ask_id":"abc123","text":"a"}"#,
+            &br#"{"v":2,"op":"ask","target":"2","text":"q"}"#[..],
+            br#"{"v":2,"op":"ask","from":"1","text":"q"}"#,
+            br#"{"v":2,"op":"reply","from":"1","text":"a"}"#,
+            br#"{"v":2,"op":"reply","ask_id":"abc123","text":"a"}"#,
         ] {
             let err = parse_request_line(line).unwrap_err();
             assert_eq!(err.code(), LinkErrorCode::BadRequest, "{line:?}");
@@ -479,7 +483,7 @@ mod tests {
 
     #[test]
     fn send_target_wire_is_a_string_or_the_workspace_scope() {
-        let all = br#"{"v":1,"op":"send","target":{"scope":"workspace"},"text":"hi","from_id":"4"}"#;
+        let all = br#"{"v":2,"op":"send","target":{"scope":"workspace"},"text":"hi","from_id":"4"}"#;
         assert_eq!(
             parse_request_line(all),
             Ok(LinkRequest::Send {
@@ -492,7 +496,7 @@ mod tests {
         );
         let json = serde_json::to_string(&SendTarget::AllInWorkspace).unwrap();
         assert_eq!(json, r#"{"scope":"workspace"}"#);
-        let bad = br#"{"v":1,"op":"send","target":{"scope":"universe"},"text":"hi"}"#;
+        let bad = br#"{"v":2,"op":"send","target":{"scope":"universe"},"text":"hi"}"#;
         assert_eq!(parse_request_line(bad).unwrap_err().code(), LinkErrorCode::BadRequest);
     }
 }

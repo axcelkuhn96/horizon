@@ -4,7 +4,8 @@
 //! thread, which answers or fails each ask through the stored sender.
 
 use std::collections::VecDeque;
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use super::{LinkError, LinkOk, LinkResponse};
@@ -52,9 +53,15 @@ struct PendingAsk {
     deadline: Instant,
     timeout_secs: u64,
     reply: mpsc::Sender<LinkResponse>,
+    /// Set by the connection thread once its client is gone (it stopped waiting).
+    abandoned: Option<Arc<AtomicBool>>,
 }
 
 impl PendingAsk {
+    fn is_abandoned(&self) -> bool {
+        self.abandoned.as_ref().is_some_and(|flag| flag.load(Ordering::Acquire))
+    }
+
     fn end(&self) -> AskEnd {
         AskEnd {
             asker: self.asker,
@@ -97,6 +104,25 @@ impl AskTable {
         reply: mpsc::Sender<LinkResponse>,
         now: Instant,
     ) -> Result<String, LinkError> {
+        self.insert_watched(asker, target, timeout_secs, reply, None, now)
+    }
+
+    /// Like [`Self::insert`], also remembering the connection's `abandoned` flag: once it
+    /// is set (the client vanished) the next [`Self::resolve_closed`] ends the ask as
+    /// `AskCancelled`.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::insert`].
+    pub fn insert_watched(
+        &mut self,
+        asker: PanelId,
+        target: PanelId,
+        timeout_secs: u64,
+        reply: mpsc::Sender<LinkResponse>,
+        abandoned: Option<Arc<AtomicBool>>,
+        now: Instant,
+    ) -> Result<String, LinkError> {
         if self.asks.len() >= MAX_ASKS_TOTAL {
             return Err(LinkError::BadRequest(
                 "too many pending asks; wait for one to finish".to_owned(),
@@ -118,6 +144,7 @@ impl AskTable {
             deadline: now + Duration::from_secs(timeout_secs),
             timeout_secs,
             reply,
+            abandoned,
         });
         Ok(id)
     }
@@ -177,16 +204,22 @@ impl AskTable {
         });
     }
 
-    /// Fails every ask whose asker or target is no longer `alive` (closed panel or exited
-    /// process): `AskCancelled` for a gone asker, else `AskTargetClosed`.
-    pub fn resolve_closed(&mut self, alive: impl Fn(PanelId) -> bool) -> Vec<AskEnd> {
+    /// Fails every ask whose client vanished or whose asker is no longer `asker_alive`
+    /// (`AskCancelled`), or whose target is no longer `target_alive` (`AskTargetClosed`).
+    /// A target is alive only while its panel is open, its process runs and an agent is
+    /// still in it.
+    pub fn resolve_closed(
+        &mut self,
+        asker_alive: impl Fn(PanelId) -> bool,
+        target_alive: impl Fn(PanelId) -> bool,
+    ) -> Vec<AskEnd> {
         let mut ended = Vec::new();
         let mut index = 0;
         while index < self.asks.len() {
             let ask = &self.asks[index];
-            let error = if !alive(ask.asker) {
+            let error = if ask.is_abandoned() || !asker_alive(ask.asker) {
                 LinkError::AskCancelled
-            } else if !alive(ask.target) {
+            } else if !target_alive(ask.target) {
                 LinkError::AskTargetClosed
             } else {
                 index += 1;
@@ -395,7 +428,8 @@ mod tests {
         let (_, to_asker_closed) = insert(&mut table, 3, 4, now);
         let (_, untouched) = insert(&mut table, 5, 6, now);
 
-        let ended = table.resolve_closed(|panel| panel != PanelId(2) && panel != PanelId(3));
+        let alive = |panel: PanelId| panel != PanelId(2) && panel != PanelId(3);
+        let ended = table.resolve_closed(alive, alive);
 
         assert_eq!(ended.len(), 2);
         let code = |receiver: &mpsc::Receiver<LinkResponse>| match receiver.try_recv() {
@@ -409,6 +443,63 @@ mod tests {
         assert_eq!(code(&to_asker_closed), Some(crate::link::LinkErrorCode::AskCancelled));
         assert!(untouched.try_recv().is_err());
         assert_eq!(table.len(), 1);
+    }
+
+    #[test]
+    fn an_ask_whose_client_vanished_is_cancelled_and_its_id_remembered() {
+        let mut table = AskTable::default();
+        let now = Instant::now();
+        let (sender, receiver) = channel();
+        let gone = Arc::new(AtomicBool::new(false));
+        let id = table
+            .insert_watched(PanelId(1), PanelId(2), 30, sender, Some(Arc::clone(&gone)), now)
+            .expect("insert");
+        let (_other, other_receiver) = insert(&mut table, 3, 4, now);
+
+        assert!(
+            table.resolve_closed(|_| true, |_| true).is_empty(),
+            "client still there"
+        );
+        gone.store(true, Ordering::Release);
+        let ended = table.resolve_closed(|_| true, |_| true);
+
+        assert_eq!(
+            ended,
+            vec![AskEnd {
+                asker: PanelId(1),
+                target: PanelId(2)
+            }]
+        );
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(LinkResponse::Err {
+                code: crate::link::LinkErrorCode::AskCancelled,
+                ..
+            })
+        ));
+        assert!(other_receiver.try_recv().is_err());
+        assert_eq!(table.len(), 1);
+        let err = table
+            .answer(&id, PanelId(2), String::new(), "late".to_owned())
+            .unwrap_err();
+        assert_eq!(err, LinkError::AskExpired(id));
+    }
+
+    #[test]
+    fn a_target_that_no_longer_runs_an_agent_ends_the_ask_even_if_its_panel_lives() {
+        let mut table = AskTable::default();
+        let (_id, receiver) = insert(&mut table, 1, 2, Instant::now());
+
+        let ended = table.resolve_closed(|_| true, |panel| panel != PanelId(2));
+
+        assert_eq!(ended.len(), 1);
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(LinkResponse::Err {
+                code: crate::link::LinkErrorCode::AskTargetClosed,
+                ..
+            })
+        ));
     }
 
     #[test]

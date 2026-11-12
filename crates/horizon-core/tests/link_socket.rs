@@ -49,7 +49,7 @@ fn link_socket_roundtrip_list() {
         )
         .expect("panel");
 
-    let client = request(server.path().to_path_buf(), "{\"v\":1,\"op\":\"list\"}\n");
+    let client = request(server.path().to_path_buf(), "{\"v\":2,\"op\":\"list\"}\n");
     serve_until_done(&server, &mut board, &client);
     let response = client.join().expect("client thread");
 
@@ -105,7 +105,8 @@ fn serve_asks_until_done(
     let deadline = Instant::now() + Duration::from_secs(20);
     while clients.iter().any(|client| !client.is_finished()) && Instant::now() < deadline {
         if let Some(pending) = server.try_recv() {
-            let _ = board.serve_link(asks, pending.request, &pending.reply, Instant::now());
+            let abandoned = pending.abandoned_flag();
+            let _ = board.serve_link(asks, pending.request, &pending.reply, &abandoned, Instant::now());
         }
         let _ = board.resolve_link_asks(asks, Instant::now());
         thread::sleep(Duration::from_millis(5));
@@ -173,13 +174,14 @@ fn link_socket_ask_reply_roundtrip() {
     let asker = owned_request(
         server.path().to_path_buf(),
         format!(
-            "{{\"v\":1,\"op\":\"ask\",\"from\":\"{alpha}\",\"target\":\"beta\",\"text\":\"port?\",\"timeout_secs\":30}}\n"
+            "{{\"v\":2,\"op\":\"ask\",\"from\":\"{alpha}\",\"target\":\"beta\",\"text\":\"port?\",\"timeout_secs\":30}}\n"
         ),
     );
     let deadline = Instant::now() + Duration::from_secs(10);
     while asks.is_empty() && Instant::now() < deadline {
         if let Some(pending) = server.try_recv() {
-            let _ = board.serve_link(&mut asks, pending.request, &pending.reply, Instant::now());
+            let abandoned = pending.abandoned_flag();
+            let _ = board.serve_link(&mut asks, pending.request, &pending.reply, &abandoned, Instant::now());
         }
         thread::sleep(Duration::from_millis(5));
     }
@@ -190,7 +192,7 @@ fn link_socket_ask_reply_roundtrip() {
 
     let replier = owned_request(
         server.path().to_path_buf(),
-        format!("{{\"v\":1,\"op\":\"reply\",\"from\":\"{beta}\",\"ask_id\":\"{ask_id}\",\"text\":\"8080\"}}\n"),
+        format!("{{\"v\":2,\"op\":\"reply\",\"from\":\"{beta}\",\"ask_id\":\"{ask_id}\",\"text\":\"8080\"}}\n"),
     );
     serve_asks_until_done(&server, &mut board, &mut asks, &[&asker, &replier]);
 
@@ -225,7 +227,7 @@ fn link_socket_ask_times_out_cleanly() {
     let asker = owned_request(
         server.path().to_path_buf(),
         format!(
-            "{{\"v\":1,\"op\":\"ask\",\"from\":\"{alpha}\",\"target\":\"beta\",\"text\":\"anyone?\",\"timeout_secs\":5}}\n"
+            "{{\"v\":2,\"op\":\"ask\",\"from\":\"{alpha}\",\"target\":\"beta\",\"text\":\"anyone?\",\"timeout_secs\":5}}\n"
         ),
     );
     let started = Instant::now();
