@@ -212,3 +212,49 @@ impl HorizonApp {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::app::claude_auto::AutoChoice;
+    use crate::app::test_support::test_app;
+
+    use super::*;
+
+    fn auto_row(target: Option<&str>) -> Row {
+        Row::auto(&AutoChoice {
+            target: target.map(str::to_owned),
+            detail: target.map_or_else(|| "No account available".to_owned(), |name| format!("\u{2192} {name}")),
+            low: false,
+            tooltip: String::new(),
+        })
+    }
+
+    fn expand(app: &mut HorizonApp, rows: Vec<Row>) {
+        app.hub.quick_start.expanded = Some(Expanded::new(PanelId(1), rows, app.hub.rows_version));
+    }
+
+    #[test]
+    fn picking_a_dimmed_auto_chip_refuses_at_once_and_keeps_the_profile_page() {
+        let mut app = test_app();
+        expand(&mut app, vec![auto_row(None)]);
+
+        app.apply_quick_start_event(&Context::default(), PanelId(1), Stage::Profiles, StripEvent::Pick(0));
+
+        let notice = app.hub.quick_start.notice_for(PanelId(1), Instant::now());
+        assert_eq!(notice.map(|(failure, _)| failure), Some(StartFailure::NoAccount));
+        let expanded = app.hub.quick_start.expanded.as_ref().expect("strip stays open");
+        assert_eq!(expanded.stage, Stage::Profiles);
+    }
+
+    #[test]
+    fn picking_an_available_auto_chip_opens_the_mode_page() {
+        let mut app = test_app();
+        expand(&mut app, vec![auto_row(Some("conta2"))]);
+
+        app.apply_quick_start_event(&Context::default(), PanelId(1), Stage::Profiles, StripEvent::Pick(0));
+
+        assert_eq!(app.hub.quick_start.notice_for(PanelId(1), Instant::now()), None);
+        let expanded = app.hub.quick_start.expanded.as_ref().expect("strip stays open");
+        assert_eq!(expanded.stage, Stage::Modes { profile: 0 });
+    }
+}

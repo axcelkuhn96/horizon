@@ -23,7 +23,7 @@ use super::hub_state::HubState;
 use super::hub_ui::{self, Severity};
 
 pub(super) use paint::{show_chips, show_overflow_rows};
-pub(super) use time::format_relative;
+pub(super) use time::{format_clock, local_offset_secs};
 
 const IDENT_MAX_FULL: usize = 10;
 const IDENT_MAX_COMPACT: usize = 5;

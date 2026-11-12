@@ -28,7 +28,7 @@ pub(super) fn parse_utc_offset(text: &str) -> Option<i64> {
 /// ask once per snapshot (not per frame): a long-running session then follows
 /// a daylight-saving change instead of keeping the offset from startup.
 #[must_use]
-pub(super) fn local_offset_secs() -> Option<i64> {
+pub(in crate::app) fn local_offset_secs() -> Option<i64> {
     if !cfg!(unix) {
         return None;
     }
@@ -38,7 +38,7 @@ pub(super) fn local_offset_secs() -> Option<i64> {
 
 /// `14:30`, or `Fri 09:00` with `weekday`. Without an offset the time is UTC and says so.
 #[must_use]
-pub(super) fn format_clock(unix: i64, offset: Option<i64>, weekday: bool) -> String {
+pub(in crate::app) fn format_clock(unix: i64, offset: Option<i64>, weekday: bool) -> String {
     let local = unix.saturating_add(offset.unwrap_or(0));
     let seconds_of_day = local.rem_euclid(DAY);
     let (hours, minutes) = (seconds_of_day / HOUR, seconds_of_day % HOUR / MINUTE);
@@ -57,7 +57,7 @@ pub(super) fn format_clock(unix: i64, offset: Option<i64>, weekday: bool) -> Str
 
 /// Time until a reset: `45s`-level precision is noise, so `<1m`, `12m`, `1h 12m`, `3d 4h`.
 #[must_use]
-pub(in crate::app) fn format_relative(secs: i64) -> String {
+pub(super) fn format_relative(secs: i64) -> String {
     if secs <= 0 {
         "now".to_owned()
     } else if secs < MINUTE {

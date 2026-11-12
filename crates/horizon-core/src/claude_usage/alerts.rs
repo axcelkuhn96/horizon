@@ -18,17 +18,6 @@ pub enum AlertLevel {
     Crit90,
 }
 
-impl AlertLevel {
-    /// The threshold percentage the level stands for.
-    #[must_use]
-    pub fn threshold(self) -> u32 {
-        match self {
-            Self::Warn80 => 80,
-            Self::Crit90 => 90,
-        }
-    }
-}
-
 fn level_for(pct: f32) -> Option<AlertLevel> {
     if pct >= CRIT_PCT {
         Some(AlertLevel::Crit90)

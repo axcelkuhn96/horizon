@@ -157,10 +157,16 @@ impl NewWorktreeDialog {
         self.also_workspace
     }
 
-    /// The preset of the chosen account, if any Claude preset exists.
+    /// The preset of the chosen account, if any Claude preset exists. `None` for Auto, which
+    /// is resolved by the app when the worktree is created.
     pub(super) fn chosen_preset(&self, presets: &[PresetConfig]) -> Option<PresetConfig> {
-        let account = self.accounts.get(self.account)?;
+        let account = self.accounts.get(self.account).filter(|account| !account.auto)?;
         presets.get(account.preset).cloned()
+    }
+
+    /// The Auto chip is selected.
+    pub(super) fn auto_chosen(&self) -> bool {
+        self.accounts.get(self.account).is_some_and(|account| account.auto)
     }
 
     /// Sets the branch from a click or a hint (one event, so planned at once).
@@ -587,7 +593,7 @@ mod tests {
     use horizon_core::WorkspaceId;
     use horizon_core::git_overview::BranchInfo;
 
-    use super::{FormInput, NewWorktreeDialog, validate_form};
+    use super::{AccountChoice, FormInput, NewWorktreeDialog, validate_form};
 
     fn check(branch: &str, path: &str, existing: &[&str]) -> Result<(), String> {
         let occupied = vec![("taken".to_owned(), PathBuf::from("/work/api-taken"))];
@@ -709,5 +715,42 @@ mod tests {
         form.branch = "fix/login".to_owned();
         let request = form.take_request().expect("valid request");
         assert_eq!(request.base, None, "an existing branch ignores the base");
+    }
+
+    #[test]
+    fn the_auto_account_has_no_preset_of_its_own() {
+        let mut form = dialog();
+        form.accounts = vec![
+            AccountChoice {
+                preset: 0,
+                label: "Auto".to_owned(),
+                slot: None,
+                auto: true,
+            },
+            AccountChoice {
+                preset: 0,
+                label: "conta1".to_owned(),
+                slot: Some(0),
+                auto: false,
+            },
+        ];
+        let presets = vec![horizon_core::PresetConfig {
+            name: "Claude \u{b7} conta1".to_owned(),
+            alias: Some("conta1".to_owned()),
+            kind: horizon_core::PanelKind::Claude,
+            command: None,
+            args: Vec::new(),
+            resume: horizon_core::PanelResume::Fresh,
+            ssh_connection: None,
+            env: std::collections::BTreeMap::new(),
+        }];
+
+        form.account = 0;
+        assert!(form.auto_chosen());
+        assert!(form.chosen_preset(&presets).is_none());
+
+        form.account = 1;
+        assert!(!form.auto_chosen());
+        assert!(form.chosen_preset(&presets).is_some());
     }
 }

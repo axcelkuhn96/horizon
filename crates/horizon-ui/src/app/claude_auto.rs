@@ -3,6 +3,8 @@
 //! always re-evaluated at click time. The rules live in `horizon_core::claude_usage::pick_auto`.
 //! Visual spec: `docs/design/claude-hub-ui.md` §12.
 
+use std::time::SystemTime;
+
 use horizon_core::claude_usage::{AutoPick, AutoReason, ProfileUsageView, pick_auto};
 
 use super::HorizonApp;
@@ -30,8 +32,8 @@ pub(super) struct AutoChoice {
 }
 
 impl AutoChoice {
-    pub(super) fn from_views(views: &[ProfileUsageView]) -> Self {
-        let pick = pick_auto(views);
+    pub(super) fn from_views(views: &[ProfileUsageView], now: SystemTime) -> Self {
+        let pick = pick_auto(views, now);
         let (detail, low) = match &pick {
             Some(AutoPick {
                 name,
@@ -74,22 +76,24 @@ impl AutoChoice {
 
 impl HorizonApp {
     /// Usage projection of every listed profile, in config order.
-    fn auto_views(&self) -> Vec<ProfileUsageView> {
+    fn auto_views(&self, now: SystemTime) -> Vec<ProfileUsageView> {
         claude_profile_names(&self.presets)
             .iter()
             .enumerate()
-            .map(|(order, name)| ProfileUsageView::new(name, order, self.hub.usage.usage(name)))
+            .map(|(order, name)| ProfileUsageView::new(name, order, self.hub.usage.usage(name), now))
             .collect()
     }
 
     /// Row text for the current snapshot.
     pub(super) fn auto_choice(&self) -> AutoChoice {
-        AutoChoice::from_views(&self.auto_views())
+        let now = SystemTime::now();
+        AutoChoice::from_views(&self.auto_views(now), now)
     }
 
     /// The account Auto picks with the snapshot as it is now (never a value cached on a row).
     pub(super) fn current_auto_pick(&self) -> Option<AutoPick> {
-        pick_auto(&self.auto_views())
+        let now = SystemTime::now();
+        pick_auto(&self.auto_views(now), now)
     }
 }
 
@@ -99,6 +103,10 @@ mod tests {
 
     use super::*;
 
+    fn now() -> SystemTime {
+        SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_794_000_000)
+    }
+
     fn view(name: &str, order: usize, state: UsageState, weekly: Option<f32>) -> ProfileUsageView {
         ProfileUsageView {
             name: name.to_owned(),
@@ -106,6 +114,7 @@ mod tests {
             weekly_pct: weekly,
             five_hour_pct: None,
             resets_at: None,
+            fetched_at: Some(now()),
             order,
         }
     }
@@ -117,19 +126,19 @@ mod tests {
             view("conta2", 1, UsageState::Ok, Some(12.0)),
         ];
 
-        let choice = AutoChoice::from_views(&views);
+        let choice = AutoChoice::from_views(&views, now());
 
         assert_eq!(choice.detail, "\u{2192} conta2 \u{b7} 88% left");
         assert_eq!(choice.target.as_deref(), Some("conta2"));
         assert!(!choice.low && choice.available());
 
         let nearly_spent = [view("conta1", 0, UsageState::Ok, Some(85.0))];
-        let choice = AutoChoice::from_views(&nearly_spent);
+        let choice = AutoChoice::from_views(&nearly_spent, now());
         assert_eq!(choice.detail, "\u{2192} conta1 \u{b7} 15% left");
         assert!(choice.low);
 
         let no_data = [view("conta1", 0, UsageState::Ok, None)];
-        let choice = AutoChoice::from_views(&no_data);
+        let choice = AutoChoice::from_views(&no_data, now());
         assert_eq!(choice.detail, "\u{2192} conta1");
         assert!(!choice.low);
     }
@@ -142,14 +151,14 @@ mod tests {
             view("conta3", 2, UsageState::Ok, Some(100.0)),
         ];
 
-        let choice = AutoChoice::from_views(&views);
+        let choice = AutoChoice::from_views(&views, now());
 
         assert!(!choice.available());
         assert_eq!(choice.detail, "No account available");
         assert!(choice.tooltip.contains("conta1: expired"));
         assert!(choice.tooltip.contains("conta2: no login"));
         assert!(choice.tooltip.contains("conta3: limit reached"));
-        assert_eq!(AutoChoice::from_views(&[]).tooltip, "No Claude profiles");
+        assert_eq!(AutoChoice::from_views(&[], now()).tooltip, "No Claude profiles");
     }
 
     #[test]
@@ -159,7 +168,7 @@ mod tests {
             view("conta2", 1, UsageState::Ok, Some(10.0)),
         ];
 
-        let choice = AutoChoice::from_views(&views);
+        let choice = AutoChoice::from_views(&views, now());
 
         assert!(choice.tooltip.starts_with("Picks the account"));
         assert!(choice.tooltip.contains("conta1: expired"));

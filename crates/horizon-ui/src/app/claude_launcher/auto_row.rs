@@ -3,7 +3,7 @@
 //! and their indices; the selection is `auto_selected` on top of `selected`.
 //! Visual spec: `docs/design/claude-hub-ui.md` §12.
 
-use egui::{Align2, CornerRadius, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, Vec2, WidgetInfo, WidgetType};
+use egui::{CornerRadius, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, Vec2, WidgetInfo, WidgetType};
 
 use super::{
     CachedGalley, ClaudeLauncherState, ROW_HEIGHT, ROW_PADDING_X, ROW_RADIUS, cached_elided, layout_key, move_selection,
@@ -19,6 +19,7 @@ const STAR_RADIUS: f32 = 5.0;
 /// Text of the Auto row, built with the other rows and rebuilt with them.
 pub(super) struct AutoRow {
     pub(super) choice: AutoChoice,
+    name_galley: Option<CachedGalley>,
     detail_galley: Option<CachedGalley>,
 }
 
@@ -26,6 +27,7 @@ impl AutoRow {
     pub(super) fn new(choice: AutoChoice) -> Self {
         Self {
             choice,
+            name_galley: None,
             detail_galley: None,
         }
     }
@@ -41,10 +43,16 @@ impl ClaudeLauncherState {
         self.auto.is_some() && self.auto_selected
     }
 
-    /// Arrow-key step over `[Auto] + profiles`, wrapping at both ends.
+    /// Whether keyboard navigation can land on the Auto row (a disabled row is skipped).
+    fn auto_selectable(&self) -> bool {
+        self.auto.as_ref().is_some_and(AutoRow::available)
+    }
+
+    /// Arrow-key step over `[Auto] + profiles`, wrapping at both ends. A disabled Auto row is
+    /// not part of the cycle.
     pub(super) fn step_selection(&mut self, delta: i32) {
-        let offset = usize::from(self.auto.is_some());
-        let at = if self.auto_row_selected() {
+        let offset = usize::from(self.auto_selectable());
+        let at = if self.auto_selected && offset == 1 {
             0
         } else {
             self.selected + offset
@@ -56,9 +64,9 @@ impl ClaudeLauncherState {
         }
     }
 
-    /// Home: the first entry (Auto when listed).
+    /// Home: the first entry (Auto when it can be picked).
     pub(super) fn select_first(&mut self) {
-        self.auto_selected = self.auto.is_some();
+        self.auto_selected = self.auto_selectable();
         self.selected = 0;
     }
 
@@ -146,13 +154,15 @@ fn paint_auto_row(painter: &egui::Painter, rect: Rect, auto: &mut AutoRow, selec
 
     let text_left = star_x + 4.0 + 8.0;
     let text_width = (rect.right() - ROW_PADDING_X - text_left).max(0.0);
-    painter.text(
-        Pos2::new(text_left, rect.top() + 10.0),
-        Align2::LEFT_TOP,
+    let name = cached_elided(
+        &mut auto.name_galley,
+        layout_key(&painter, text_width),
+        &painter,
         AUTO_NAME,
         FontId::proportional(13.0),
-        theme::FG(),
+        text_width,
     );
+    painter.galley(Pos2::new(text_left, rect.top() + 10.0), name, theme::FG());
     let detail = cached_elided(
         &mut auto.detail_galley,
         layout_key(&painter, text_width),

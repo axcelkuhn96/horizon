@@ -1197,6 +1197,25 @@ mod tests {
     }
 
     #[test]
+    fn arrows_home_and_end_skip_a_disabled_auto_row() {
+        let mut state = launcher_with_auto(&["a", "b"], None);
+
+        launcher_keys(Key::ArrowUp, &mut state);
+        assert!(!state.auto_selected, "Up from the first profile wraps to the last one");
+        assert_eq!(state.selected, 1);
+        launcher_keys(Key::ArrowDown, &mut state);
+        assert!(
+            !state.auto_selected,
+            "Down from the last profile wraps to the first one"
+        );
+        assert_eq!(state.selected, 0);
+        state.selected = 1;
+        launcher_keys(Key::Home, &mut state);
+        assert!(!state.auto_selected);
+        assert_eq!(state.selected, 0);
+    }
+
+    #[test]
     fn enter_on_auto_launches_auto_unless_it_is_disabled() {
         let mut state = launcher_with_auto(&["a", "b"], Some("b"));
         state.auto_selected = true;

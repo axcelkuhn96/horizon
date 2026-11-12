@@ -7,8 +7,16 @@ use horizon_core::claude_usage::{
     pick_auto,
 };
 
+/// 2026-11-09 08:00 UTC, a few days before the reset used in the projection test.
+const NOW_SECS: u64 = 1_794_000_000;
+
+fn now() -> SystemTime {
+    UNIX_EPOCH + Duration::from_secs(NOW_SECS)
+}
+
 fn view(name: &str, order: usize, state: UsageState, weekly: Option<f32>, five: Option<f32>) -> ProfileUsageView {
     ProfileUsageView {
+        fetched_at: Some(now()),
         name: name.to_owned(),
         state,
         weekly_pct: weekly,
@@ -23,14 +31,14 @@ fn ok(name: &str, order: usize, weekly: f32) -> ProfileUsageView {
 }
 
 fn picked(views: &[ProfileUsageView]) -> Option<String> {
-    pick_auto(views).map(|pick| pick.name)
+    pick_auto(views, now()).map(|pick| pick.name)
 }
 
 #[test]
 fn auto_picks_most_remaining_weekly() {
     let views = [ok("a", 0, 34.0), ok("b", 1, 12.0), ok("c", 2, 60.0)];
 
-    let pick = pick_auto(&views).expect("a usable profile");
+    let pick = pick_auto(&views, now()).expect("a usable profile");
 
     assert_eq!(pick.name, "b");
     assert_eq!(pick.reason, AutoReason::MostRemaining);
@@ -80,7 +88,7 @@ fn auto_without_usage_data_picks_first_logged_in() {
         view("second", 2, UsageState::Stale, None, None),
     ];
 
-    let pick = pick_auto(&views).expect("a logged-in profile");
+    let pick = pick_auto(&views, now()).expect("a logged-in profile");
 
     assert_eq!(pick.name, "first");
     assert_eq!(pick.reason, AutoReason::NoUsageData);
@@ -95,12 +103,12 @@ fn auto_prefers_a_profile_with_data_over_one_without() {
 
 #[test]
 fn auto_none_when_nothing_usable() {
-    assert_eq!(pick_auto(&[]), None);
+    assert_eq!(pick_auto(&[], now()), None);
     let views = [
         view("a", 0, UsageState::Expired, None, None),
         view("b", 1, UsageState::Missing, None, None),
     ];
-    assert_eq!(pick_auto(&views), None);
+    assert_eq!(pick_auto(&views, now()), None);
 }
 
 #[test]
@@ -109,7 +117,7 @@ fn auto_ignores_profile_with_weekly_100() {
     assert_eq!(picked(&views).as_deref(), Some("left"));
     assert_eq!(views[0].skip_reason(), Some(SkipReason::LimitReached));
 
-    assert_eq!(pick_auto(&[ok("spent", 0, 100.0)]), None);
+    assert_eq!(pick_auto(&[ok("spent", 0, 100.0)], now()), None);
 }
 
 #[test]
@@ -137,10 +145,10 @@ fn view_projects_a_snapshot_entry_without_secrets() {
         },
         severity: None,
         state: UsageState::Ok,
-        fetched_at_ms: Some(1),
+        fetched_at_ms: Some(i64::try_from(NOW_SECS * 1000).expect("fits")),
     };
 
-    let projected = ProfileUsageView::new("conta1", 3, Some(&usage));
+    let projected = ProfileUsageView::new("conta1", 3, Some(&usage), now());
 
     assert_eq!(projected.weekly_pct, Some(66.0));
     assert_eq!(projected.five_hour_pct, Some(10.0));
@@ -149,9 +157,53 @@ fn view_projects_a_snapshot_entry_without_secrets() {
         projected.resets_at,
         Some(UNIX_EPOCH + Duration::from_secs(1_794_700_800))
     );
-    let unknown = ProfileUsageView::new("conta2", 0, None);
+    assert_eq!(projected.fetched_at, Some(now()));
+    let unknown = ProfileUsageView::new("conta2", 0, None, now());
     assert_eq!(unknown.state, UsageState::Stale);
     assert_eq!(unknown.weekly_pct, None);
+}
+
+#[test]
+fn view_drops_a_weekly_figure_whose_window_already_reset() {
+    let usage = |reset: &str| ProfileUsage {
+        name: "conta1".to_owned(),
+        display_name: None,
+        email: None,
+        five_hour: UsageWindow::default(),
+        seven_day: UsageWindow {
+            percent: Some(99.0),
+            resets_at: Some(reset.to_owned()),
+        },
+        severity: None,
+        state: UsageState::Ok,
+        fetched_at_ms: Some(1),
+    };
+
+    let past = ProfileUsageView::new("conta1", 0, Some(&usage("2026-11-01T00:00:00Z")), now());
+    assert_eq!(past.weekly_pct, None);
+    assert_eq!(past.resets_at, None);
+
+    let future = ProfileUsageView::new("conta1", 0, Some(&usage("2026-11-15T00:00:00Z")), now());
+    assert_eq!(future.weekly_pct, Some(99.0));
+}
+
+#[test]
+fn auto_ranks_stale_figures_below_fresh_ones_but_still_uses_them() {
+    let stale_at = Some(now() - Duration::from_secs(16 * 60));
+    let mut stale_best = ok("stale", 0, 10.0);
+    stale_best.fetched_at = stale_at;
+    let fresh_worse = ok("fresh", 1, 60.0);
+
+    assert_eq!(picked(&[stale_best.clone(), fresh_worse]).as_deref(), Some("fresh"));
+    assert_eq!(picked(&[stale_best.clone()]).as_deref(), Some("stale"));
+
+    let mut never_fetched = ok("never", 1, 5.0);
+    never_fetched.fetched_at = None;
+    assert_eq!(picked(&[never_fetched, ok("fresh", 0, 60.0)]).as_deref(), Some("fresh"));
+
+    let mut also_stale = ok("also", 1, 30.0);
+    also_stale.fetched_at = stale_at;
+    assert_eq!(picked(&[stale_best, also_stale]).as_deref(), Some("stale"));
 }
 
 fn at(secs: u64) -> Option<SystemTime> {
