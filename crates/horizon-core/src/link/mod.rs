@@ -4,6 +4,7 @@
 
 mod protocol;
 mod resolve;
+mod server;
 mod text;
 
 pub use protocol::{
@@ -11,4 +12,5 @@ pub use protocol::{
     MAX_READ_LINES, MAX_REQUEST_BYTES, PanelInfo, RequestEnvelope, parse_request_line,
 };
 pub use resolve::resolve_target;
+pub use server::{LinkServer, PendingRequest, socket_path};
 pub use text::{sanitize_send_text, strip_escapes};

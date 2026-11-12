@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use uuid::Uuid;
@@ -16,7 +16,7 @@ use crate::usage_dashboard::UsageDashboard;
 use crate::workspace::WorkspaceId;
 use crate::{AgentIntegrationKind, AgentResumeMode, agent_definition};
 
-use super::env::merge_spawn_env;
+use super::env::{horizon_injected_env, merge_spawn_env};
 use super::{
     AGENT_PANEL_SCROLLBACK_LIMIT, DEFAULT_CELL_HEIGHT, DEFAULT_CELL_WIDTH, DEFAULT_PANEL_SCROLLBACK_LIMIT,
     DEFAULT_PANEL_SIZE, Panel, PanelId, PanelKind, PanelLayout, PanelOptions, PanelResume,
@@ -78,6 +78,7 @@ struct TerminalPanelBuildArgs {
     ssh_connection: Option<SshConnection>,
     collapsed: bool,
     env: BTreeMap<String, String>,
+    link_socket: Option<PathBuf>,
 }
 
 impl StaticPanelSeed {
@@ -147,12 +148,22 @@ impl StaticPanelSeed {
             ssh_status: None,
             collapsed: self.collapsed,
             env: BTreeMap::new(),
+            link_socket: None,
             expanded_height: None,
         }
     }
 }
 
 pub(super) fn spawn_panel(id: PanelId, workspace_id: WorkspaceId, opts: PanelOptions) -> Result<Panel> {
+    spawn_panel_linked(id, workspace_id, opts, None)
+}
+
+pub(super) fn spawn_panel_linked(
+    id: PanelId,
+    workspace_id: WorkspaceId,
+    opts: PanelOptions,
+    link_socket: Option<&Path>,
+) -> Result<Panel> {
     let local_id = opts.local_id.clone().unwrap_or_else(new_local_id);
 
     match opts.kind {
@@ -211,7 +222,7 @@ pub(super) fn spawn_panel(id: PanelId, workspace_id: WorkspaceId, opts: PanelOpt
                 .with_collapsed(collapsed);
             Ok(spawn_usage(seed))
         }
-        _ => spawn_terminal(id, workspace_id, local_id, opts),
+        _ => spawn_terminal(id, workspace_id, local_id, opts, link_socket),
     }
 }
 
@@ -271,13 +282,20 @@ pub(super) fn restore_failure_panel(
             ssh_connection: saved_ssh_connection,
             collapsed,
             env,
+            link_socket: None,
         },
         terminal,
         ssh_status,
     ))
 }
 
-fn spawn_terminal(id: PanelId, workspace_id: WorkspaceId, local_id: String, opts: PanelOptions) -> Result<Panel> {
+fn spawn_terminal(
+    id: PanelId,
+    workspace_id: WorkspaceId,
+    local_id: String,
+    opts: PanelOptions,
+    link_socket: Option<&Path>,
+) -> Result<Panel> {
     let PanelOptions {
         name,
         command,
@@ -350,6 +368,7 @@ fn spawn_terminal(id: PanelId, workspace_id: WorkspaceId, local_id: String, opts
         ssh_connection: saved_ssh_connection,
         collapsed,
         env: env.clone(),
+        link_socket: link_socket.map(Path::to_path_buf),
     };
     if restore_as_disconnected_snapshot && panel_args.kind == PanelKind::Ssh && had_persisted_transcript_state {
         return spawn_disconnected_ssh_snapshot_panel(panel_args, rows, cols, replay_bytes);
@@ -365,7 +384,11 @@ fn spawn_terminal(id: PanelId, workspace_id: WorkspaceId, local_id: String, opts
         scrollback_limit: scrollback_limit_for_kind(kind),
         window_id: id.0,
         replay_bytes,
-        env: merge_spawn_env(kind, &env, &HashMap::new()),
+        env: merge_spawn_env(
+            kind,
+            &env,
+            &horizon_injected_env(&panel_args.local_id, &panel_args.title, link_socket),
+        ),
         kitty_keyboard: kitty_keyboard_for_kind(kind),
     })?;
     tracing::info!("created panel '{}' (id={})", panel_args.title, panel_args.id.0);
@@ -541,6 +564,7 @@ fn build_terminal_panel(
         ssh_connection,
         collapsed,
         env,
+        link_socket,
     } = panel_args;
     Panel {
         id,
@@ -568,6 +592,7 @@ fn build_terminal_panel(
         ssh_status,
         collapsed,
         env,
+        link_socket,
         expanded_height: None,
     }
 }

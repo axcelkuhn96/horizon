@@ -83,13 +83,18 @@ pub enum LinkError {
     Ambiguous { target: String, candidates: String },
     #[error("panel is closed")]
     Closed,
+    /// Server-side failure (socket setup, shutdown); reported to clients as `bad_request`.
+    #[error("link server error: {0}")]
+    Io(String),
+    #[error("panel link is not supported on this platform")]
+    Unsupported,
 }
 
 impl LinkError {
     #[must_use]
     pub fn code(&self) -> LinkErrorCode {
         match self {
-            Self::BadRequest(_) => LinkErrorCode::BadRequest,
+            Self::BadRequest(_) | Self::Io(_) | Self::Unsupported => LinkErrorCode::BadRequest,
             Self::VersionMismatch { .. } => LinkErrorCode::VersionMismatch,
             Self::TooLarge => LinkErrorCode::TooLarge,
             Self::NotFound(_) => LinkErrorCode::NotFound,
