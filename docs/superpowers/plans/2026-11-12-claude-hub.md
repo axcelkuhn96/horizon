@@ -574,7 +574,7 @@ T3+T18 ─ T19 (sidebar git line + worktrees; after T12 and T16 in file order)  
 
 Extensão pedida pelo usuário após o smoke. Mesmas regras de `## Global Constraints` e dos controller rulings vigentes: build liberado (UM processo cargo por worktree, `CARGO_BUILD_JOBS=4`, `free -g` ≥ 4 GB antes); por task: teste focado RED→GREEN, `cargo fmt --all -- --check`, e ao final da task `RUSTFLAGS="-D warnings" cargo test --workspace` + os dois tiers de clippy bloqueantes (`cargo clippy --all-targets --features trace-profiling -- -D warnings` e `cargo clippy --workspace --lib --bins --examples -- -D warnings -D clippy::unwrap_used -D clippy::expect_used`; sem `--features speech` local, anotar no report). Estado novo da UI vive em `HubState` (nunca campos soltos em `app/mod.rs`); sem `ComboBox` em modais do hub (seletores inline); nunca commitar `.superpowers/` nem `Cargo.lock`; nenhum `unwrap`/`expect` em runtime; segredos/prompt do usuário nunca logados. Visual: `docs/design/claude-hub-ui.md` §8–§14, constantes por nome de `theme.rs` (se faltar constante, derivar com `theme::blend`/`theme::alpha` de uma existente; não editar `theme.rs`). Commits terminam com `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
 
-**Pré-condição da Parte F:** T21 (titlebar do painel: `panel_chrome.rs`, `panels.rs`, `claude_quick_start.rs`) e T22 (sidebar: `sidebar.rs`, `sidebar/*`) mergeados em `feat/claude-hub`. Só T27 e T29 (wave F1) não dependem deles e podem ser cortados enquanto T21/T22 ainda estão em worktree.
+**Estado atual:** T21 (titlebar do painel: `panel_chrome.rs`, `panels.rs`, `claude_quick_start.rs`) e T22 (sidebar: `sidebar.rs`, `sidebar/*`) ainda estão **em voo, não mergeados**. Regra: nada que toque a titlebar ou o quick-start começa antes do merge do T21; nada que toque a sidebar (incl. `workspace_menu/`, `git_overview/paint.rs`, `rows.rs`, `labels.rs`) começa antes do merge do T22. Só T27 e T29 (wave F1) não tocam arquivos de T21/T22 e podem ser cortados agora.
 
 **F8 (painéis novos nunca se sobrepõem):** tratado pelo smoke T17 em curso; esta parte só referencia. Os painéis criados por T24/T25 (resume, Claude no worktree) usam o mesmo caminho de criação de painel já validado pelo T17, sem posicionamento próprio.
 
@@ -833,7 +833,7 @@ Extensão pedida pelo usuário após o smoke. Mesmas regras de `## Global Constr
 
 **Grafo de dependências:**
 ```
-(T21, T22 mergeados) ─┬─ T23 ──┬─ T26 (Auto)
+(T21 + T22 a mergear) ─┬─ T23 ──┬─ T26 (Auto)
                       │        └─ T24 (session_id do status)
                       ├─ T25 ──── T26 (Auto no worktree dialog), T24 (menu do workspace)
                       └─ T28 ──── T26 (quick-start), T24 (palette/quick-start)
@@ -848,7 +848,7 @@ T23 (coluna de status na titlebar) ── T31 (badge de conta; usa perfis T1/T4 
 | Wave | Tasks | Por que não colidem |
 |---|---|---|
 | **F1** (pode iniciar enquanto T21/T22 ainda estão em voo) | **T27** ‖ **T29** | T27: `hub_toast.rs`, `link/*`, `board/link.rs`, `link_cli.rs`, `app/link*`, `app/workspace.rs`, skill; T29: `runtime_state.rs`, `config.rs`, `app/mod.rs`, `minimap*`, `settings/general.rs` — nenhum toca titlebar nem sidebar |
-| **F2** (após merge de T21 + T22 + F1) | **T23** ‖ **T25** ‖ **T28** | T23: `lib.rs`, `agent_status*`, terminal/panel, `main.rs`, `plugin_install.rs`, `panel_chrome.rs`/`panels.rs`, `sidebar/rows.rs`, `hub_toast.rs`; T25: `git_overview/worktree_ops*`, `sidebar.rs`, `sidebar/git_overview/*`, `sidebar/workspace_menu/*`, `worktree_dialog.rs`; T28: `config.rs`, `config/prompts.rs`, `settings/{claude,workspaces}.rs`, palette, `claude_quick_start.rs`, `board/link.rs` (`deliver_text`) |
+| **F2** (só após merge de T21 **e** T22 + F1; T23 espera o T21, T25 espera o T22) | **T23** ‖ **T25** ‖ **T28** | T23: `lib.rs`, `agent_status*`, terminal/panel, `main.rs`, `plugin_install.rs`, `panel_chrome.rs`/`panels.rs`, `sidebar/rows.rs`, `hub_toast.rs`; T25: `git_overview/worktree_ops*`, `sidebar.rs`, `sidebar/git_overview/*`, `sidebar/workspace_menu/*`, `worktree_dialog.rs`; T28: `config.rs`, `config/prompts.rs`, `settings/{claude,workspaces}.rs`, palette, `claude_quick_start.rs`, `board/link.rs` (`deliver_text`) |
 | **F3** (após merge de F2) | **T26** ‖ **T30** ‖ **T31** | T31: `account_badge.rs` + call site em `panel_chrome.rs`/`panels.rs`; T26: `claude_usage/{auto_pick,alerts}.rs`, launcher, quick-start, `worktree_dialog.rs`, `lifecycle.rs`; T30: `panel.rs` accessor, `link/resolve.rs`, `sidebar/{rows,labels}.rs`, `sidebar.rs` |
 | **F4** (após merge de F3) | **T24** | `claude_sessions/*`, `lib.rs`, quick-start/launcher/palette/workspace menu/lifecycle (todos livres nesta wave) |
 | **F5** | Smoke ampliado (extensão da Task 17: status, sessões, worktrees, Auto/alertas, ask/reply, prompts, prefs, rename; F8 já coberto) | needs everything |
