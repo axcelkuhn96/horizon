@@ -768,6 +768,7 @@ mod tests {
         let work = commit(&repo, "refs/heads/feature", Some(base), "feature work");
         repo.reference("refs/remotes/origin/feature", work, true, "pushed")
             .expect("remote ref");
+        repo.remote("origin", "https://example.invalid/x.git").expect("remote");
         let mut config = repo.config().expect("config");
         config.set_str("branch.feature.remote", "origin").expect("remote");
         config

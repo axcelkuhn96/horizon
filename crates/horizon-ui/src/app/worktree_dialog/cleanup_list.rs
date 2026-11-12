@@ -82,7 +82,8 @@ impl CleanupRow {
             ),
             CleanupReason::Prunable => tooltip.push_str("\nThe folder is already gone: only git's record is removed."),
             CleanupReason::Pushed => {
-                tooltip.push_str("\nPushed to its upstream but not merged into the default branch: its branch is kept.")
+                tooltip
+                    .push_str("\nPushed to its upstream but not merged into the default branch: its branch is kept.");
             }
             CleanupReason::Merged | CleanupReason::Orphan => {}
         }

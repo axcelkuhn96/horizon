@@ -341,7 +341,7 @@ mod tests {
 
         let names: Vec<_> = dirs
             .iter()
-            .map(|(dir, _)| dir.file_name().map(|n| n.to_owned()))
+            .map(|(dir, _)| dir.file_name().map(std::borrow::ToOwned::to_owned))
             .collect();
         assert_eq!(names.len(), 3);
         assert!(dirs[0].1.is_main);

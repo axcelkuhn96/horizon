@@ -47,7 +47,7 @@ impl ShellSyntax {
     /// Keystrokes that empty a half-typed prompt line before the command is typed: Ctrl-E (end
     /// of line) then Ctrl-U (kill to the start), so leftover text cannot prefix the command.
     /// POSIX shells only (readline, zsh and fish emacs mode; best effort under vi mode).
-    /// PowerShell gets nothing: its PSReadLine binds Ctrl-U to a different edit.
+    /// PowerShell gets nothing: its `PSReadLine` binds Ctrl-U to a different edit.
     pub(super) const fn line_clear(self) -> &'static [u8] {
         match self {
             Self::Posix => b"\x05\x15",

@@ -245,6 +245,8 @@ pub(super) fn header_count_label(shown: usize, total_found: usize) -> String {
     format!("{shown} {noun}")
 }
 
+type WorktreeKey = (PathBuf, Option<String>, bool, bool);
+
 /// What the directories to scan depend on, taken from data the app already holds (no disk): the
 /// workspace folder and, once its git overview has arrived, the worktrees of its repository.
 /// The open modal rescans when this changes.
@@ -252,7 +254,7 @@ pub(super) fn header_count_label(shown: usize, total_found: usize) -> String {
 pub(super) struct ScanSignature {
     folder: Option<PathBuf>,
     /// `(path, branch, is main, prunable)` of each worktree; `None` until the overview arrives.
-    worktrees: Option<Vec<(PathBuf, Option<String>, bool, bool)>>,
+    worktrees: Option<Vec<WorktreeKey>>,
 }
 
 pub(super) fn scan_signature(folder: Option<&Path>, overview: Option<&RepoOverview>) -> ScanSignature {
@@ -496,7 +498,7 @@ mod tests {
     fn agent_group_collapsed_by_default_and_counts_hidden() {
         let mut sessions = many(3, false);
         sessions.extend((10..17).map(|n| session(n, "agent work", Some("wt"), false, true, SessionAccount::Unknown)));
-        sessions.sort_by(|a, b| b.updated.cmp(&a.updated));
+        sessions.sort_by_key(|b| std::cmp::Reverse(b.updated));
 
         let collapsed = build_view(&sessions, "", ListWindow::default(), false, now(), &[]);
         let expanded = build_view(&sessions, "", ListWindow::default(), true, now(), &[]);

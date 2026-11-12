@@ -292,6 +292,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut app = test_app();
         app.hub.sessions.index = AccountIndex::empty(dir.path().join("idx.json"));
+        app.presets.clear(); // the host's own presets would shadow the fixture
         app.presets.push(profile_preset("conta2", "/home/u/.claude-conta2"));
         let ctx = Context::default();
         let id = "f054f32b-7840-4c95-9f84-e61f37db5f5c";

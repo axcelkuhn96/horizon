@@ -255,6 +255,7 @@ fn show_window_note(ui: &mut Ui, shown: usize, matching: usize) -> bool {
     response.clicked()
 }
 
+#[derive(Clone, Copy)]
 struct RowState {
     selected: bool,
     hovered: bool,
