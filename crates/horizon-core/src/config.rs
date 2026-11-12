@@ -97,7 +97,7 @@ impl Default for AppearanceConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct PresetConfig {
     pub name: String,
     #[serde(default)]

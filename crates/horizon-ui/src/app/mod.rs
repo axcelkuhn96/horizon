@@ -25,6 +25,8 @@ mod sidebar;
 pub(crate) mod speech;
 mod ssh_upload;
 mod startup_session;
+#[cfg(test)]
+mod test_support;
 mod updates;
 mod usage_chips;
 pub(crate) mod util;

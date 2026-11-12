@@ -277,14 +277,20 @@ impl HorizonApp {
             self.speech_escape_cancelled = false;
             tracing::info!("speech configuration changed; speech system rebuilt");
         }
+        let presets = config.resolved_presets();
+        // Runs every frame while Settings is open: only a real change may bump the launcher rows
+        // (that rebuilds the launcher and re-resolves the polled profiles).
+        let rows_changed = self.presets != presets || self.template_config.claude_profiles != config.claude_profiles;
         self.template_config = config.clone();
         self.shortcuts = resolve_shortcuts(config);
         self.resolved_pan_modifier = resolve_pan_modifier(config);
         self.scroll_pans_over_panels = config.input.scroll_pans_over_panels;
         self.action_commands_cache =
             crate::command_registry::action_commands(&self.shortcuts, util::primary_shortcut_label());
-        self.presets = config.resolved_presets();
-        self.hub.invalidate_launcher_rows();
+        self.presets = presets;
+        if rows_changed {
+            self.hub.invalidate_launcher_rows();
+        }
         self.board.attention_enabled = config.features.attention_feed;
         if self.appearance_theme != config.appearance.theme {
             self.appearance_theme = config.appearance.theme;
@@ -498,5 +504,31 @@ mod tests {
         switch_tab(&mut editor, SettingsTab::Claude);
         assert!(editor.active_tab == SettingsTab::Claude);
         assert!(editor.editing_config.is_none());
+    }
+
+    #[test]
+    fn apply_runtime_config_bumps_the_launcher_rows_only_when_presets_or_profiles_change() {
+        let mut app = crate::app::test_support::test_app();
+        let config = app.template_config.clone();
+
+        let before = app.hub.rows_version;
+        app.apply_runtime_config(&config);
+        app.apply_runtime_config(&config);
+        assert_eq!(
+            app.hub.rows_version, before,
+            "an unchanged config must not rebuild the launcher"
+        );
+
+        let mut with_profile = config.clone();
+        with_profile.claude_profiles = vec![horizon_core::ClaudeProfile {
+            name: "conta9".to_owned(),
+            config_dir: "/nonexistent/.claude-conta9".to_owned(),
+        }];
+        app.apply_runtime_config(&with_profile);
+        let after_change = app.hub.rows_version;
+        assert_ne!(after_change, before);
+
+        app.apply_runtime_config(&with_profile);
+        assert_eq!(app.hub.rows_version, after_change);
     }
 }

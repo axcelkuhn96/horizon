@@ -12,7 +12,7 @@ use horizon_core::claude_usage::{ProfileUsage, UsageState, UsageWindow, remainin
 use super::{
     BAR_WIDTH_COMPACT, BAR_WIDTH_FULL, CHIP_GAP, CHIP_HEIGHT, CHIP_PAD, ChipEntry, ChipLayout, ChipStatus, ChipsPlan,
     ClaudeUsageState, DOT_DIAMETER, DOT_GAP, GROUP_WIDTH_FULL, LABEL_GAP, LABEL_WIDTH, PCT_WIDTH, SECTION_GAP,
-    chip_label, chip_label_parts, chip_status, severity_for, time,
+    api_severity, chip_label, chip_label_parts, chip_status, severity_for, time,
 };
 use crate::app::hub_ui::{self, Severity};
 use crate::theme;
@@ -253,18 +253,6 @@ fn paint_chip(painter: &egui::Painter, rect: Rect, entry: &ChipEntry, layout: &C
         }
         _ => paint_group(painter, Pos2::new(x, cy), layout, usage, false, look),
     }
-}
-
-/// API severity applies to the window closest to its limit only, so a low
-/// window does not turn red because the other one is critical.
-fn api_severity(usage: &ProfileUsage, five_hour: bool) -> Option<&str> {
-    let api = usage.severity.as_deref()?;
-    let (this, other) = if five_hour {
-        (usage.five_hour.percent, usage.seven_day.percent)
-    } else {
-        (usage.seven_day.percent, usage.five_hour.percent)
-    };
-    (this.unwrap_or(-1.0) >= other.unwrap_or(-1.0)).then_some(api)
 }
 
 fn paint_group(

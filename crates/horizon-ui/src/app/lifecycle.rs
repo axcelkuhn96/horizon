@@ -1009,37 +1009,12 @@ mod tests {
     };
     use std::time::{Duration, Instant};
 
-    use eframe::CreationContext;
     use egui::Context;
-    use horizon_core::{Config, HorizonHome, PanelId, RuntimeState, SessionStore, StartupDecision};
+    use horizon_core::PanelId;
 
-    use super::{
-        HoldHotkeyTransition, HorizonApp, SPEECH_RELEASE_OWNERSHIP_TIMEOUT, SpeechActivity, hold_hotkey_transition,
-    };
+    use super::{HoldHotkeyTransition, SPEECH_RELEASE_OWNERSHIP_TIMEOUT, SpeechActivity, hold_hotkey_transition};
     use crate::app::HeldSpeechBinding;
-    use crate::input;
-
-    fn test_app() -> HorizonApp {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let config_path = temp.path().join("config.yaml");
-        let home = HorizonHome::from_root(temp.path().join(".horizon"));
-        let session_store = SessionStore::new(home, config_path.clone());
-        let config = Config::default();
-        let ctx = Context::default();
-        let cc = CreationContext::_new_kittest(ctx);
-
-        HorizonApp::with_link_server(
-            &cc,
-            &config,
-            config_path,
-            session_store,
-            StartupDecision::Ephemeral {
-                runtime_state: Box::new(RuntimeState::default()),
-            },
-            input::ObservedKeyboardInputs::default(),
-            None,
-        )
-    }
+    use crate::app::test_support::test_app;
 
     #[test]
     fn finalize_frame_requests_repaint_when_theme_application_is_deferred() {

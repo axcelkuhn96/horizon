@@ -7,14 +7,12 @@
 //! that are unit tested; painting wrappers stay thin.
 //!
 //! Naming for consumers:
-//! - accents: [`accent_index`], [`assign_accent_indices`], [`accent_color`], [`profile_accent`]
+//! - accents: [`accent_index`], [`assign_accent_indices`], [`accent_color`]
 //! - bars: [`mini_bar`], [`mini_bar_fill_rect`], [`severity_color`], [`Severity`]
 //! - chips: [`pill`], [`pill_width`], [`key_badge`], [`kbd_hint`], [`swatch`]
 //! - buttons: [`primary_button`], [`secondary_button`], [`icon_button`], [`IconKind`]
 //! - focus: [`paint_focus_ring`]
 //! - modals: [`modal_frame`], [`show_modal`]
-
-#![expect(dead_code, reason = "used by claude-hub UI tasks")]
 
 use std::sync::Arc;
 
@@ -83,12 +81,6 @@ pub(crate) fn assign_accent_indices(names: &[&str]) -> Vec<usize> {
 #[must_use]
 pub(crate) fn accent_color(slot: usize) -> Color32 {
     theme::PROFILE_ACCENTS()[slot % ACCENT_COUNT]
-}
-
-/// Stable per-profile accent given the slots already `taken` by other visible profiles.
-#[must_use]
-pub(crate) fn profile_accent(name: &str, taken: &[usize]) -> Color32 {
-    accent_color(accent_index(name, taken))
 }
 
 // ---------------------------------------------------------------------------

@@ -207,7 +207,7 @@ fn snapshot_follows_the_profile_list_and_feeds_the_launcher_seams() {
     assert!(!state.set_profiles(vec![profile("conta1"), profile("conta2")]));
     assert_eq!(state.entries().len(), 2);
     assert_eq!(state.account_email("conta1"), None);
-    assert_eq!(state.usage_summary("conta1"), None);
+    assert!(state.usage("conta1").is_none());
 
     let before = state.version;
     state.apply_snapshot(vec![
@@ -217,7 +217,12 @@ fn snapshot_follows_the_profile_list_and_feeds_the_launcher_seams() {
 
     assert_ne!(state.version, before);
     assert_eq!(state.account_email("conta2"), Some("outra@example.com"));
-    assert_eq!(state.usage_summary("conta2"), Some("5h 91%  7d 77%"));
+    assert_eq!(
+        state
+            .usage("conta2")
+            .map(|u| (u.five_hour.percent, u.seven_day.percent)),
+        Some((Some(91.0), Some(77.0)))
+    );
     assert_eq!(state.account_email("gone"), None);
     assert_eq!(state.account_email("conta1"), None);
 }
@@ -357,6 +362,9 @@ fn a_snapshot_invalidates_launcher_rows_without_asking_for_another_profile_sync(
 
     assert_ne!(hub.rows_version, rows);
     assert_eq!(hub.usage.synced_rows_version, Some(hub.rows_version));
-    assert_eq!(hub.usage.usage_summary("a"), Some("5h 10%  7d 20%"));
+    assert_eq!(
+        hub.usage.usage("a").map(|u| (u.five_hour.percent, u.seven_day.percent)),
+        Some((Some(10.0), Some(20.0)))
+    );
     assert!(!hub.receive_usage_snapshot(), "no poller in tests: nothing to receive");
 }

@@ -9,10 +9,12 @@ use egui::{
     Align, Align2, Color32, Context, CornerRadius, FontId, Galley, Key, Layout, Margin, Modifiers, Painter, Pos2, Rect,
     Sense, Stroke, StrokeKind, Ui, UiBuilder, Vec2, WidgetInfo, WidgetType,
 };
+use horizon_core::claude_usage::{ProfileUsage, UsageState};
 use horizon_core::{PanelKind, PresetConfig};
 
 use super::HorizonApp;
-use super::hub_ui::{self, ModalPlacement};
+use super::hub_ui::{self, ModalPlacement, Severity};
+use super::usage_chips::{api_severity, severity_for, window_text};
 use crate::theme;
 
 const MODAL_WIDTH: f32 = 480.0;
@@ -30,6 +32,12 @@ const LIST_MAX_HEIGHT: f32 = ROW_HEIGHT * 7.0;
 const USAGE_COLUMN_WIDTH: f32 = 132.0;
 const USAGE_BAR_SIZE: Vec2 = Vec2::new(56.0, 4.0);
 const USAGE_LABEL_WIDTH: f32 = 18.0;
+const USAGE_PCT_WIDTH: f32 = 30.0;
+const USAGE_GAP: f32 = 6.0;
+/// Bars of an expired or missing login still show the last known value, fainter.
+const UNUSABLE_BAR_OPACITY: f32 = 0.4;
+/// Space between the e-mail and the status pill.
+const PILL_GAP: f32 = 8.0;
 const HEADER_WORKSPACE_WIDTH: f32 = 160.0;
 /// Quick-pick keys cover only the first nine profiles.
 const QUICK_PICK_COUNT: usize = 9;
@@ -135,29 +143,85 @@ enum LauncherAction {
     OpenSettings,
 }
 
+/// One `5h` / `7d` line of a row's usage column, formatted when the rows are built.
+struct UsageLine {
+    label: &'static str,
+    /// Used fraction `0..=1`; `None` draws no bar.
+    frac: Option<f32>,
+    /// `42%`, or an em dash.
+    text: String,
+    severity: Severity,
+}
+
+/// Why a login cannot be used right now; drawn as a pill on the text column's second line.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum LoginProblem {
+    Expired,
+    Missing,
+}
+
+impl LoginProblem {
+    fn text(self) -> &'static str {
+        match self {
+            Self::Expired => "expired",
+            Self::Missing => "no login",
+        }
+    }
+
+    fn color(self) -> Color32 {
+        match self {
+            Self::Expired => theme::PALETTE_YELLOW(),
+            Self::Missing => theme::FG_DIM(),
+        }
+    }
+}
+
+/// Usage column data of one row, derived from the cached snapshot entry.
+struct RowUsage {
+    lines: [UsageLine; 2],
+    problem: Option<LoginProblem>,
+}
+
+impl RowUsage {
+    fn new(usage: Option<&ProfileUsage>) -> Self {
+        let line = |label, five_hour: bool| {
+            let window = usage.map(|usage| if five_hour { &usage.five_hour } else { &usage.seven_day });
+            let percent = window.and_then(|window| window.percent);
+            UsageLine {
+                label,
+                frac: percent.map(|percent| percent / 100.0),
+                text: window_text(window),
+                severity: severity_for(percent, usage.and_then(|usage| api_severity(usage, five_hour))),
+            }
+        };
+        Self {
+            lines: [line("5h", true), line("7d", false)],
+            problem: usage.and_then(|usage| match usage.state {
+                UsageState::Expired => Some(LoginProblem::Expired),
+                UsageState::Missing => Some(LoginProblem::Missing),
+                UsageState::Ok | UsageState::Stale => None,
+            }),
+        }
+    }
+}
+
 /// Per-row data and layout caches; built on open, not per frame.
 struct LauncherRow {
     name: String,
     accent: Color32,
     /// Account e-mail; `None` renders `—` (filled by the usage task).
     email: Option<String>,
-    /// Pre-formatted usage summary; `None` renders `5h —` / `7d —` without bars.
-    usage: Option<String>,
+    usage: RowUsage,
     name_galley: Option<CachedGalley>,
     email_galley: Option<CachedGalley>,
+    /// Pill width for the current pixels-per-point; measured once, not per frame.
+    pill_width: Option<(u32, f32)>,
 }
 
 impl HorizonApp {
     /// Account e-mail of `profile_name`, once the usage snapshot knows it.
     fn profile_account_email(&self, profile_name: &str) -> Option<&str> {
         self.hub.usage.account_email(profile_name)
-    }
-
-    /// Usage summary of `profile_name` from the usage snapshot, when present
-    /// (formatted once when the snapshot arrives). The usage poller calls
-    /// `HubState::invalidate_launcher_rows` when it changes.
-    fn profile_usage_label(&self, profile_name: &str) -> Option<&str> {
-        self.hub.usage.usage_summary(profile_name)
     }
 
     fn active_workspace_label(&self) -> String {
@@ -179,7 +243,8 @@ impl HorizonApp {
             .zip(accents)
             .map(|(name, accent)| {
                 let email = self.profile_account_email(&name).map(str::to_owned);
-                let usage = self.profile_usage_label(&name).map(str::to_owned);
+                // The usage poller calls `HubState::invalidate_launcher_rows` when the snapshot changes.
+                let usage = RowUsage::new(self.hub.usage.usage(&name));
                 LauncherRow {
                     name,
                     accent,
@@ -187,6 +252,7 @@ impl HorizonApp {
                     usage,
                     name_galley: None,
                     email_galley: None,
+                    pill_width: None,
                 }
             })
             .collect()
@@ -545,48 +611,75 @@ fn paint_row(painter: &Painter, rect: Rect, index: usize, row: &mut LauncherRow,
         text_width,
     );
     painter.galley(Pos2::new(text_left, rect.top() + 10.0), name, theme::FG());
+
+    let pill_width = row.usage.problem.map(|problem| {
+        let ppp = painter.ctx().pixels_per_point().to_bits();
+        match row.pill_width {
+            Some((cached_ppp, width)) if cached_ppp == ppp => width,
+            _ => {
+                let width = hub_ui::pill_width(painter, problem.text());
+                row.pill_width = Some((ppp, width));
+                width
+            }
+        }
+    });
+    let email_width = (text_width - pill_width.map_or(0.0, |width| width + PILL_GAP)).max(0.0);
     let email = cached_elided(
         &mut row.email_galley,
-        key,
+        layout_key(painter, email_width),
         painter,
         row.email.as_deref().unwrap_or("\u{2014}"),
         FontId::proportional(11.0),
-        text_width,
+        email_width,
     );
+    let email_right = text_left + email.size().x;
     painter.galley(Pos2::new(text_left, rect.top() + 29.0), email, theme::FG_DIM());
+    if let (Some(problem), Some(width)) = (row.usage.problem, pill_width) {
+        let pill = hub_ui::pill_rect(Pos2::new(email_right + PILL_GAP, rect.top() + 28.0), width);
+        hub_ui::pill(painter, pill, problem.text(), problem.color());
+    }
 
-    paint_usage_column(painter, rect, usage_left, row.usage.as_deref());
+    paint_usage_column(painter, rect, &row.usage);
 }
 
-/// Right column: `5h` / `7d` lines. Without a usage snapshot both read `—`
-/// and no bars are drawn.
-fn paint_usage_column(painter: &Painter, rect: Rect, left: f32, usage: Option<&str>) {
-    let right = rect.right() - ROW_PADDING_X;
-    if let Some(summary) = usage {
-        painter.text(
-            Pos2::new(right, rect.center().y),
-            Align2::RIGHT_CENTER,
-            summary,
-            FontId::monospace(10.5),
-            theme::FG_SOFT(),
-        );
-        return;
+/// Right column: `5h` / `7d` lines, each a caption, a 56x4 bar and the percentage in the
+/// severity color. Without data both read as an em dash and no bar is drawn; an expired or
+/// missing login keeps its last known value on faded bars.
+fn paint_usage_column(painter: &Painter, rect: Rect, usage: &RowUsage) {
+    let group_width = USAGE_LABEL_WIDTH + USAGE_BAR_SIZE.x + USAGE_GAP + USAGE_PCT_WIDTH;
+    let left = rect.right() - ROW_PADDING_X - group_width;
+    let mut bars = painter.clone();
+    if usage.problem.is_some() {
+        bars.multiply_opacity(UNUSABLE_BAR_OPACITY);
     }
-    for (offset, label) in [(-10.0_f32, "5h"), (10.0, "7d")] {
+    for (line, offset) in usage.lines.iter().zip([-10.0_f32, 10.0]) {
         let y = rect.center().y + offset;
         painter.text(
             Pos2::new(left, y),
             Align2::LEFT_CENTER,
-            label,
+            line.label,
             FontId::proportional(8.5),
             theme::FG_DIM(),
         );
+        let color = match (line.frac, line.severity) {
+            (None, _) => theme::FG_DIM(),
+            (Some(_), Severity::Normal) => theme::FG_SOFT(),
+            (Some(frac), severity) => hub_ui::severity_color(frac * 100.0, Some(severity)),
+        };
+        if let Some(frac) = line.frac {
+            let bar = Rect::from_min_size(
+                Pos2::new(left + USAGE_LABEL_WIDTH, y - USAGE_BAR_SIZE.y / 2.0),
+                USAGE_BAR_SIZE,
+            );
+            let fill = hub_ui::severity_color(frac * 100.0, Some(line.severity));
+            hub_ui::mini_bar(&bars, bar, frac, fill);
+        }
         painter.text(
-            Pos2::new(left + USAGE_LABEL_WIDTH + USAGE_BAR_SIZE.x, y),
+            Pos2::new(left + group_width, y),
             Align2::RIGHT_CENTER,
-            "\u{2014}",
+            &line.text,
             FontId::monospace(10.5),
-            theme::FG_DIM(),
+            color,
         );
     }
 }
@@ -752,14 +845,86 @@ mod tests {
         assert!(find_profile_preset(&presets, "conta2").is_some());
     }
 
+    fn usage_with(state: UsageState, five: Option<f32>, seven: Option<f32>, severity: Option<&str>) -> ProfileUsage {
+        use horizon_core::claude_usage::UsageWindow;
+        let window = |percent| UsageWindow {
+            percent,
+            resets_at: None,
+        };
+        ProfileUsage {
+            name: "conta1".to_owned(),
+            display_name: None,
+            email: None,
+            five_hour: window(five),
+            seven_day: window(seven),
+            severity: severity.map(str::to_owned),
+            state,
+            fetched_at_ms: Some(1_000),
+        }
+    }
+
+    #[test]
+    fn row_usage_without_a_snapshot_reads_dashes_and_draws_no_bars() {
+        let usage = RowUsage::new(None);
+
+        assert_eq!(usage.lines.map(|line| line.label), ["5h", "7d"]);
+        assert!(
+            usage
+                .lines
+                .iter()
+                .all(|line| line.frac.is_none() && line.text == "\u{2014}")
+        );
+        assert_eq!(usage.problem, None);
+    }
+
+    #[test]
+    fn row_usage_formats_percent_fraction_and_severity_per_window() {
+        let snapshot = usage_with(UsageState::Ok, Some(42.0), Some(91.0), None);
+
+        let usage = RowUsage::new(Some(&snapshot));
+
+        assert_eq!(usage.lines[0].text, "42%");
+        assert_eq!(usage.lines[0].frac, Some(0.42));
+        assert_eq!(usage.lines[0].severity, Severity::Normal);
+        assert_eq!(usage.lines[1].text, "91%");
+        assert_eq!(usage.lines[1].severity, Severity::Critical);
+        assert_eq!(usage.problem, None);
+    }
+
+    #[test]
+    fn row_usage_flags_expired_and_missing_logins_but_keeps_the_last_values() {
+        let expired = usage_with(UsageState::Expired, Some(10.0), Some(20.0), None);
+        let missing = usage_with(UsageState::Missing, None, None, None);
+
+        let expired = RowUsage::new(Some(&expired));
+        let missing = RowUsage::new(Some(&missing));
+
+        assert_eq!(expired.problem, Some(LoginProblem::Expired));
+        assert_eq!(expired.lines[0].frac, Some(0.1));
+        assert_eq!(missing.problem, Some(LoginProblem::Missing));
+        assert_eq!(LoginProblem::Expired.text(), "expired");
+        assert_eq!(LoginProblem::Missing.text(), "no login");
+    }
+
+    #[test]
+    fn row_usage_applies_the_api_verdict_to_the_window_closest_to_its_limit_only() {
+        let snapshot = usage_with(UsageState::Ok, Some(10.0), Some(60.0), Some("critical"));
+
+        let usage = RowUsage::new(Some(&snapshot));
+
+        assert_eq!(usage.lines[0].severity, Severity::Normal);
+        assert_eq!(usage.lines[1].severity, Severity::Critical);
+    }
+
     fn row(name: &str) -> LauncherRow {
         LauncherRow {
             name: name.to_owned(),
             accent: Color32::WHITE,
             email: None,
-            usage: None,
+            usage: RowUsage::new(None),
             name_galley: None,
             email_galley: None,
+            pill_width: None,
         }
     }
 

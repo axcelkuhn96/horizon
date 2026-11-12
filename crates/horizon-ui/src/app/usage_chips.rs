@@ -100,7 +100,7 @@ pub(super) fn account_id(email: Option<&str>, max_chars: usize) -> Option<String
 }
 
 /// `42%`, or `—` when the window (or the whole profile) has no value yet.
-fn window_text(window: Option<&UsageWindow>) -> String {
+pub(super) fn window_text(window: Option<&UsageWindow>) -> String {
     match window {
         Some(window) if window.percent.is_some() => format!("{}%", used_percent_label(window)),
         _ => "\u{2014}".to_owned(),
@@ -180,6 +180,18 @@ pub(super) fn chip_status(usage: Option<&ProfileUsage>, now_ms: i64) -> ChipStat
             }
         }
     }
+}
+
+/// API severity applies to the window closest to its limit only, so a low
+/// window does not turn red because the other one is critical.
+pub(super) fn api_severity(usage: &ProfileUsage, five_hour: bool) -> Option<&str> {
+    let api = usage.severity.as_deref()?;
+    let (this, other) = if five_hour {
+        (usage.five_hour.percent, usage.seven_day.percent)
+    } else {
+        (usage.seven_day.percent, usage.five_hour.percent)
+    };
+    (this.unwrap_or(-1.0) >= other.unwrap_or(-1.0)).then_some(api)
 }
 
 fn count_as_f32(count: usize) -> f32 {
@@ -288,8 +300,6 @@ pub(super) struct ChipEntry {
     pub(super) usage: Option<ProfileUsage>,
     id_full: Option<String>,
     id_compact: Option<String>,
-    /// `5h 42%  7d 18%` for the launcher rows.
-    summary: Option<String>,
     /// `Fulano Silva · fulano@exemplo.com`, whichever parts are known.
     pub(super) identity: Option<String>,
     pub(super) reset_five: Option<ResetInfo>,
@@ -323,7 +333,6 @@ impl ChipEntry {
             usage: usage.cloned(),
             id_full: account_id(email, IDENT_MAX_FULL),
             id_compact: account_id(email, IDENT_MAX_COMPACT),
-            summary: usage.map(|u| chip_label_parts(name, Some(u), false).1),
             identity: usage.and_then(identity_line),
             reset_five: usage.and_then(|u| reset_info(&u.five_hour, offset, false)),
             reset_seven: usage.and_then(|u| reset_info(&u.seven_day, offset, true)),
@@ -523,10 +532,10 @@ impl ClaudeUsageState {
             .as_deref()
     }
 
-    /// Pre-formatted usage summary (`5h 42%  7d 18%`) of `name`, when it has data.
+    /// Latest usage of `name` from the snapshot, once known.
     #[must_use]
-    pub(super) fn usage_summary(&self, name: &str) -> Option<&str> {
-        self.entries.iter().find(|entry| entry.name == name)?.summary.as_deref()
+    pub(super) fn usage(&self, name: &str) -> Option<&ProfileUsage> {
+        self.entries.iter().find(|entry| entry.name == name)?.usage.as_ref()
     }
 
     /// Starts the stats poll for the "Tokens today" line (once).
