@@ -551,9 +551,13 @@ mod tests {
             assert!(Arc::ptr_eq(&first, &again), "same name and scale: no new layout");
 
             assert!(ui.name_galley(&painter, PanelId(1), false).is_none(), "narrow panel");
+            assert!(
+                !ui.name_galleys.contains_key(&PanelId(1)),
+                "hiding the name drops its cache"
+            );
             assert!(ui.name_galley(&painter, PanelId(2), true).is_none(), "unknown panel");
-            let relaid = ui.name_galley(&painter, PanelId(1), true).expect("galley");
-            assert!(!Arc::ptr_eq(&first, &relaid), "hiding the name drops its cache");
+            assert!(ui.name_galley(&painter, PanelId(1), true).is_some(), "shown again");
+            assert!(ui.name_galleys.contains_key(&PanelId(1)));
         });
     }
 

@@ -425,7 +425,7 @@ pub(super) struct AccountBadgeCache {
     /// Panel count at the last eviction sweep.
     swept_for: usize,
     /// `$HOME`, read once (`home_read` says whether).
-    home: Option<PathBuf>,
+    home: Option<Arc<Path>>,
     home_read: bool,
 }
 
@@ -459,9 +459,9 @@ impl AccountBadgeCache {
     }
 
     /// The user's home directory (read from the environment on first use).
-    fn home(&mut self) -> Option<PathBuf> {
+    fn home(&mut self) -> Option<Arc<Path>> {
         if !self.home_read {
-            self.home = std::env::var_os("HOME").map(PathBuf::from);
+            self.home = std::env::var_os("HOME").map(|home| Arc::from(PathBuf::from(home)));
             self.home_read = true;
         }
         self.home.clone()
@@ -488,9 +488,10 @@ impl HorizonApp {
             return;
         }
         // The dir the panel was started with (blank or unset means the default `~/.claude`).
+        // A detected dir wins the key, so the env dir is only resolved (allocated) when it is needed.
         let env_dir = home
             .as_deref()
-            .filter(|_| kind == PanelKind::Claude)
+            .filter(|_| kind == PanelKind::Claude && detected.is_none())
             .map(|home| claude_config_dir_for_env(&panel.env, home));
         let pixels_per_point = painter.ctx().pixels_per_point();
         let key = BadgeKey {
@@ -504,6 +505,11 @@ impl HorizonApp {
         let (version, ppp_bits) = (key.version, key.ppp_bits);
         let dir = key.dir.map(Path::to_path_buf);
         let detected = detected.map(Path::to_path_buf);
+        let env_dir = env_dir.or_else(|| {
+            home.as_deref()
+                .filter(|_| kind == PanelKind::Claude)
+                .map(|home| claude_config_dir_for_env(&panel.env, home))
+        });
 
         let names: Vec<String> = self
             .hub
@@ -590,7 +596,7 @@ fn paint_account_badge(painter: &Painter, rect: Rect, layout: &BadgeLayout, show
         painter.rect_stroke(
             rect.expand2(Vec2::new(3.0, 1.0)),
             egui::CornerRadius::same(HOVER_RADIUS),
-            Stroke::new(1.5, theme::ACCENT()),
+            Stroke::new(1.5_f32, theme::ACCENT()),
             StrokeKind::Outside,
         );
     }
