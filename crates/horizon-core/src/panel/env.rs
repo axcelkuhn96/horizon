@@ -18,6 +18,30 @@ const HORIZON_INJECTED_KEYS: [&str; 4] = [
     "HORIZON_BIN",
 ];
 
+/// Variables a parent Claude Code session leaves in its environment. A panel started from such
+/// a session would make its own `claude` believe it is a child session (transcripts and the
+/// `sessions/<pid>.json` registry are skipped), so panels must behave like a normal terminal.
+/// The spawn can only add variables: these are set empty, which Claude reads as unset.
+const PARENT_CLAUDE_MARKERS: [&str; 9] = [
+    "CLAUDECODE",
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_SESSION_ATTENDED",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_EXECPATH",
+    "CLAUDE_CODE_MESSAGING_SOCKET",
+    "CLAUDE_CODE_MESSAGING_TOKEN",
+    "CLAUDE_PID",
+];
+
+/// Empty overrides for the parent-session markers that `is_set` reports as present.
+fn parent_claude_marker_overrides(is_set: impl Fn(&str) -> bool) -> impl Iterator<Item = (String, String)> {
+    PARENT_CLAUDE_MARKERS
+        .into_iter()
+        .filter(move |key| is_set(key))
+        .map(|key| (key.to_string(), String::new()))
+}
+
 fn agent_env(kind: PanelKind) -> HashMap<String, String> {
     let mut env = HashMap::new();
     if kind.is_agent() {
@@ -54,6 +78,7 @@ pub(crate) fn horizon_injected_env(local_id: &str, title: &str, socket: Option<&
         "HORIZON_SOCKET".to_string(),
         socket.and_then(Path::to_str).unwrap_or_default().to_string(),
     );
+    env.extend(parent_claude_marker_overrides(|key| std::env::var_os(key).is_some()));
     if let Some(exe) = std::env::current_exe().ok().as_deref().and_then(Path::to_str) {
         env.insert("HORIZON_BIN".to_string(), strip_deleted_suffix(exe).to_string());
     }
@@ -85,7 +110,7 @@ pub(crate) fn merge_spawn_env(
 mod tests {
     use std::collections::{BTreeMap, HashMap};
 
-    use super::{horizon_injected_env, merge_spawn_env, strip_deleted_suffix};
+    use super::{horizon_injected_env, merge_spawn_env, parent_claude_marker_overrides, strip_deleted_suffix};
     use crate::config::PresetConfig;
     use crate::panel::PanelKind;
 
@@ -94,6 +119,18 @@ mod tests {
             .iter()
             .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
             .collect()
+    }
+
+    #[test]
+    fn inherited_parent_claude_markers_are_blanked() {
+        let overrides: HashMap<String, String> =
+            parent_claude_marker_overrides(|key| matches!(key, "CLAUDE_CODE_CHILD_SESSION" | "CLAUDECODE")).collect();
+        assert_eq!(overrides.len(), 2);
+        assert_eq!(overrides.get("CLAUDE_CODE_CHILD_SESSION").map(String::as_str), Some(""));
+        assert_eq!(overrides.get("CLAUDECODE").map(String::as_str), Some(""));
+        assert!(parent_claude_marker_overrides(|_| false).next().is_none());
+        // CLAUDE_CONFIG_DIR is the user's account choice, never a parent marker.
+        assert!(parent_claude_marker_overrides(|_| true).all(|(key, _)| key != "CLAUDE_CONFIG_DIR"));
     }
 
     #[test]
