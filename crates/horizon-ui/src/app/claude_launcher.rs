@@ -103,14 +103,15 @@ fn find_profile_preset<'a>(presets: &'a [PresetConfig], profile_name: &str) -> O
         .find(|preset| preset.kind == PanelKind::Claude && preset.alias.as_deref() == Some(profile_name))
 }
 
-/// Profile names the picker lists: exactly the presets [`find_profile_preset`]
-/// can resolve, so a listed profile always launches.
+/// Profile names the picker lists: only derived profile presets (they carry
+/// `CLAUDE_CONFIG_DIR`), never the built-in base preset (`Claude Code` / `cc`).
+/// Each is resolvable by [`find_profile_preset`], so a listed profile launches.
 #[must_use]
 fn claude_profile_names(presets: &[PresetConfig]) -> Vec<String> {
     let mut names: Vec<String> = Vec::new();
     for alias in presets
         .iter()
-        .filter(|preset| preset.kind == PanelKind::Claude)
+        .filter(|preset| preset.kind == PanelKind::Claude && preset.env.contains_key("CLAUDE_CONFIG_DIR"))
         .filter_map(|preset| preset.alias.as_deref())
     {
         if !names.iter().any(|name| name == alias) {
@@ -631,6 +632,13 @@ mod tests {
         }
     }
 
+    fn with_config_dir(mut preset: PresetConfig) -> PresetConfig {
+        preset
+            .env
+            .insert("CLAUDE_CONFIG_DIR".to_owned(), "/home/u/.claude-x".to_owned());
+        preset
+    }
+
     fn names(list: &[&str]) -> Vec<String> {
         list.iter().map(|name| (*name).to_owned()).collect()
     }
@@ -695,8 +703,8 @@ mod tests {
             preset("Shell", None, PanelKind::Shell),
             preset("Claude Code", None, PanelKind::Claude),
             preset("Other", Some("conta2"), PanelKind::Codex),
-            preset("Claude \u{b7} conta1", Some("conta1"), PanelKind::Claude),
-            preset("Claude \u{b7} conta2", Some("conta2"), PanelKind::Claude),
+            with_config_dir(preset("Claude \u{b7} conta1", Some("conta1"), PanelKind::Claude)),
+            with_config_dir(preset("Claude \u{b7} conta2", Some("conta2"), PanelKind::Claude)),
         ];
 
         let names = claude_profile_names(&presets);
@@ -705,6 +713,36 @@ mod tests {
         for name in &names {
             assert!(find_profile_preset(&presets, name).is_some(), "{name} must launch");
         }
+    }
+
+    #[test]
+    fn default_config_has_no_profiles_so_the_launcher_is_empty() {
+        // Raw presets: `resolved_presets()` would also auto-discover `~/.claude-*`
+        // dirs of the machine running the tests.
+        let presets = horizon_core::Config::default().presets;
+
+        assert!(
+            presets
+                .iter()
+                .any(|p| p.kind == PanelKind::Claude && p.alias.as_deref() == Some("cc")),
+            "built-in base preset must exist for this test to be meaningful"
+        );
+        assert!(claude_profile_names(&presets).is_empty());
+    }
+
+    #[test]
+    fn base_cc_alias_is_skipped_but_derived_profiles_are_listed() {
+        let mut config = horizon_core::Config::default();
+        config.claude_profiles = vec![horizon_core::ClaudeProfile {
+            name: "conta2".to_owned(),
+            config_dir: "/home/u/.claude-conta2".to_owned(),
+        }];
+
+        let presets = config.resolved_presets();
+        let names = claude_profile_names(&presets);
+
+        assert_eq!(names, vec!["conta2".to_owned()]);
+        assert!(find_profile_preset(&presets, "conta2").is_some());
     }
 
     fn row(name: &str) -> LauncherRow {
