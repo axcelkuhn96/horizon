@@ -1027,7 +1027,7 @@ mod tests {
         let ctx = Context::default();
         let cc = CreationContext::_new_kittest(ctx);
 
-        HorizonApp::new(
+        HorizonApp::with_link_server(
             &cc,
             &config,
             config_path,
@@ -1036,6 +1036,7 @@ mod tests {
                 runtime_state: Box::new(RuntimeState::default()),
             },
             input::ObservedKeyboardInputs::default(),
+            None,
         )
     }
 

@@ -29,6 +29,21 @@ pub struct PendingRequest {
 }
 
 impl PendingRequest {
+    /// A request not tied to any connection, for UI tests: returns it with the
+    /// receiver of its reply and the flag that marks it abandoned.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn for_test(request: LinkRequest) -> (Self, mpsc::Receiver<LinkResponse>, Arc<AtomicBool>) {
+        let (reply, answer) = mpsc::channel();
+        let abandoned = Arc::new(AtomicBool::new(false));
+        let pending = Self {
+            request,
+            reply,
+            abandoned: Arc::clone(&abandoned),
+        };
+        (pending, answer, abandoned)
+    }
+
     /// True once the connection stopped waiting for the answer (timeout or shutdown).
     #[must_use]
     pub fn is_abandoned(&self) -> bool {

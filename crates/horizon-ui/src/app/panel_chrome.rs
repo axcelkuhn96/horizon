@@ -456,7 +456,7 @@ fn title_right_boundary(chrome: &PanelChrome<'_>) -> f32 {
 /// Gap between stacked titlebar badges.
 const BADGE_STACK_GAP: f32 = 6.0;
 
-/// Link badge in the SSH/exit badge slot, stacked to their left when present.
+/// Link badge in the SSH/exit/attention badge slot, stacked to their left when present.
 fn paint_link_badge_stacked(painter: &egui::Painter, chrome: &PanelChrome<'_>, view: &LinkBadgeView) {
     let anchor = chrome.controls_anchor();
     let right_edge = if chrome.scrollback_limit > 0 {
@@ -477,6 +477,11 @@ fn paint_link_badge_stacked(painter: &egui::Painter, chrome: &PanelChrome<'_>, v
             .size()
             .x;
         taken += width + 16.0 + BADGE_STACK_GAP;
+    }
+    if let Some((severity, summary)) = chrome.attention_badge {
+        let text = attention_badge_text(*severity, summary);
+        let width = painter.layout_no_wrap(text, font, Color32::PLACEHOLDER).size().x;
+        taken += width + 12.0 + BADGE_STACK_GAP;
     }
     paint_link_badge(painter, chrome.titlebar_rect, right_edge, taken, view);
 }
@@ -578,6 +583,19 @@ fn paint_history_meter(ui: &egui::Ui, painter: &egui::Painter, meter: HistoryMet
     );
 }
 
+/// Icon plus the summary cut for display; what the attention badge paints.
+fn attention_badge_text(severity: AttentionSeverity, summary: &str) -> String {
+    let icon = attention_severity_icon(severity);
+    let display_text = if summary.len() > 30 {
+        let mut truncated = summary[..29].to_string();
+        truncated.push('\u{2026}');
+        truncated
+    } else {
+        summary.to_string()
+    };
+    format!("{icon} {display_text}")
+}
+
 #[profiling::function]
 fn paint_attention_badge(
     painter: &egui::Painter,
@@ -587,17 +605,8 @@ fn paint_attention_badge(
     summary: &str,
 ) {
     let color = attention_severity_color(severity);
-    let icon = attention_severity_icon(severity);
 
-    // Truncate the summary for display.
-    let display_text = if summary.len() > 30 {
-        let mut truncated = summary[..29].to_string();
-        truncated.push('\u{2026}');
-        truncated
-    } else {
-        summary.to_string()
-    };
-    let badge_text = format!("{icon} {display_text}");
+    let badge_text = attention_badge_text(severity, summary);
     let font = egui::FontId::proportional(10.0);
 
     // Position the badge left of the history meter area.
