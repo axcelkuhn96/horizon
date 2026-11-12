@@ -102,12 +102,11 @@ impl Board {
         }
     }
 
+    /// Drops the panel's status entries outright: a resolved one has nothing left to show, and
+    /// keeping them would grow the list by one per status change.
     fn resolve_status_attention(&mut self, panel_id: PanelId) {
-        for item in &mut self.attention {
-            if item.panel_id == Some(panel_id) && item.source == STATUS_ATTENTION_SOURCE {
-                item.resolve();
-            }
-        }
+        self.attention
+            .retain(|item| !(item.panel_id == Some(panel_id) && item.source == STATUS_ATTENTION_SOURCE));
     }
 }
 
@@ -348,6 +347,22 @@ mod tests {
         board.reconcile_agent_attention_signal(panel_id, workspace_id, "");
 
         assert_eq!(open_status_entries(&board, panel_id), 1);
+    }
+
+    #[test]
+    fn status_entries_do_not_pile_up_across_status_changes() {
+        let (mut board, panel_id, other_id) = editor_board();
+        board.focused = Some(other_id);
+        board.attention_enabled = true;
+
+        for _ in 0..10 {
+            board.apply_agent_status(panel_id, event(AgentStatus::Working));
+            board.apply_agent_status(panel_id, event(AgentStatus::Waiting));
+        }
+        assert_eq!(board.attention.len(), 1);
+
+        board.apply_agent_status(panel_id, event(AgentStatus::Working));
+        assert!(board.attention.is_empty(), "a resolved status entry is removed");
     }
 
     #[test]
