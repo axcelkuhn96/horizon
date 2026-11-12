@@ -14,6 +14,7 @@ use super::link::{LinkUiState, LinkVisual};
 use super::minimap::MinimapAutoHide;
 use super::sidebar::{GitSidebarState, PanelLabelCache};
 use super::usage_chips::ClaudeUsageState;
+use super::worktree_dialog::WorktreeUi;
 
 /// Accent slots for the visible profile list, recomputed only when the list changes.
 #[derive(Default)]
@@ -54,6 +55,8 @@ pub(super) struct HubState {
     pub(super) link_visuals: Vec<LinkVisual>,
     /// Toasts of the hub features (link results, agent status, usage alerts).
     pub(super) toasts: HubToasts,
+    /// New-worktree and cleanup dialogs, their worker channel and notice.
+    pub(super) worktree_ui: WorktreeUi,
 }
 
 impl HubState {
