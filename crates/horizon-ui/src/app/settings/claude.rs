@@ -629,7 +629,7 @@ mod tests {
     #[test]
     fn layout_switches_once_and_never_flaps_back() {
         let mut was_wide = false;
-        for available in (200..1400).map(|w| w as f32) {
+        for available in (200_u16..1400).map(f32::from) {
             let wide = !row_layout(available, BROWSE, PILL).compact;
             assert!(wide || !was_wide, "wrapped again at {available}");
             was_wide |= wide;

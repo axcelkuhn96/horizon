@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use egui::{Area, Context, FocusDirection, Frame, Id, Key, Modifiers, Order, Pos2, Rect, Response};
 use horizon_core::PresetConfig;
 
-use super::{MenuRow, RowLead, SUBMENU_OFFSET_X, SUBMENU_WIDTH, menu_row, section_header, split_presets};
+use super::{MenuRow, PresetGroups, RowLead, SUBMENU_OFFSET_X, SUBMENU_WIDTH, menu_row, section_header, split_presets};
 use crate::app::hub_ui;
 use crate::app::panels::panel_kind_icon;
 use crate::theme;
@@ -30,12 +30,21 @@ enum KeyIntent {
     Return,
 }
 
+/// Which of the submenu keys were pressed this frame.
+#[derive(Clone, Copy, Debug, Default)]
+struct KeyInput {
+    /// Right/Enter/Space.
+    open: bool,
+    /// Left/Esc.
+    back: bool,
+}
+
 /// Right/Enter/Space on the focused row opens; Left/Esc inside the submenu
 /// returns (Esc is then consumed so it does not close the whole menu).
-fn key_intent(row_focused: bool, focus_inside: bool, open_key: bool, back_key: bool) -> KeyIntent {
-    if focus_inside && back_key {
+fn key_intent(row_focused: bool, focus_inside: bool, keys: KeyInput) -> KeyIntent {
+    if focus_inside && keys.back {
         KeyIntent::Return
-    } else if row_focused && open_key {
+    } else if row_focused && keys.open {
         KeyIntent::Open
     } else {
         KeyIntent::None
@@ -74,6 +83,69 @@ struct SubmenuState {
     focus_inside: bool,
 }
 
+/// Close the submenu and give the focus back to its row, consuming the keys
+/// that triggered the return.
+fn return_to_row(ctx: &Context, row: &Response, state_id: Id) {
+    ctx.input_mut(|input| {
+        input.consume_key(Modifiers::NONE, Key::Escape);
+        input.consume_key(Modifiers::NONE, Key::ArrowLeft);
+    });
+    ctx.memory_mut(|memory| {
+        memory.request_focus(row.id);
+        // egui derives a directional focus move from the raw arrow event; drop it so the
+        // widgets around the menu cannot steal the focus just requested.
+        memory.move_focus(FocusDirection::None);
+    });
+    ctx.data_mut(|data| data.remove::<SubmenuState>(state_id));
+}
+
+/// Paint the preset rows (general, then Claude profiles), collecting the row
+/// ids for keyboard focus. Returns the index of the clicked preset.
+fn paint_items(
+    ui: &mut egui::Ui,
+    presets: &[PresetConfig],
+    groups: &PresetGroups,
+    row_ids: &mut Vec<Id>,
+) -> Option<usize> {
+    let mut picked = None;
+    ui.set_width(SUBMENU_WIDTH);
+    ui.spacing_mut().item_spacing.y = 0.0;
+    if !groups.general.is_empty() {
+        section_header(ui, "PRESETS");
+        for &index in &groups.general {
+            let preset = &presets[index];
+            let (icon, color) = panel_kind_icon(preset.kind, theme::FG_SOFT(), false);
+            let item = MenuRow {
+                lead: RowLead::Icon(icon, color),
+                ..MenuRow::new(&preset.name)
+            };
+            let response = menu_row(ui, &item);
+            row_ids.push(response.id);
+            if response.clicked() {
+                picked = Some(index);
+            }
+        }
+    }
+    if !groups.profiles.is_empty() {
+        if !groups.general.is_empty() {
+            ui.separator();
+        }
+        section_header(ui, "CLAUDE PROFILES");
+        for &(index, slot) in &groups.profiles {
+            let item = MenuRow {
+                lead: RowLead::Dot(hub_ui::accent_color(slot)),
+                ..MenuRow::new(&presets[index].name)
+            };
+            let response = menu_row(ui, &item);
+            row_ids.push(response.id);
+            if response.clicked() {
+                picked = Some(index);
+            }
+        }
+    }
+    picked
+}
+
 /// Hover/keyboard-opened presets list next to the "New terminal" row. Returns
 /// the index of the picked preset.
 pub(super) fn show_presets_submenu(ctx: &Context, id: Id, row: &Response, presets: &[PresetConfig]) -> Option<usize> {
@@ -81,26 +153,14 @@ pub(super) fn show_presets_submenu(ctx: &Context, id: Id, row: &Response, preset
     let state: Option<SubmenuState> = ctx.data(|data| data.get_temp(state_id));
     let now = Instant::now();
 
-    let (open_key, back_key) = ctx.input(|input| {
-        (
-            input.key_pressed(Key::ArrowRight) || input.key_pressed(Key::Enter) || input.key_pressed(Key::Space),
-            input.key_pressed(Key::ArrowLeft) || input.key_pressed(Key::Escape),
-        )
+    let keys = ctx.input(|input| KeyInput {
+        open: input.key_pressed(Key::ArrowRight) || input.key_pressed(Key::Enter) || input.key_pressed(Key::Space),
+        back: input.key_pressed(Key::ArrowLeft) || input.key_pressed(Key::Escape),
     });
     let focus_inside = state.as_ref().is_some_and(|s| s.focus_inside);
-    let intent = key_intent(row.has_focus(), focus_inside, open_key, back_key);
+    let intent = key_intent(row.has_focus(), focus_inside, keys);
     if intent == KeyIntent::Return {
-        ctx.input_mut(|input| {
-            input.consume_key(Modifiers::NONE, Key::Escape);
-            input.consume_key(Modifiers::NONE, Key::ArrowLeft);
-        });
-        ctx.memory_mut(|memory| {
-            memory.request_focus(row.id);
-            // egui derives a directional focus move from the raw arrow event; drop it so the
-            // widgets around the menu cannot steal the focus just requested.
-            memory.move_focus(FocusDirection::None);
-        });
-        ctx.data_mut(|data| data.remove::<SubmenuState>(state_id));
+        return_to_row(ctx, row, state_id);
         return None;
     }
 
@@ -130,41 +190,7 @@ pub(super) fn show_presets_submenu(ctx: &Context, id: Id, row: &Response, preset
         .constrain(true)
         .show(ctx, |ui| {
             Frame::menu(ui.style()).show(ui, |ui| {
-                ui.set_width(SUBMENU_WIDTH);
-                ui.spacing_mut().item_spacing.y = 0.0;
-                if !groups.general.is_empty() {
-                    section_header(ui, "PRESETS");
-                    for &index in &groups.general {
-                        let preset = &presets[index];
-                        let (icon, color) = panel_kind_icon(preset.kind, theme::FG_SOFT(), false);
-                        let item = MenuRow {
-                            lead: RowLead::Icon(icon, color),
-                            ..MenuRow::new(&preset.name)
-                        };
-                        let response = menu_row(ui, &item);
-                        row_ids.push(response.id);
-                        if response.clicked() {
-                            picked = Some(index);
-                        }
-                    }
-                }
-                if !groups.profiles.is_empty() {
-                    if !groups.general.is_empty() {
-                        ui.separator();
-                    }
-                    section_header(ui, "CLAUDE PROFILES");
-                    for &(index, slot) in &groups.profiles {
-                        let item = MenuRow {
-                            lead: RowLead::Dot(hub_ui::accent_color(slot)),
-                            ..MenuRow::new(&presets[index].name)
-                        };
-                        let response = menu_row(ui, &item);
-                        row_ids.push(response.id);
-                        if response.clicked() {
-                            picked = Some(index);
-                        }
-                    }
-                }
+                picked = paint_items(ui, presets, &groups, &mut row_ids);
             });
         });
     ctx.move_to_top(area.response.layer_id);
@@ -205,7 +231,7 @@ mod tests {
 
     use egui::{Pos2, Rect};
 
-    use super::{KeyIntent, key_intent, pointer_in_zone, stay_open};
+    use super::{KeyInput, KeyIntent, key_intent, pointer_in_zone, stay_open};
 
     fn rect(x0: f32, y0: f32, x1: f32, y1: f32) -> Rect {
         Rect::from_min_max(Pos2::new(x0, y0), Pos2::new(x1, y1))
@@ -237,15 +263,58 @@ mod tests {
 
     #[test]
     fn workspace_menu_submenu_keyboard_opens_from_row_and_returns_from_inside() {
-        assert_eq!(key_intent(true, false, true, false), KeyIntent::Open);
-        assert_eq!(key_intent(false, true, false, true), KeyIntent::Return);
         assert_eq!(
-            key_intent(true, true, true, true),
+            key_intent(
+                true,
+                false,
+                KeyInput {
+                    open: true,
+                    back: false
+                }
+            ),
+            KeyIntent::Open
+        );
+        assert_eq!(
+            key_intent(
+                false,
+                true,
+                KeyInput {
+                    open: false,
+                    back: true
+                }
+            ),
+            KeyIntent::Return
+        );
+        assert_eq!(
+            key_intent(true, true, KeyInput { open: true, back: true }),
             KeyIntent::Return,
             "back wins inside the submenu"
         );
-        assert_eq!(key_intent(false, false, true, true), KeyIntent::None);
-        assert_eq!(key_intent(true, false, false, false), KeyIntent::None);
-        assert_eq!(key_intent(false, true, true, false), KeyIntent::None);
+        assert_eq!(
+            key_intent(false, false, KeyInput { open: true, back: true }),
+            KeyIntent::None
+        );
+        assert_eq!(
+            key_intent(
+                true,
+                false,
+                KeyInput {
+                    open: false,
+                    back: false
+                }
+            ),
+            KeyIntent::None
+        );
+        assert_eq!(
+            key_intent(
+                false,
+                true,
+                KeyInput {
+                    open: true,
+                    back: false
+                }
+            ),
+            KeyIntent::None
+        );
     }
 }

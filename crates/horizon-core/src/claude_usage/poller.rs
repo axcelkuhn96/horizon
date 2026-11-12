@@ -235,10 +235,8 @@ impl UsagePoller {
         #[cfg(test)]
         let worker_alive = Arc::clone(&alive);
         let previous = load_cache(&cache_path);
-        if !previous.is_empty() {
-            if result_tx.send(previous.clone()).is_ok() {
-                wake(waker.as_ref());
-            }
+        if !previous.is_empty() && result_tx.send(previous.clone()).is_ok() {
+            wake(waker.as_ref());
         }
         let mut worker = Worker {
             profiles,

@@ -1,6 +1,7 @@
 //! Painting of the sidebar git line, the worktrees toggle and the worktree
 //! rows (spec section 7). Everything reads strings prepared by `build_cache`.
 
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use egui::{
@@ -29,6 +30,8 @@ const ROW_RIGHT_INSET: f32 = 6.0;
 const ROW_RADIUS: u8 = 6;
 const TOOLTIP_WIDTH: f32 = 300.0;
 const TOOLTIP_MARGIN: i8 = 12;
+/// Margin egui's popup frame already adds around a tooltip body.
+const POPUP_FRAME_MARGIN: i8 = 6;
 const AGENT_TOGGLE_EXTRA_INDENT: f32 = 12.0;
 
 /// Everything a worktree row (and its menu) needs besides the row itself.
@@ -127,13 +130,43 @@ pub(in crate::app::sidebar) fn render_git_section(
     }
 
     let all = show_all.contains(&workspace);
+    let agents_open_now = agents_open.contains(&workspace);
+    let list = paint_worktree_list(ui, &env, cache, all, agents_open_now);
+    if list.toggled_all {
+        flip(show_all, workspace);
+        *watch_stale = true;
+    }
+    if list.toggled_agents {
+        flip(agents_open, workspace);
+        *watch_stale = true;
+    }
+    list.action
+}
+
+/// What painting the open worktrees list produced this frame.
+struct ListOutcome {
+    action: Option<GitAction>,
+    toggled_all: bool,
+    toggled_agents: bool,
+}
+
+/// Primary worktree rows, then the collapsible agents group, each capped at
+/// `VISIBLE_ROWS` unless `all`.
+fn paint_worktree_list(
+    ui: &mut Ui,
+    env: &RowEnv,
+    cache: &GitLineCache,
+    all: bool,
+    agents_open_now: bool,
+) -> ListOutcome {
+    let workspace = env.workspace;
     let mut action = None;
     let mut toggled_all = false;
     let mut toggled_agents = false;
 
     let primary = visible_rows(cache.primary_count, all);
     for index in 0..primary {
-        action = action.or(paint_worktree_row(ui, &env, &cache.worktree_rows, index));
+        action = action.or(paint_worktree_row(ui, env, &cache.worktree_rows, index));
     }
     if cache.primary_count > VISIBLE_ROWS {
         toggled_all |= show_all_row(ui, workspace, "primary", all, &cache.primary_show_all_label);
@@ -141,7 +174,6 @@ pub(in crate::app::sidebar) fn render_git_section(
 
     if cache.agent_count() > 0 {
         let agents_id = ui.make_persistent_id(("git_wt_agents", workspace.0));
-        let agents_open_now = agents_open.contains(&workspace);
         toggled_agents = toggle_row(
             ui,
             agents_id,
@@ -153,31 +185,24 @@ pub(in crate::app::sidebar) fn render_git_section(
         if agents_open_now {
             let shown = visible_rows(cache.agent_count(), all);
             for index in cache.primary_count..cache.primary_count + shown {
-                action = action.or(paint_worktree_row(ui, &env, &cache.worktree_rows, index));
+                action = action.or(paint_worktree_row(ui, env, &cache.worktree_rows, index));
             }
             if cache.agent_count() > VISIBLE_ROWS {
                 toggled_all |= show_all_row(ui, workspace, "agents", all, &cache.agents_show_all_label);
             }
         }
     }
+    ListOutcome {
+        action,
+        toggled_all,
+        toggled_agents,
+    }
+}
 
-    if toggled_all {
-        if all {
-            show_all.remove(&workspace);
-        } else {
-            show_all.insert(workspace);
-        }
-        *watch_stale = true;
+fn flip(set: &mut HashSet<WorkspaceId>, workspace: WorkspaceId) {
+    if !set.remove(&workspace) {
+        set.insert(workspace);
     }
-    if toggled_agents {
-        if agents_open.contains(&workspace) {
-            agents_open.remove(&workspace);
-        } else {
-            agents_open.insert(workspace);
-        }
-        *watch_stale = true;
-    }
-    action
 }
 
 // ---------------------------------------------------------------------------
@@ -524,34 +549,36 @@ fn badge_pill(ui: &mut Ui, text: &str) {
 }
 
 fn show_tooltip(ui: &mut Ui, tip: &TooltipData, changed_at: Instant) {
-    Frame::new().inner_margin(Margin::same(TOOLTIP_MARGIN)).show(ui, |ui| {
-        ui.set_width(TOOLTIP_WIDTH - f32::from(TOOLTIP_MARGIN) * 2.0);
-        ui.horizontal(|ui| {
-            ui.label(RichText::new(&tip.title).size(13.0).strong().color(theme::FG()));
-            for badge in &tip.badges {
-                badge_pill(ui, badge);
-            }
-        });
-        ui.add_space(4.0);
-        ui.label(RichText::new(&tip.path).monospace().size(10.5).color(theme::FG_DIM()));
-        if tip.upstream.is_some() || tip.changes.is_some() {
+    Frame::new()
+        .inner_margin(Margin::same(TOOLTIP_MARGIN - POPUP_FRAME_MARGIN))
+        .show(ui, |ui| {
+            ui.set_width(TOOLTIP_WIDTH - f32::from(TOOLTIP_MARGIN) * 2.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(&tip.title).size(13.0).strong().color(theme::FG()));
+                for badge in &tip.badges {
+                    badge_pill(ui, badge);
+                }
+            });
             ui.add_space(4.0);
-        }
-        for line in [&tip.upstream, &tip.changes].into_iter().flatten() {
-            ui.label(RichText::new(line).size(11.0).color(theme::FG_SOFT()));
-        }
-        ui.add_space(4.0);
-        ui.label(
-            RichText::new(changed_text(changed_at.elapsed()))
-                .size(10.5)
-                .color(theme::FG_DIM()),
-        );
-        ui.label(
-            RichText::new("Click: open terminal \u{b7} Right-click: more")
-                .size(10.0)
-                .color(theme::FG_DIM()),
-        );
-    });
+            ui.label(RichText::new(&tip.path).monospace().size(10.5).color(theme::FG_DIM()));
+            if tip.upstream.is_some() || tip.changes.is_some() {
+                ui.add_space(4.0);
+            }
+            for line in [&tip.upstream, &tip.changes].into_iter().flatten() {
+                ui.label(RichText::new(line).size(11.0).color(theme::FG_SOFT()));
+            }
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new(changed_text(changed_at.elapsed()))
+                    .size(10.5)
+                    .color(theme::FG_DIM()),
+            );
+            ui.label(
+                RichText::new("Click: open terminal \u{b7} Right-click: more")
+                    .size(10.0)
+                    .color(theme::FG_DIM()),
+            );
+        });
 }
 
 #[cfg(test)]
