@@ -121,79 +121,13 @@ impl BusyCache {
     }
 }
 
-/// `true` when `/proc/<pid>/stat` says a job other than the shell owns the terminal: the
-/// terminal's foreground process group (`tpgid`) differs from the shell's own group (`pgrp`).
-/// Shells without a controlling terminal (`tpgid` -1 or 0) never count as busy.
-#[cfg(any(target_os = "linux", test))]
-#[must_use]
-fn foreground_job_running(stat: &str) -> bool {
-    // `comm` sits in parentheses and may itself contain spaces and parentheses.
-    let Some((_, after_comm)) = stat.rsplit_once(')') else {
-        return false;
-    };
-    let mut fields = after_comm.split_whitespace();
-    // state ppid pgrp session tty_nr tpgid
-    let (Some(pgrp), Some(tpgid)) = (fields.nth(2), fields.nth(2)) else {
-        return false;
-    };
-    match (pgrp.parse::<i64>(), tpgid.parse::<i64>()) {
-        (Ok(pgrp), Ok(tpgid)) => tpgid > 0 && tpgid != pgrp,
-        _ => false,
-    }
-}
-
-/// Busy probe of the shell behind a panel's PTY child. Linux only; elsewhere it never reports busy.
-#[cfg(target_os = "linux")]
-#[must_use]
-pub(in crate::app) fn shell_is_busy(child_pid: i32) -> bool {
-    let Ok(pid) = u32::try_from(child_pid) else {
-        return false;
-    };
-    // With transcript capture the PTY child is a `script` wrapper; its child is the shell.
-    let shell = horizon_core::shell_pid_behind_wrapper(pid);
-    std::fs::read_to_string(format!("/proc/{shell}/stat")).is_ok_and(|stat| foreground_job_running(&stat))
-}
-
-#[cfg(not(target_os = "linux"))]
-#[must_use]
-pub(in crate::app) fn shell_is_busy(_child_pid: i32) -> bool {
-    false
-}
+pub(in crate::app) use horizon_core::shell_is_busy;
 
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
 
     use super::*;
-
-    #[test]
-    fn idle_shell_owns_its_terminal() {
-        // pgrp 100 is also the terminal's foreground group.
-        assert!(!foreground_job_running("100 (bash) S 99 100 100 34816 100 4194304 1 2"));
-    }
-
-    #[test]
-    fn a_foreground_job_in_another_group_makes_the_shell_busy() {
-        assert!(foreground_job_running("100 (bash) S 99 100 100 34816 4321 4194304 1 2"));
-    }
-
-    #[test]
-    fn no_controlling_terminal_is_never_busy() {
-        assert!(!foreground_job_running("100 (bash) S 99 100 100 0 -1 4194304 1 2"));
-    }
-
-    #[test]
-    fn comm_with_spaces_and_parentheses_does_not_shift_the_fields() {
-        assert!(foreground_job_running("7 (my (odd) sh) S 1 7 7 34816 99 0"));
-        assert!(!foreground_job_running("7 (my (odd) sh) S 1 7 7 34816 7 0"));
-    }
-
-    #[test]
-    fn malformed_stat_is_not_busy() {
-        assert!(!foreground_job_running(""));
-        assert!(!foreground_job_running("100 (bash) S 99"));
-        assert!(!foreground_job_running("100 (bash) S 99 x y z w"));
-    }
 
     #[test]
     fn busy_probe_is_reused_inside_the_ttl_and_rerun_after_it() {

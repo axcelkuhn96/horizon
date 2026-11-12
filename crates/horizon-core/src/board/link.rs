@@ -8,12 +8,13 @@ use std::path::{Path, PathBuf};
 
 use alacritty_terminal::term::TermMode;
 
-use crate::agent_detect::detect_running_agent;
+use crate::agent_detect::detect_claude_process;
 use crate::link::{
     LinkEffect, LinkEffectKind, LinkError, LinkOk, LinkRequest, LinkResponse, MAX_READ_LINES, MAX_REQUEST_BYTES,
     PanelInfo, SendTarget, resolve_target, sanitize_send_text, strip_escapes,
 };
 use crate::panel::{Panel, PanelId, PanelKind};
+use crate::proc_foreground::process_in_foreground;
 
 use super::Board;
 
@@ -55,7 +56,10 @@ fn paste_payload(text: &str, bracketed: bool) -> Vec<u8> {
 
 impl Board {
     /// Whether `panel` runs an agent right now: an agent panel (Claude, Codex, ...), or a
-    /// shell whose live process tree contains `claude` (started by hand or by a quick-start).
+    /// shell whose live process tree contains `claude` (started by hand or by a quick-start)
+    /// that holds the terminal's foreground. A suspended (`Ctrl-Z`) or backgrounded (`&`)
+    /// `claude` does not count: the shell is at its prompt again, and typing `[ask ...]` plus
+    /// Enter into it would run the text as a command.
     ///
     /// Inspects the process tree each time (Linux `/proc`; other platforms see shells as
     /// non-agents) and is never cached or inferred from the terminal title, so call it at
@@ -69,7 +73,8 @@ impl Board {
             && !panel.child_exited()
             && panel
                 .child_pid()
-                .is_some_and(|pid| detect_running_agent(pid, &[]).is_some())
+                .and_then(|pid| detect_claude_process(pid, &[]))
+                .is_some_and(|process| process_in_foreground(process.pid))
     }
 
     /// Stores the panel-link socket exposed to newly spawned and restarted panels as

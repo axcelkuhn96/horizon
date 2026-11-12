@@ -26,6 +26,7 @@ pub mod link;
 mod managed_install;
 mod opencode_paths;
 mod panel;
+mod proc_foreground;
 mod remote_hosts;
 mod runtime_state;
 pub mod search;
@@ -74,6 +75,7 @@ pub use managed_install::ManagedInstall;
 pub use panel::{
     DEFAULT_PANEL_SIZE, MAX_PANEL_NAME_CHARS, Panel, PanelId, PanelKind, PanelLayout, PanelOptions, PanelResume,
 };
+pub use proc_foreground::shell_is_busy;
 pub use remote_hosts::{
     RemoteHost, RemoteHostCatalog, RemoteHostConnectionHistoryEntry, RemoteHostConnectionSummary, RemoteHostSources,
     RemoteHostStatus, discover_remote_hosts, summarize_remote_host_connections,
