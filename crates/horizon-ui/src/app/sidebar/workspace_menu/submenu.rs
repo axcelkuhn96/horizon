@@ -9,7 +9,7 @@
 
 use std::time::{Duration, Instant};
 
-use egui::{Area, Context, Frame, Id, Key, Modifiers, Order, Pos2, Rect, Response};
+use egui::{Area, Context, FocusDirection, Frame, Id, Key, Modifiers, Order, Pos2, Rect, Response};
 use horizon_core::PresetConfig;
 
 use super::{MenuRow, RowLead, SUBMENU_OFFSET_X, SUBMENU_WIDTH, menu_row, section_header, split_presets};
@@ -90,8 +90,16 @@ pub(super) fn show_presets_submenu(ctx: &Context, id: Id, row: &Response, preset
     let focus_inside = state.as_ref().is_some_and(|s| s.focus_inside);
     let intent = key_intent(row.has_focus(), focus_inside, open_key, back_key);
     if intent == KeyIntent::Return {
-        ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Escape));
-        ctx.memory_mut(|memory| memory.request_focus(row.id));
+        ctx.input_mut(|input| {
+            input.consume_key(Modifiers::NONE, Key::Escape);
+            input.consume_key(Modifiers::NONE, Key::ArrowLeft);
+        });
+        ctx.memory_mut(|memory| {
+            memory.request_focus(row.id);
+            // egui derives a directional focus move from the raw arrow event; drop it so the
+            // widgets around the menu cannot steal the focus just requested.
+            memory.move_focus(FocusDirection::None);
+        });
         ctx.data_mut(|data| data.remove::<SubmenuState>(state_id));
         return None;
     }
@@ -164,7 +172,11 @@ pub(super) fn show_presets_submenu(ctx: &Context, id: Id, row: &Response, preset
     if intent == KeyIntent::Open
         && let Some(first) = row_ids.first()
     {
-        ctx.memory_mut(|memory| memory.request_focus(*first));
+        ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::ArrowRight));
+        ctx.memory_mut(|memory| {
+            memory.request_focus(*first);
+            memory.move_focus(FocusDirection::None);
+        });
     }
     let focused = ctx.memory(|memory| memory.focused());
     let focus_now = focused.is_some_and(|id| row_ids.contains(&id)) || intent == KeyIntent::Open;
