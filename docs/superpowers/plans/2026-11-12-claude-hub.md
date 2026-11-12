@@ -321,12 +321,12 @@ T14 ─ T16 (drain + panel menu + badge)           all ─ T17
 - Consumes: `ProfileUsage`, `UsagePoller` (T8), `remaining_percent`, `parse_rfc3339_unix` (T7), `HorizonApp::launch_claude_profile` (T5), `usage_stats` for today's tokens (cached, refreshed with the snapshot, not per frame)
 - Produces:
   - `pub(super) fn severity_for(percent: Option<f32>, api: Option<&str>) -> Severity` (`Normal | Warn(≥75) | Critical(≥90 or api "critical")`)
-  - `pub(super) fn chip_label(u: &ProfileUsage, compact: bool) -> String` (`"claude2  5h 37%  7d 12%"`; compact `"claude2 7d 12%"`; expired adds `expired`)
+  - `pub(super) fn chip_label(u: &ProfileUsage, compact: bool) -> String` (`"claude2 · gutosjc  5h 37%  7d 12%"` — account identifier = local part of `ProfileUsage.email` before `@`, max 10 chars + `…`, omitted when email unknown; compact `"claude2 · guto… 7d 12%"` (identifier max 5 chars); expired adds `expired`) — USER REQUEST: the user cannot tell accounts apart by profile name alone
   - `pub(super) fn chips_width(count: usize, compact: bool) -> f32`
   - `ToolbarItem::UsageChips` participates in `RootToolbarLayout`: shown only when `features.claude_usage_bar` and ≥1 profile; compact before dropping; excess chips fall to the overflow menu
   - Interactions: left click → `launch_claude_profile(name)`; right click context menu "Refresh now" → `poller.refresh_now()`; tooltip text built lazily on hover only
 
-- [ ] **Step 1: Failing tests:** `severity_thresholds_75_90`, `severity_api_critical_overrides`, `chip_label_dash_for_null_window`, `chip_label_expired_marker`, `layout_hides_chips_when_disabled_or_no_profiles`, `layout_compacts_then_overflows_when_narrow`, `features_default_has_usage_bar_true_and_old_yaml_loads`.
+- [ ] **Step 1: Failing tests:** `severity_thresholds_75_90`, `severity_api_critical_overrides`, `chip_label_dash_for_null_window`, `chip_label_expired_marker`, `chip_label_shows_email_local_part`, `chip_label_truncates_identifier`, `chip_label_without_email_omits_identifier`, `layout_hides_chips_when_disabled_or_no_profiles`, `layout_compacts_then_overflows_when_narrow`, `features_default_has_usage_bar_true_and_old_yaml_loads`.
 - [ ] **Step 2:** `cargo test --workspace usage_chips root_chrome features` — FAIL.
 - [ ] **Step 3:** Implement. Redraw surface: only new poll result, hover, click. No `request_repaint` loop; cache galleys/labels keyed by snapshot version.
 - [ ] **Step 4:** `cargo test --workspace` — PASS.
