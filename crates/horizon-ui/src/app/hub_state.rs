@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use horizon_core::WorkspaceId;
+use horizon_core::claude_usage::AlertTracker;
 use horizon_core::link::AskTable;
 
 use super::claude_launcher::ClaudeLauncherState;
@@ -58,6 +59,8 @@ pub(super) struct HubState {
     pub(super) link_visuals: Vec<LinkVisual>,
     /// Toasts of the hub features (link results, agent status, usage alerts).
     pub(super) toasts: HubToasts,
+    /// Which weekly-usage thresholds each account already crossed (alert toasts).
+    pub(super) alerts: AlertTracker,
     /// New-worktree and cleanup dialogs, their worker channel and notice.
     pub(super) worktree_ui: WorktreeUi,
 }

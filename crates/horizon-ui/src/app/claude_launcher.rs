@@ -12,10 +12,15 @@ use egui::{
 use horizon_core::claude_usage::{ProfileUsage, UsageState};
 use horizon_core::{PanelKind, PresetConfig};
 
+use self::auto_row::{AutoRow, show_auto_row};
 use super::HorizonApp;
+use super::claude_auto::MIN_PROFILES_FOR_AUTO;
+use super::hub_toast::{Toast, ToastKind};
 use super::hub_ui::{self, ModalPlacement, Severity};
 use super::usage_chips::{ShownWindows, api_severity, severity_for, window_text};
 use crate::theme;
+
+mod auto_row;
 
 const MODAL_WIDTH: f32 = 480.0;
 const HEADER_HEIGHT: f32 = 44.0;
@@ -56,6 +61,10 @@ struct CachedGalley {
 pub(super) struct ClaudeLauncherState {
     pub(super) selected: usize,
     rows: Vec<LauncherRow>,
+    /// The "Auto" entry above the profiles; present with at least two profiles.
+    auto: Option<AutoRow>,
+    /// The selection is on the Auto entry rather than on `rows[selected]`.
+    auto_selected: bool,
     workspace_name: String,
     header_galley: Option<CachedGalley>,
     /// `HubState::rows_version` the rows were built from.
@@ -140,6 +149,8 @@ pub(super) fn claude_profile_names(presets: &[PresetConfig]) -> Vec<String> {
 enum LauncherAction {
     None,
     Launch(usize),
+    /// The Auto entry: the profile is chosen when the action is applied.
+    LaunchAuto,
     OpenSettings,
 }
 
@@ -263,6 +274,11 @@ impl HorizonApp {
             .collect()
     }
 
+    /// The Auto entry for a launcher listing `profile_count` profiles, if it is worth showing.
+    fn build_auto_row(&self, profile_count: usize) -> Option<AutoRow> {
+        (profile_count >= MIN_PROFILES_FOR_AUTO).then(|| AutoRow::new(self.auto_choice()))
+    }
+
     pub(in crate::app) fn toggle_claude_launcher(&mut self) {
         if self.hub.claude_launcher.is_some() {
             self.close_claude_launcher();
@@ -276,6 +292,7 @@ impl HorizonApp {
         let names = claude_profile_names(&self.presets);
         let selected = initial_selection(&names, self.hub.last_launched_profile.as_deref());
         let rows = self.build_launcher_rows(names);
+        let auto = self.build_auto_row(rows.len());
         // One modal at a time: the palette, remote hosts and sessions close.
         self.command_palette = None;
         self.remote_hosts_overlay = None;
@@ -283,6 +300,8 @@ impl HorizonApp {
         self.hub.claude_launcher = Some(ClaudeLauncherState {
             selected,
             rows,
+            auto,
+            auto_selected: false,
             workspace_name: self.active_workspace_label(),
             header_galley: None,
             rows_version: self.hub.rows_version,
@@ -310,6 +329,19 @@ impl HorizonApp {
         self.hub.last_launched_profile = Some(profile_name.to_owned());
     }
 
+    /// Opens a Claude session on the account Auto picks from the usage snapshot as it is now.
+    pub(in crate::app) fn launch_claude_auto(&mut self, ctx: &Context) {
+        if let Some(pick) = self.current_auto_pick() {
+            self.launch_claude_profile(ctx, &pick.name);
+        } else {
+            self.hub.toasts.push(Toast {
+                kind: ToastKind::Warn,
+                text: "No Claude account available\nEvery profile is expired, logged out or at its limit".to_owned(),
+                panel: None,
+            });
+        }
+    }
+
     /// Opens Settings (when closed) on the Claude tab.
     fn open_settings_claude_tab(&mut self) {
         if self.settings.is_none() {
@@ -329,6 +361,8 @@ impl HorizonApp {
         let names = claude_profile_names(&self.presets);
         state.selected = initial_selection(&names, current.as_deref());
         state.rows = self.build_launcher_rows(names);
+        state.auto = self.build_auto_row(state.rows.len());
+        state.auto_selected &= state.auto.is_some();
         state.workspace_name = self.active_workspace_label();
         state.header_galley = None;
         state.rows_version = self.hub.rows_version;
@@ -362,6 +396,7 @@ impl HorizonApp {
                     self.launch_claude_profile(ctx, &name);
                 }
             }
+            LauncherAction::LaunchAuto => self.launch_claude_auto(ctx),
             LauncherAction::OpenSettings => self.open_settings_claude_tab(),
             LauncherAction::None if !outcome.dismissed => self.hub.claude_launcher = Some(state),
             LauncherAction::None => {}
@@ -381,6 +416,9 @@ fn handle_launcher_keys(ctx: &Context, state: &mut ClaudeLauncherState) -> Launc
                 LauncherAction::None
             };
         }
+        if state.auto.as_ref().is_some_and(AutoRow::available) && input.consume_key(Modifiers::NONE, Key::Num0) {
+            return LauncherAction::LaunchAuto;
+        }
         for key in [
             Key::Num1,
             Key::Num2,
@@ -399,22 +437,28 @@ fn handle_launcher_keys(ctx: &Context, state: &mut ClaudeLauncherState) -> Launc
             }
         }
         if input.consume_key(Modifiers::NONE, Key::Enter) {
-            return LauncherAction::Launch(state.selected.min(len - 1));
+            return if !state.auto_row_selected() {
+                LauncherAction::Launch(state.selected.min(len - 1))
+            } else if state.auto.as_ref().is_some_and(AutoRow::available) {
+                LauncherAction::LaunchAuto
+            } else {
+                LauncherAction::None
+            };
         }
-        let before = state.selected;
+        let before = (state.selected, state.auto_selected);
         if input.consume_key(Modifiers::NONE, Key::ArrowDown) {
-            state.selected = move_selection(state.selected, 1, len);
+            state.step_selection(1);
         }
         if input.consume_key(Modifiers::NONE, Key::ArrowUp) {
-            state.selected = move_selection(state.selected, -1, len);
+            state.step_selection(-1);
         }
         if input.consume_key(Modifiers::NONE, Key::Home) {
-            state.selected = 0;
+            state.select_first();
         }
         if input.consume_key(Modifiers::NONE, Key::End) {
-            state.selected = len - 1;
+            state.select_last();
         }
-        state.reveal_selected |= state.selected != before;
+        state.reveal_selected |= (state.selected, state.auto_selected) != before;
         LauncherAction::None
     })
 }
@@ -430,7 +474,7 @@ fn show_launcher_contents(ui: &mut Ui, state: &mut ClaudeLauncherState) -> Launc
     } else {
         let action = show_rows(ui, state);
         paint_separator(ui, width);
-        paint_footer(ui, width);
+        paint_footer(ui, width, state.auto.is_some());
         action
     };
     state.selected = state.selected.min(state.rows.len().saturating_sub(1));
@@ -482,7 +526,7 @@ fn paint_separator(ui: &mut Ui, width: f32) {
         .rect_filled(rect, CornerRadius::ZERO, theme::BORDER_SUBTLE());
 }
 
-fn paint_footer(ui: &mut Ui, width: f32) {
+fn paint_footer(ui: &mut Ui, width: f32, has_auto: bool) {
     let (rect, _) = ui.allocate_exact_size(Vec2::new(width, FOOTER_HEIGHT), Sense::hover());
     let builder = UiBuilder::new()
         .max_rect(rect.shrink2(Vec2::new(16.0, 0.0)))
@@ -493,6 +537,9 @@ fn paint_footer(ui: &mut Ui, width: f32) {
     hub_ui::kbd_hint(&mut footer, "\u{2191}\u{2193}", "move");
     hub_ui::kbd_hint(&mut footer, "Enter", "open");
     hub_ui::kbd_hint(&mut footer, "1\u{2013}9", "pick");
+    if has_auto {
+        hub_ui::kbd_hint(&mut footer, "0", "auto");
+    }
     hub_ui::kbd_hint(&mut footer, "Esc", "close");
 }
 
@@ -538,6 +585,8 @@ fn show_rows(ui: &mut Ui, state: &mut ClaudeLauncherState) -> LauncherAction {
     let ClaudeLauncherState {
         selected,
         rows,
+        auto,
+        auto_selected,
         reveal_selected,
         ..
     } = state;
@@ -549,6 +598,11 @@ fn show_rows(ui: &mut Ui, state: &mut ClaudeLauncherState) -> LauncherAction {
                 .inner_margin(Margin::symmetric(LIST_MARGIN_X, LIST_MARGIN_Y))
                 .show(ui, |ui| {
                     ui.spacing_mut().item_spacing.y = 0.0;
+                    if let Some(auto) = auto.as_mut()
+                        && show_auto_row(ui, auto, auto_selected, reveal_selected, pointer_moved)
+                    {
+                        action = LauncherAction::LaunchAuto;
+                    }
                     for (index, row) in rows.iter_mut().enumerate() {
                         let (rect, response) =
                             ui.allocate_exact_size(Vec2::new(ui.available_width(), ROW_HEIGHT), Sense::click());
@@ -559,9 +613,10 @@ fn show_rows(ui: &mut Ui, state: &mut ClaudeLauncherState) -> LauncherAction {
                             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                             if pointer_moved {
                                 *selected = index;
+                                *auto_selected = false;
                             }
                         }
-                        if *reveal_selected && *selected == index {
+                        if *reveal_selected && *selected == index && !*auto_selected {
                             ui.scroll_to_rect(rect, None);
                             *reveal_selected = false;
                         }
@@ -569,7 +624,7 @@ fn show_rows(ui: &mut Ui, state: &mut ClaudeLauncherState) -> LauncherAction {
                             action = LauncherAction::Launch(index);
                         }
                         if ui.is_rect_visible(rect) {
-                            let is_selected = *selected == index;
+                            let is_selected = *selected == index && !*auto_selected;
                             let pressed = response.is_pointer_button_down_on();
                             paint_row(ui.painter(), rect, index, row, is_selected, pressed);
                             hub_ui::paint_focus_ring(ui.painter(), &response, rect, ROW_RADIUS);
@@ -719,6 +774,7 @@ mod tests {
     use horizon_core::PanelKind;
 
     use super::*;
+    use crate::app::claude_auto::AutoChoice;
     use crate::app::test_support::with_key_press;
 
     fn preset(name: &str, alias: Option<&str>, kind: PanelKind) -> PresetConfig {
@@ -957,6 +1013,8 @@ mod tests {
         ClaudeLauncherState {
             selected: 0,
             rows,
+            auto: None,
+            auto_selected: false,
             workspace_name: "ws".to_owned(),
             header_galley: None,
             rows_version: 0,
@@ -967,9 +1025,12 @@ mod tests {
     /// Height `show_launcher_contents` claims in a parent that has the default
     /// (8, 8) item spacing, like the real modal.
     fn contents_height(rows: Vec<LauncherRow>) -> f32 {
+        state_height(state_with(rows))
+    }
+
+    fn state_height(mut state: ClaudeLauncherState) -> f32 {
         let ctx = Context::default();
         let mut height = 0.0;
-        let mut state = state_with(rows);
         for _ in 0..2 {
             let _ = ctx.run(egui::RawInput::default(), |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
@@ -1075,5 +1136,114 @@ mod tests {
             LauncherAction::None
         ));
         assert!(matches!(launcher_keys(Key::Num1, &mut empty), LauncherAction::None));
+    }
+
+    fn auto_choice(target: Option<&str>) -> AutoChoice {
+        AutoChoice {
+            target: target.map(str::to_owned),
+            detail: target.map_or_else(|| "No account available".to_owned(), |name| format!("\u{2192} {name}")),
+            low: false,
+            tooltip: String::new(),
+        }
+    }
+
+    fn launcher_with_auto(names: &[&str], target: Option<&str>) -> ClaudeLauncherState {
+        let mut state = launcher_with(names, 0);
+        state.auto = Some(AutoRow::new(auto_choice(target)));
+        state
+    }
+
+    #[test]
+    fn auto_row_adds_one_row_of_height_and_no_extra_spacing() {
+        let plain = contents_height(vec![row("a"), row("b")]);
+
+        let with_auto = state_height(launcher_with_auto(&["a", "b"], Some("a")));
+
+        assert!((with_auto - plain - ROW_HEIGHT).abs() < 0.01);
+    }
+
+    #[test]
+    fn arrows_walk_auto_then_the_profiles_and_wrap() {
+        let mut state = launcher_with_auto(&["a", "b"], Some("a"));
+        state.auto_selected = true;
+
+        launcher_keys(Key::ArrowDown, &mut state);
+        assert!(!state.auto_selected);
+        assert_eq!(state.selected, 0);
+        launcher_keys(Key::ArrowDown, &mut state);
+        assert_eq!(state.selected, 1);
+        launcher_keys(Key::ArrowDown, &mut state);
+        assert!(state.auto_selected, "Down from the last profile wraps to Auto");
+        launcher_keys(Key::ArrowUp, &mut state);
+        assert!(!state.auto_selected);
+        assert_eq!(state.selected, 1, "Up from Auto wraps to the last profile");
+
+        let mut state = launcher_with_auto(&["a", "b"], Some("a"));
+        launcher_keys(Key::ArrowUp, &mut state);
+        assert!(state.auto_selected, "Up from the first profile reaches Auto");
+        assert!(state.reveal_selected);
+    }
+
+    #[test]
+    fn home_goes_to_auto_and_end_to_the_last_profile() {
+        let mut state = launcher_with_auto(&["a", "b", "c"], Some("a"));
+        state.selected = 1;
+
+        launcher_keys(Key::Home, &mut state);
+        assert!(state.auto_selected);
+        launcher_keys(Key::End, &mut state);
+        assert!(!state.auto_selected);
+        assert_eq!(state.selected, 2);
+    }
+
+    #[test]
+    fn arrows_home_and_end_skip_a_disabled_auto_row() {
+        let mut state = launcher_with_auto(&["a", "b"], None);
+
+        launcher_keys(Key::ArrowUp, &mut state);
+        assert!(!state.auto_selected, "Up from the first profile wraps to the last one");
+        assert_eq!(state.selected, 1);
+        launcher_keys(Key::ArrowDown, &mut state);
+        assert!(
+            !state.auto_selected,
+            "Down from the last profile wraps to the first one"
+        );
+        assert_eq!(state.selected, 0);
+        state.selected = 1;
+        launcher_keys(Key::Home, &mut state);
+        assert!(!state.auto_selected);
+        assert_eq!(state.selected, 0);
+    }
+
+    #[test]
+    fn enter_on_auto_launches_auto_unless_it_is_disabled() {
+        let mut state = launcher_with_auto(&["a", "b"], Some("b"));
+        state.auto_selected = true;
+        assert!(matches!(
+            launcher_keys(Key::Enter, &mut state),
+            LauncherAction::LaunchAuto
+        ));
+
+        let mut disabled = launcher_with_auto(&["a", "b"], None);
+        disabled.auto_selected = true;
+        assert!(matches!(launcher_keys(Key::Enter, &mut disabled), LauncherAction::None));
+    }
+
+    #[test]
+    fn zero_launches_auto_and_the_digits_keep_their_profiles() {
+        let mut state = launcher_with_auto(&["a", "b"], Some("a"));
+        assert!(matches!(
+            launcher_keys(Key::Num0, &mut state),
+            LauncherAction::LaunchAuto
+        ));
+        assert!(matches!(
+            launcher_keys(Key::Num1, &mut state),
+            LauncherAction::Launch(0)
+        ));
+
+        let mut disabled = launcher_with_auto(&["a", "b"], None);
+        assert!(matches!(launcher_keys(Key::Num0, &mut disabled), LauncherAction::None));
+        let mut without = launcher_with(&["a", "b"], 0);
+        assert!(matches!(launcher_keys(Key::Num0, &mut without), LauncherAction::None));
     }
 }

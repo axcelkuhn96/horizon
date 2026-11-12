@@ -486,3 +486,22 @@ fn a_snapshot_invalidates_launcher_rows_without_asking_for_another_profile_sync(
     );
     assert!(!hub.receive_usage_snapshot(), "no poller in tests: nothing to receive");
 }
+
+#[test]
+fn a_snapshot_crossing_a_weekly_threshold_queues_one_alert_toast() {
+    let weekly = |pct: f32| {
+        let mut entry = usage("a", None, None, Some(pct));
+        entry.seven_day.resets_at = Some("2099-01-01T00:00:00Z".to_owned());
+        vec![entry]
+    };
+    let mut hub = HubState::default();
+    hub.sync_usage_profiles(vec![profile("a")], &Context::default());
+
+    hub.apply_usage_snapshot(weekly(60.0));
+    hub.apply_usage_snapshot(weekly(81.0));
+    hub.apply_usage_snapshot(weekly(83.0));
+
+    let toasts = hub.toasts.drain_visible(Instant::now());
+    assert_eq!(toasts.len(), 1);
+    assert!(toasts[0].text.starts_with("a at 81% of the weekly limit"));
+}

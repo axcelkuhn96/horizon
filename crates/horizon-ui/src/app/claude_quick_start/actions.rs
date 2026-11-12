@@ -8,6 +8,7 @@ use horizon_core::link::{LinkRequest, LinkResponse};
 use horizon_core::{PanelId, PanelKind, PromptScope};
 
 use crate::app::HorizonApp;
+use crate::app::claude_auto::MIN_PROFILES_FOR_AUTO;
 use crate::app::claude_launcher::{RowUsage, claude_profile_names, find_profile_preset, is_profile_preset};
 use crate::app::hub_ui;
 use crate::theme;
@@ -51,13 +52,14 @@ impl HorizonApp {
     }
 
     fn build_quick_rows(&mut self, names: Vec<String>) -> Vec<Row> {
+        let with_auto = names.len() >= MIN_PROFILES_FOR_AUTO;
         let accents: Vec<Color32> = self
             .hub
             .accent_slots(&names)
             .iter()
             .map(|slot| hub_ui::accent_color(*slot))
             .collect();
-        names
+        let mut rows: Vec<Row> = names
             .into_iter()
             .zip(accents)
             .map(|(name, accent)| {
@@ -65,7 +67,11 @@ impl HorizonApp {
                 let email = self.hub.usage.account_email(&name);
                 Row::new(name, accent, email, &usage)
             })
-            .collect()
+            .collect();
+        if with_auto {
+            rows.insert(0, Row::auto(&self.auto_choice()));
+        }
+        rows
     }
 
     /// One row per saved prompt of `panel_id`'s workspace: the workspace ones in the accent colour,
@@ -92,6 +98,7 @@ impl HorizonApp {
                     prompt.scope.label(),
                     crate::app::prompts::first_line(&prompt.text)
                 ),
+                auto: false,
             })
             .collect()
     }
@@ -121,7 +128,7 @@ impl HorizonApp {
             None => return,
             Some(expanded) => (
                 match expanded.stage {
-                    Stage::Modes { profile } => expanded.rows.get(profile).map(|row| row.name.clone()),
+                    Stage::Modes { profile } => expanded.rows.get(profile).map(|row| (row.name.clone(), row.auto)),
                     Stage::Collapsed | Stage::Profiles | Stage::Prompts | Stage::PromptModes { .. } => None,
                 },
                 // The prompt pages list no profiles, so a usage refresh must not close them.
@@ -133,8 +140,9 @@ impl HorizonApp {
             self.hub.quick_start.expanded = None;
             return;
         }
-        let remembered = current.and_then(|current| names.iter().position(|name| *name == current));
         let rows = self.build_quick_rows(names);
+        let remembered =
+            current.and_then(|(name, auto)| rows.iter().position(|row| row.name == name && row.auto == auto));
         if let Some(expanded) = self.hub.quick_start.expanded.as_mut() {
             let stage =
                 prompt_stage.unwrap_or_else(|| remembered.map_or(Stage::Profiles, |profile| Stage::Modes { profile }));
@@ -177,6 +185,16 @@ impl HorizonApp {
         else {
             return;
         };
+        if let StripEvent::Pick(index) = event
+            && expanded.stage == Stage::Profiles
+            && expanded.rows.get(index).is_some_and(|row| row.auto && row.dim)
+        {
+            // Auto with nothing to pick: say so now instead of after the mode page.
+            self.hub
+                .quick_start
+                .show_failure(panel_id, StartFailure::NoAccount, Instant::now());
+            return;
+        }
         let (next, request, inserted) = match expanded.stage.apply_prompts(event, expanded.prompts.len()) {
             Some((next, insert)) => (next, None, insert),
             None => {
@@ -184,8 +202,9 @@ impl HorizonApp {
                 (next, request, None)
             }
         };
-        let started = request
-            .and_then(|StartRequest { profile, mode }| expanded.rows.get(profile).map(|row| (row.name.clone(), mode)));
+        let started = request.and_then(|StartRequest { profile, mode }| {
+            expanded.rows.get(profile).map(|row| (row.name.clone(), row.auto, mode))
+        });
         let typed = inserted
             .and_then(|PromptInsert { prompt, send }| expanded.prompts.get(prompt).map(|row| (row.name.clone(), send)));
         expanded.stage = next;
@@ -195,11 +214,19 @@ impl HorizonApp {
         if let Some((name, send)) = typed {
             self.insert_prompt_named(ctx, panel_id, &name, send);
         }
-        if let Some((name, mode)) = started
-            && let Err(failure) = self.run_claude_quick_start(ctx, panel_id, &name, mode)
-        {
-            tracing::warn!(profile = %name, ?failure, "quick start did not run");
-            self.hub.quick_start.show_failure(panel_id, failure, Instant::now());
+        if let Some((name, auto, mode)) = started {
+            // Auto is resolved now, from the usage as it is at this moment.
+            let target = if auto {
+                self.current_auto_pick()
+                    .map(|pick| pick.name)
+                    .ok_or(StartFailure::NoAccount)
+            } else {
+                Ok(name.clone())
+            };
+            if let Err(failure) = target.and_then(|target| self.run_claude_quick_start(ctx, panel_id, &target, mode)) {
+                tracing::warn!(profile = %name, ?failure, "quick start did not run");
+                self.hub.quick_start.show_failure(panel_id, failure, Instant::now());
+            }
         }
     }
 
@@ -248,5 +275,51 @@ impl HorizonApp {
         self.board.focus(panel_id);
         ctx.request_repaint();
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::app::claude_auto::AutoChoice;
+    use crate::app::test_support::test_app;
+
+    use super::*;
+
+    fn auto_row(target: Option<&str>) -> Row {
+        Row::auto(&AutoChoice {
+            target: target.map(str::to_owned),
+            detail: target.map_or_else(|| "No account available".to_owned(), |name| format!("\u{2192} {name}")),
+            low: false,
+            tooltip: String::new(),
+        })
+    }
+
+    fn expand(app: &mut HorizonApp, rows: Vec<Row>) {
+        app.hub.quick_start.expanded = Some(Expanded::new(PanelId(1), rows, app.hub.rows_version));
+    }
+
+    #[test]
+    fn picking_a_dimmed_auto_chip_refuses_at_once_and_keeps_the_profile_page() {
+        let mut app = test_app();
+        expand(&mut app, vec![auto_row(None)]);
+
+        app.apply_quick_start_event(&Context::default(), PanelId(1), Stage::Profiles, StripEvent::Pick(0));
+
+        let notice = app.hub.quick_start.notice_for(PanelId(1), Instant::now());
+        assert_eq!(notice.map(|(failure, _)| failure), Some(StartFailure::NoAccount));
+        let expanded = app.hub.quick_start.expanded.as_ref().expect("strip stays open");
+        assert_eq!(expanded.stage, Stage::Profiles);
+    }
+
+    #[test]
+    fn picking_an_available_auto_chip_opens_the_mode_page() {
+        let mut app = test_app();
+        expand(&mut app, vec![auto_row(Some("conta2"))]);
+
+        app.apply_quick_start_event(&Context::default(), PanelId(1), Stage::Profiles, StripEvent::Pick(0));
+
+        assert_eq!(app.hub.quick_start.notice_for(PanelId(1), Instant::now()), None);
+        let expanded = app.hub.quick_start.expanded.as_ref().expect("strip stays open");
+        assert_eq!(expanded.stage, Stage::Modes { profile: 0 });
     }
 }

@@ -23,6 +23,8 @@ use horizon_core::git_overview::{
 use horizon_core::{PanelKind, PresetConfig, WorkspaceId};
 
 use super::HorizonApp;
+use super::claude_auto::{AUTO_NAME, MIN_PROFILES_FOR_AUTO};
+use super::claude_launcher::{claude_profile_names, find_profile_preset};
 use super::hub_ui;
 use crate::theme;
 use cleanup_list::{CleanupDialog, CleanupOutcome, CleanupPhase};
@@ -153,6 +155,24 @@ struct AccountChoice {
     label: String,
     /// Accent slot of the profile; `None` for a plain Claude preset.
     slot: Option<usize>,
+    /// The "Auto" entry: the account is picked from the usage at create time, `preset` is unused.
+    auto: bool,
+}
+
+/// Prepends the Auto choice when `profile_count` profiles make it worth offering.
+fn with_auto_choice(mut accounts: Vec<AccountChoice>, profile_count: usize) -> Vec<AccountChoice> {
+    if profile_count >= MIN_PROFILES_FOR_AUTO && !accounts.is_empty() {
+        accounts.insert(
+            0,
+            AccountChoice {
+                preset: 0,
+                label: AUTO_NAME.to_owned(),
+                slot: None,
+                auto: true,
+            },
+        );
+    }
+    accounts
 }
 
 /// Derived `Claude · <profile>` presets, or the plain Claude presets when none exist.
@@ -175,6 +195,7 @@ fn account_choices(presets: &[PresetConfig]) -> Vec<AccountChoice> {
                 preset,
                 label: config.name.clone(),
                 slot: None,
+                auto: false,
             })
             .collect();
     }
@@ -187,6 +208,7 @@ fn account_choices(presets: &[PresetConfig]) -> Vec<AccountChoice> {
             preset: *preset,
             label: (*alias).to_owned(),
             slot: Some(slot),
+            auto: false,
         })
         .collect()
 }
@@ -255,13 +277,17 @@ impl HorizonApp {
             .workspace(workspace)
             .map(|found| (found.name.clone(), found.cwd.clone()))
             .unwrap_or_default();
-        let accounts = account_choices(&self.presets);
+        let accounts = with_auto_choice(
+            account_choices(&self.presets),
+            claude_profile_names(&self.presets).len(),
+        );
+        // Without a remembered account the first real profile is preselected, not Auto.
         let account = self
             .hub
             .last_launched_profile
             .as_deref()
-            .and_then(|last| accounts.iter().position(|choice| choice.label == last))
-            .unwrap_or(0);
+            .and_then(|last| accounts.iter().position(|choice| !choice.auto && choice.label == last))
+            .unwrap_or_else(|| usize::from(accounts.first().is_some_and(|choice| choice.auto)));
         let mut dialog = NewWorktreeDialog::new(
             workspace,
             workspace_name,
@@ -464,7 +490,24 @@ impl HorizonApp {
         dialog: &NewWorktreeDialog,
         created: &Created,
     ) -> (String, bool) {
-        let Some(preset) = dialog.chosen_preset(&self.presets) else {
+        let preset = if dialog.auto_chosen() {
+            // Auto is resolved now, from the usage as it is at this moment.
+            let picked = self
+                .current_auto_pick()
+                .and_then(|pick| find_profile_preset(&self.presets, &pick.name).cloned());
+            let Some(preset) = picked else {
+                return (
+                    format!(
+                        "Created worktree {}, but no Claude account is available for Auto",
+                        created.branch
+                    ),
+                    true,
+                );
+            };
+            preset
+        } else if let Some(preset) = dialog.chosen_preset(&self.presets) {
+            preset
+        } else {
             return (
                 format!("Created worktree {} (no Claude preset configured)", created.branch),
                 false,
@@ -720,7 +763,7 @@ mod tests {
 
     use horizon_core::{PanelKind, PanelResume, PresetConfig};
 
-    use super::{AccountChoice, account_choices, capitalized, drain_capped, short_display_path};
+    use super::{AccountChoice, account_choices, capitalized, drain_capped, short_display_path, with_auto_choice};
 
     fn preset(name: &str, alias: Option<&str>, kind: PanelKind) -> PresetConfig {
         PresetConfig {
@@ -766,10 +809,30 @@ mod tests {
             [AccountChoice {
                 preset: 1,
                 label: "Claude Code".to_owned(),
-                slot: None
+                slot: None,
+                auto: false
             }]
         );
         assert!(account_choices(&presets[..1]).is_empty());
+    }
+
+    #[test]
+    fn auto_is_offered_first_from_two_profiles_and_never_without_accounts() {
+        let presets = vec![
+            preset("Claude \u{b7} conta1", Some("conta1"), PanelKind::Claude),
+            preset("Claude \u{b7} conta2", Some("conta2"), PanelKind::Claude),
+        ];
+
+        let two = with_auto_choice(account_choices(&presets), 2);
+        assert_eq!(
+            two.iter().map(|a| a.label.as_str()).collect::<Vec<_>>(),
+            ["Auto", "conta1", "conta2"]
+        );
+        assert!(two[0].auto && two[1..].iter().all(|a| !a.auto));
+
+        let one = with_auto_choice(account_choices(&presets[..1]), 1);
+        assert_eq!(one.len(), 1);
+        assert!(with_auto_choice(Vec::new(), 2).is_empty());
     }
 
     #[test]

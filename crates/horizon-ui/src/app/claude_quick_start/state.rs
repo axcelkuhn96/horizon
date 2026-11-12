@@ -8,8 +8,10 @@ use std::time::{Duration, Instant};
 use egui::{Color32, Painter};
 use horizon_core::PanelId;
 
+use crate::app::claude_auto::{AUTO_NAME, AutoChoice};
 use crate::app::claude_launcher::RowUsage;
 use crate::app::usage_chips::account_id;
+use crate::theme;
 
 use super::placement::{StripLayout, build_layout, launch_caption};
 use super::titlebar::BusyCache;
@@ -30,6 +32,8 @@ pub(super) struct Row {
     pub(super) dim: bool,
     /// Hover text: the account and the 7d usage (the 5h window is never shown here).
     pub(super) tooltip: String,
+    /// The "Auto" entry: it stands for whichever profile has the most quota left when it is used.
+    pub(super) auto: bool,
 }
 
 impl Row {
@@ -59,6 +63,28 @@ impl Row {
             name,
             accent,
             dim: usage.problem.is_some(),
+            auto: false,
+        }
+    }
+
+    /// The "Auto" chip: dimmed (and refused on click) while no account is usable.
+    pub(super) fn auto(choice: &AutoChoice) -> Self {
+        let account = choice.target.as_deref().map(|target| {
+            let target: String = target.chars().filter(|ch| !ch.is_control()).collect();
+            let mut text = format!("\u{2192} {target}");
+            if text.chars().count() > ACCOUNT_ID_MAX_CHARS {
+                text = text.chars().take(ACCOUNT_ID_MAX_CHARS - 1).collect();
+                text.push('\u{2026}');
+            }
+            text
+        });
+        Self {
+            tooltip: format!("{AUTO_NAME}\n{}\n{}", choice.detail, choice.tooltip),
+            account,
+            name: AUTO_NAME.to_owned(),
+            accent: theme::ACCENT(),
+            dim: !choice.available(),
+            auto: true,
         }
     }
 }
@@ -370,5 +396,36 @@ mod tests {
         assert_eq!(ui.notice_for(PanelId(2), now), None);
         assert_eq!(ui.notice_for(PanelId(1), now + NOTICE_TTL), None);
         assert!(ui.notice.is_none(), "an expired notice is dropped");
+    }
+
+    fn choice(target: Option<&str>, detail: &str) -> AutoChoice {
+        AutoChoice {
+            target: target.map(str::to_owned),
+            detail: detail.to_owned(),
+            low: false,
+            tooltip: "Picks the account with the most weekly quota left".to_owned(),
+        }
+    }
+
+    #[test]
+    fn the_auto_chip_names_the_pick_and_is_flagged() {
+        let row = Row::auto(&choice(Some("conta2"), "\u{2192} conta2 \u{b7} 66% left"));
+
+        assert!(row.auto && !row.dim);
+        assert_eq!(row.name, "Auto");
+        assert_eq!(row.account.as_deref(), Some("\u{2192} conta2"));
+        assert!(row.tooltip.starts_with("Auto\n\u{2192} conta2 \u{b7} 66% left\n"));
+        assert!(!self::row(None, None).auto);
+    }
+
+    #[test]
+    fn the_auto_chip_is_dim_without_a_pick_and_clips_long_names() {
+        let none = Row::auto(&choice(None, "No account available"));
+        assert!(none.dim && none.account.is_none());
+
+        let long = Row::auto(&choice(Some("a-very-long-profile-name"), "x"));
+        let account = long.account.expect("account text");
+        assert_eq!(account.chars().count(), ACCOUNT_ID_MAX_CHARS);
+        assert!(account.ends_with('\u{2026}'));
     }
 }
