@@ -14,7 +14,7 @@ use horizon_core::{PanelKind, PresetConfig};
 
 use super::HorizonApp;
 use super::hub_ui::{self, ModalPlacement, Severity};
-use super::usage_chips::{api_severity, has_five_hour, severity_for, window_text};
+use super::usage_chips::{ShownWindows, api_severity, severity_for, window_text};
 use crate::theme;
 
 const MODAL_WIDTH: f32 = 480.0;
@@ -146,6 +146,9 @@ enum LauncherAction {
 /// One `5h` / `7d` line of a row's usage column, formatted when the rows are built.
 pub(super) struct UsageLine {
     label: &'static str,
+    /// `false` when the account has no such limit (the API answered without a percentage):
+    /// the line is not drawn at all.
+    shown: bool,
     /// Used fraction `0..=1`; `None` draws no bar.
     frac: Option<f32>,
     /// `42%`, or an em dash.
@@ -180,17 +183,17 @@ impl LoginProblem {
 pub(super) struct RowUsage {
     pub(super) lines: [UsageLine; 2],
     pub(super) problem: Option<LoginProblem>,
-    /// `false` when the API sent no 5h window: only the 7d line is drawn.
-    show_five_hour: bool,
 }
 
 impl RowUsage {
     pub(super) fn new(usage: Option<&ProfileUsage>) -> Self {
+        let shown = ShownWindows::of(usage);
         let line = |label, five_hour: bool| {
             let window = usage.map(|usage| if five_hour { &usage.five_hour } else { &usage.seven_day });
             let percent = window.and_then(|window| window.percent);
             UsageLine {
                 label,
+                shown: shown.shows(five_hour),
                 frac: percent.map(|percent| percent / 100.0),
                 text: window_text(window),
                 severity: severity_for(percent, usage.and_then(|usage| api_severity(usage, five_hour))),
@@ -198,7 +201,6 @@ impl RowUsage {
         };
         Self {
             lines: [line("5h", true), line("7d", false)],
-            show_five_hour: has_five_hour(usage),
             problem: usage.and_then(|usage| match usage.state {
                 UsageState::Expired => Some(LoginProblem::Expired),
                 UsageState::Missing => Some(LoginProblem::Missing),
@@ -645,24 +647,20 @@ fn paint_row(painter: &Painter, rect: Rect, index: usize, row: &mut LauncherRow,
     paint_usage_column(painter, rect, &row.usage);
 }
 
-/// Right column: `5h` / `7d` lines (only `7d` when the API has no 5h window), each a caption, a 56x4 bar and the percentage in the
+/// Right column: `5h` / `7d` lines (a window the account does not have is left out), each a caption, a 56x4 bar and the percentage in the
 /// severity color. Without data both read as an em dash and no bar is drawn; an expired or
-/// missing login keeps its last known value on faded bars.
+/// missing login keeps its last known value on faded bars. A window the account does not have
+/// is left out, and a lone line sits on the row's middle.
 fn paint_usage_column(painter: &Painter, rect: Rect, usage: &RowUsage) {
-    // Line index and vertical offset; the lone 7d line is centered.
-    const BOTH: [(usize, f32); 2] = [(0, -10.0), (1, 10.0)];
-    const SEVEN_ONLY: [(usize, f32); 1] = [(1, 0.0)];
     let group_width = USAGE_LABEL_WIDTH + USAGE_BAR_SIZE.x + USAGE_GAP + USAGE_PCT_WIDTH;
     let left = rect.right() - ROW_PADDING_X - group_width;
     let mut bar_painter = painter.clone();
     if usage.problem.is_some() {
         bar_painter.multiply_opacity(UNUSABLE_BAR_OPACITY);
     }
-    let slots: &[(usize, f32)] = if usage.show_five_hour { &BOTH } else { &SEVEN_ONLY };
-    for (index, offset) in slots {
-        let Some(line) = usage.lines.get(*index) else {
-            continue;
-        };
+    let visible: Vec<&UsageLine> = usage.lines.iter().filter(|line| line.shown).collect();
+    let offsets: &[f32] = if visible.len() == 1 { &[0.0] } else { &[-10.0, 10.0] };
+    for (line, offset) in visible.into_iter().zip(offsets.iter().copied()) {
         let y = rect.center().y + offset;
         painter.text(
             Pos2::new(left, y),
@@ -887,7 +885,21 @@ mod tests {
                 .iter()
                 .all(|line| line.frac.is_none() && line.text == "\u{2014}")
         );
+        assert!(usage.lines.iter().all(|line| line.shown));
         assert_eq!(usage.problem, None);
+    }
+
+    #[test]
+    fn row_usage_hides_a_window_the_api_returned_without_a_percentage() {
+        let snapshot = usage_with(UsageState::Ok, None, Some(12.0), None);
+
+        let usage = RowUsage::new(Some(&snapshot));
+
+        assert_eq!(usage.lines.each_ref().map(|line| line.shown), [false, true]);
+        assert_eq!(usage.lines[1].text, "12%");
+        let mut never = usage_with(UsageState::Ok, None, None, None);
+        never.fetched_at_ms = None;
+        assert!(RowUsage::new(Some(&never)).lines.iter().all(|line| line.shown));
     }
 
     #[test]
@@ -902,19 +914,6 @@ mod tests {
         assert_eq!(usage.lines[1].text, "91%");
         assert_eq!(usage.lines[1].severity, Severity::Critical);
         assert_eq!(usage.problem, None);
-    }
-
-    #[test]
-    fn row_usage_hides_the_five_hour_line_when_the_api_has_no_such_window() {
-        let null_five = usage_with(UsageState::Ok, None, Some(12.0), None);
-        let with_five = usage_with(UsageState::Ok, Some(5.0), Some(12.0), None);
-
-        assert!(!RowUsage::new(Some(&null_five)).show_five_hour);
-        assert!(RowUsage::new(Some(&with_five)).show_five_hour);
-        assert!(
-            RowUsage::new(None).show_five_hour,
-            "unknown usage keeps both placeholders"
-        );
     }
 
     #[test]

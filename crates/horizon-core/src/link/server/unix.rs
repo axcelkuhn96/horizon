@@ -3,7 +3,7 @@ use std::io::{self, Read, Write};
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -20,7 +20,14 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
 const REPLY_POLL: Duration = Duration::from_millis(50);
+/// Connections serving a request at once. Connections parked on an `ask` do not count
+/// (see [`MAX_HELD_ASKS`]), so waiting asks cannot starve `list`/`send`/`read`.
 const MAX_CONNECTIONS: usize = 16;
+/// Extra connections that may sit waiting for an ask reply (matches the ask table's cap).
+const MAX_HELD_ASKS: usize = crate::link::MAX_ASKS_TOTAL;
+/// Slack past an ask's own timeout before its connection gives up by itself, so the UI's
+/// timeout error normally wins.
+const ASK_WAIT_SLACK: Duration = Duration::from_secs(2);
 const DRAIN_LIMIT: usize = 4 * MAX_REQUEST_BYTES;
 /// Whole-drain deadline after the answer is written, so a client that keeps sending
 /// cannot hold a connection slot (nor block shutdown).
@@ -143,6 +150,10 @@ fn is_stale(path: &Path) -> bool {
 }
 
 /// Removes `<pid>.sock` files of dead instances from `dir`.
+///
+/// This is the only cleanup for an instance killed by `SIGTERM`/`SIGKILL`: Horizon installs no
+/// signal handler (no signal crate, `forbid(unsafe_code)`), so [`LinkServer`]'s `Drop` never
+/// runs there and the next start sweeps the leftover.
 fn sweep_stale_sockets(dir: &Path) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
@@ -168,6 +179,7 @@ fn accept_loop(
     waker: Option<&Waker>,
 ) {
     let mut workers: Vec<JoinHandle<()>> = Vec::new();
+    let held = Arc::new(AtomicUsize::new(0));
     while !stop.load(Ordering::Relaxed) {
         let (finished, running): (Vec<_>, Vec<_>) = workers.into_iter().partition(JoinHandle::is_finished);
         workers = running;
@@ -179,7 +191,10 @@ fn accept_loop(
                 if stream.set_nonblocking(false).is_err() {
                     continue;
                 }
-                if workers.len() >= MAX_CONNECTIONS {
+                let parked = held.load(Ordering::Acquire);
+                if workers.len().saturating_sub(parked) >= MAX_CONNECTIONS
+                    || workers.len() >= MAX_CONNECTIONS + MAX_HELD_ASKS
+                {
                     let busy = error_response(&LinkError::BadRequest("server busy".to_owned()));
                     write_response(&mut stream, &busy);
                     continue;
@@ -187,9 +202,10 @@ fn accept_loop(
                 let sender = sender.clone();
                 let stop = Arc::clone(stop);
                 let waker = waker.cloned();
+                let held = Arc::clone(&held);
                 match thread::Builder::new()
                     .name("horizon-link-conn".to_owned())
-                    .spawn(move || handle_connection(stream, &sender, &stop, waker.as_ref()))
+                    .spawn(move || handle_connection(stream, &sender, &stop, waker.as_ref(), &held))
                 {
                     Ok(worker) => workers.push(worker),
                     Err(error) => tracing::warn!("link: cannot spawn connection thread: {error}"),
@@ -219,11 +235,12 @@ fn handle_connection(
     sender: &mpsc::Sender<PendingRequest>,
     stop: &AtomicBool,
     waker: Option<&Waker>,
+    held: &AtomicUsize,
 ) {
     let response = match read_request_line(&mut stream, stop) {
         Ok(None) => return,
         Ok(Some(line)) => match parse_request_line(&line) {
-            Ok(request) => forward(request, sender, stop, waker),
+            Ok(request) => forward(request, &stream, sender, stop, waker, held),
             Err(error) => error_response(&error),
         },
         Err(error) => error_response(&error),
@@ -280,13 +297,69 @@ fn read_request_line(stream: &mut UnixStream, stop: &AtomicBool) -> Result<Optio
     Ok((terminated || !line.is_empty()).then_some(line))
 }
 
-/// Hands the request to the UI thread and waits (bounded) for its answer.
+/// Counts a connection as parked on an ask for as long as it lives.
+struct HeldGuard<'a>(Option<&'a AtomicUsize>);
+
+impl<'a> HeldGuard<'a> {
+    fn new(held: &'a AtomicUsize, parked: bool) -> Self {
+        if parked {
+            held.fetch_add(1, Ordering::AcqRel);
+        }
+        Self(parked.then_some(held))
+    }
+}
+
+impl Drop for HeldGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(held) = self.0 {
+            held.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+}
+
+/// How long the connection waits for the UI's answer: a short bound for ordinary requests,
+/// the ask's own timeout (plus slack) for an `ask`, which the UI answers only on reply.
+fn reply_wait(request: &crate::link::LinkRequest) -> Duration {
+    match request {
+        crate::link::LinkRequest::Ask { timeout_secs, .. } => Duration::from_secs(*timeout_secs) + ASK_WAIT_SLACK,
+        _ => REPLY_TIMEOUT,
+    }
+}
+
+/// True once the peer closed (or reset) its end of `stream`. Meant for the connection of a
+/// waiting `ask`: after its request line a client sends nothing more, so a read that
+/// returns EOF means it went away. (A client that half-closes its write side after the
+/// request would look gone too; the `horizon link` command never does.)
+fn peer_gone(stream: &UnixStream) -> bool {
+    if stream.set_nonblocking(true).is_err() {
+        return false;
+    }
+    let mut reader = stream;
+    let mut scratch = [0_u8; 64];
+    let gone = match reader.read(&mut scratch) {
+        Ok(read) => read == 0,
+        Err(error) => !matches!(error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted),
+    };
+    let _ = stream.set_nonblocking(false);
+    gone
+}
+
+/// Hands the request to the UI thread and waits (bounded) for its answer. While an `ask`
+/// waits, a client that disappears marks the request abandoned so the UI ends the ask.
 fn forward(
     request: crate::link::LinkRequest,
+    stream: &UnixStream,
     sender: &mpsc::Sender<PendingRequest>,
     stop: &AtomicBool,
     waker: Option<&Waker>,
+    held: &AtomicUsize,
 ) -> LinkResponse {
+    let wait = reply_wait(&request);
+    let ask_secs = match &request {
+        crate::link::LinkRequest::Ask { timeout_secs, .. } => Some(*timeout_secs),
+        _ => None,
+    };
+    let _parked = HeldGuard::new(held, matches!(request, crate::link::LinkRequest::Ask { .. }));
     let (reply, answer) = mpsc::channel();
     let abandoned = Arc::new(AtomicBool::new(false));
     let pending = PendingRequest {
@@ -300,17 +373,43 @@ fn forward(
     if let Some(waker) = waker {
         waker();
     }
-    let deadline = Instant::now() + REPLY_TIMEOUT;
+    let deadline = Instant::now() + wait;
+    let mut dropped_by_ui = false;
     while Instant::now() < deadline && !stop.load(Ordering::Relaxed) {
         match answer.recv_timeout(REPLY_POLL) {
             Ok(response) => return response,
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if ask_secs.is_some() && peer_gone(stream) {
+                    // Nobody left to tell; the UI ends the ask on its next pass.
+                    abandoned.store(true, Ordering::Release);
+                    if let Some(waker) = waker {
+                        waker();
+                    }
+                    return error_response(&LinkError::AskCancelled);
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                dropped_by_ui = true;
+                break;
+            }
         }
     }
     // The client is about to be told "no answer": the UI side must not run it later.
     abandoned.store(true, Ordering::Release);
-    error_response(&LinkError::Io("no answer from Horizon".to_owned()))
+    if ask_secs.is_some()
+        && let Some(waker) = waker
+    {
+        // An idle UI would otherwise keep "asking..." until its next repaint.
+        waker();
+    }
+    match ask_secs {
+        // Horizon is closing (or dropped the ask unanswered): not a timeout of the asked panel.
+        Some(_) if dropped_by_ui || stop.load(Ordering::Relaxed) => {
+            error_response(&LinkError::Io("Horizon is closing; the ask was cancelled".to_owned()))
+        }
+        Some(secs) => error_response(&LinkError::AskTimeout(secs)),
+        None => error_response(&LinkError::Io("no answer from Horizon".to_owned())),
+    }
 }
 
 fn write_response(stream: &mut UnixStream, response: &LinkResponse) {
@@ -417,6 +516,27 @@ mod tests {
     }
 
     #[test]
+    fn start_sweeps_sockets_left_by_dead_instances_only() {
+        let (_guard, path) = temp_socket("6.sock");
+        let dir = path.parent().expect("parent").to_path_buf();
+        fs::create_dir_all(&dir).expect("mkdir");
+        // A killed instance leaves its socket behind: the listener is gone, the file stays.
+        drop(UnixListener::bind(dir.join("99999.sock")).expect("bind dead"));
+        let live = UnixListener::bind(dir.join("88888.sock")).expect("bind live");
+        // Not `<pid>.sock`: left alone even when nobody listens.
+        drop(UnixListener::bind(dir.join("notes.sock")).expect("bind other"));
+        fs::write(dir.join("77777.sock"), b"regular file").expect("write file");
+
+        let _server = LinkServer::start(path).expect("start");
+
+        assert!(!dir.join("99999.sock").exists(), "dead pid socket is swept");
+        assert!(dir.join("88888.sock").exists(), "live socket is kept");
+        assert!(dir.join("notes.sock").exists(), "non-pid names are kept");
+        assert!(dir.join("77777.sock").exists(), "regular files are kept");
+        drop(live);
+    }
+
+    #[test]
     fn server_rejects_oversized_line() {
         let (_guard, path) = temp_socket("4.sock");
         let _server = LinkServer::start(path.clone()).expect("start");
@@ -459,7 +579,7 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 0, "rejected requests never reach the UI");
 
         let client_path = path.clone();
-        let client = thread::spawn(move || exchange(&client_path, b"{\"v\":1,\"op\":\"list\"}\n"));
+        let client = thread::spawn(move || exchange(&client_path, b"{\"v\":2,\"op\":\"list\"}\n"));
         let deadline = Instant::now() + Duration::from_secs(5);
         while calls.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(5));
@@ -484,7 +604,7 @@ mod tests {
         }
 
         let client_path = path.clone();
-        let client = thread::spawn(move || exchange(&client_path, b"{\"v\":1,\"op\":\"list\"}\n"));
+        let client = thread::spawn(move || exchange(&client_path, b"{\"v\":2,\"op\":\"list\"}\n"));
         let deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < deadline {
             if let Some(pending) = server.try_recv() {
@@ -574,7 +694,7 @@ mod tests {
         let (_guard, path) = temp_socket("10.sock");
         let server = LinkServer::start(path.clone()).expect("start");
         let client_path = path.clone();
-        let client = thread::spawn(move || exchange(&client_path, b"{\"v\":1,\"op\":\"list\"}\n"));
+        let client = thread::spawn(move || exchange(&client_path, b"{\"v\":2,\"op\":\"list\"}\n"));
         let deadline = Instant::now() + Duration::from_secs(5);
         let pending = loop {
             if let Some(pending) = server.try_recv() {
@@ -610,6 +730,157 @@ mod tests {
             other @ LinkResponse::Ok(_) => panic!("expected busy error, got {other:?}"),
         }
         drop(holders);
+    }
+
+    #[test]
+    fn server_limits_concurrent_connections_but_parked_asks_do_not_count() {
+        let (_guard, path) = temp_socket("ask-cap.sock");
+        let server = LinkServer::start(path.clone()).expect("start");
+        let ask_path = path.clone();
+        let ask = thread::spawn(move || {
+            exchange(
+                &ask_path,
+                b"{\"v\":2,\"op\":\"ask\",\"from\":\"1\",\"target\":\"2\",\"text\":\"q\",\"timeout_secs\":5}\n",
+            )
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let pending = loop {
+            if let Some(pending) = server.try_recv() {
+                break pending;
+            }
+            assert!(Instant::now() < deadline, "ask never arrived");
+            thread::sleep(Duration::from_millis(5));
+        };
+        // The ask is parked: MAX_CONNECTIONS idle holders still all get a slot.
+        let holders: Vec<UnixStream> = (0..MAX_CONNECTIONS)
+            .map(|_| UnixStream::connect(&path).expect("connect"))
+            .collect();
+        thread::sleep(Duration::from_millis(200));
+        // The last holder was accepted: it got no "busy" line.
+        let mut last = holders.last().expect("holder").try_clone().expect("clone");
+        last.set_read_timeout(Some(Duration::from_millis(300)))
+            .expect("timeout");
+        let mut byte = [0_u8; 1];
+        let read = io::Read::read(&mut last, &mut byte);
+        assert!(
+            matches!(&read, Err(error) if matches!(error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut)),
+            "the holder behind a parked ask was refused: {read:?}"
+        );
+        let extra = UnixStream::connect(&path).expect("connect");
+        extra.set_read_timeout(Some(Duration::from_secs(2))).expect("timeout");
+        let mut reply = String::new();
+        std::io::BufRead::read_line(&mut BufReader::new(&extra), &mut reply).expect("busy reply");
+        assert!(reply.contains("server busy"), "{reply}");
+        drop(holders);
+        pending
+            .reply
+            .send(LinkResponse::Ok(LinkOk::Text("done".to_owned())))
+            .expect("answer");
+        assert_eq!(
+            ask.join().expect("ask client"),
+            LinkResponse::Ok(LinkOk::Text("done".to_owned()))
+        );
+    }
+
+    #[test]
+    fn ask_connection_that_gets_no_answer_reports_a_timeout() {
+        let (_guard, path) = temp_socket("ask-timeout.sock");
+        let server = LinkServer::start(path.clone()).expect("start");
+        let line = b"{\"v\":2,\"op\":\"ask\",\"from\":\"1\",\"target\":\"2\",\"text\":\"q\",\"timeout_secs\":5}\n";
+        let client_path = path.clone();
+        let client = thread::spawn(move || exchange(&client_path, line));
+        let started = Instant::now();
+        let response = client.join().expect("client");
+        assert!(
+            matches!(
+                response,
+                LinkResponse::Err {
+                    code: LinkErrorCode::AskTimeout,
+                    ..
+                }
+            ),
+            "{response:?}"
+        );
+        assert!(
+            started.elapsed() >= Duration::from_secs(6),
+            "waited only {:?}",
+            started.elapsed()
+        );
+        let pending = server.try_recv().expect("the ask reached the UI side");
+        assert!(pending.is_abandoned());
+    }
+
+    const ASK_LINE: &[u8] =
+        b"{\"v\":2,\"op\":\"ask\",\"from\":\"1\",\"target\":\"2\",\"text\":\"q\",\"timeout_secs\":30}\n";
+
+    fn next_pending(server: &LinkServer) -> PendingRequest {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(pending) = server.try_recv() {
+                return pending;
+            }
+            assert!(Instant::now() < deadline, "request never arrived");
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn an_ask_whose_client_vanished_is_marked_abandoned() {
+        let (_guard, path) = temp_socket("ask-gone.sock");
+        let server = LinkServer::start(path.clone()).expect("start");
+        let mut stream = UnixStream::connect(&path).expect("connect");
+        stream.write_all(ASK_LINE).expect("send ask");
+        let pending = next_pending(&server);
+        thread::sleep(Duration::from_millis(200));
+        assert!(!pending.is_abandoned(), "the client is still waiting");
+        let flag = pending.abandoned_flag();
+
+        drop(stream);
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !flag.load(Ordering::Acquire) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(pending.is_abandoned(), "the vanished client was never noticed");
+    }
+
+    #[test]
+    fn an_ask_connection_reports_horizon_closing_not_a_timeout_on_shutdown() {
+        let (_guard, path) = temp_socket("ask-shutdown.sock");
+        let server = LinkServer::start(path.clone()).expect("start");
+        let client_path = path.clone();
+        let client = thread::spawn(move || exchange(&client_path, ASK_LINE));
+        let pending = next_pending(&server);
+
+        drop(server);
+
+        match client.join().expect("client") {
+            LinkResponse::Err { code, message } => {
+                assert_ne!(code, LinkErrorCode::AskTimeout, "{message}");
+                assert!(message.contains("Horizon is closing"), "{message}");
+            }
+            other @ LinkResponse::Ok(_) => panic!("expected an error, got {other:?}"),
+        }
+        assert!(pending.is_abandoned());
+    }
+
+    #[test]
+    fn an_ask_dropped_unanswered_by_the_ui_reports_horizon_closing() {
+        let (_guard, path) = temp_socket("ask-dropped.sock");
+        let server = LinkServer::start(path.clone()).expect("start");
+        let client_path = path.clone();
+        let client = thread::spawn(move || exchange(&client_path, ASK_LINE));
+        let pending = next_pending(&server);
+
+        drop(pending);
+
+        match client.join().expect("client") {
+            LinkResponse::Err { code, message } => {
+                assert_ne!(code, LinkErrorCode::AskTimeout, "{message}");
+                assert!(message.contains("Horizon is closing"), "{message}");
+            }
+            other @ LinkResponse::Ok(_) => panic!("expected an error, got {other:?}"),
+        }
     }
 
     #[test]

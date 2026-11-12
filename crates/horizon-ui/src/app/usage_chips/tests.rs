@@ -81,13 +81,34 @@ fn chip_label_without_email_omits_identifier() {
 }
 
 #[test]
-fn chip_label_dash_for_null_window() {
+fn chip_label_hides_a_window_the_api_returned_null() {
     let u = usage("claude2", None, None, Some(12.0));
 
     assert_eq!(chip_label(&u, false), "claude2  7d 12%");
+    assert_eq!(chip_label(&u, true), "claude2  7d 12%");
     let both = usage("claude2", None, None, None);
-    assert_eq!(chip_label(&both, true), "claude2  7d \u{2014}");
-    assert_eq!(chip_label(&both, false), "claude2  7d \u{2014}");
+    assert_eq!(chip_label(&both, true), "claude2");
+    assert_eq!(chip_label(&both, false), "claude2");
+    let (head, tail) = chip_label_parts("claude2", Some(&u), false);
+    assert_eq!((head.as_str(), tail.as_str()), ("claude2", "7d 12%"));
+}
+
+#[test]
+fn chip_label_keeps_dashes_before_the_first_fetch() {
+    let mut u = usage("claude2", None, None, None);
+    u.fetched_at_ms = None;
+
+    assert_eq!(chip_label(&u, false), "claude2  5h \u{2014}  7d \u{2014}");
+    assert_eq!(chip_label(&u, true), "claude2  7d \u{2014}");
+    assert_eq!(chip_label_parts("claude2", None, false).1, "5h \u{2014}  7d \u{2014}");
+}
+
+#[test]
+fn chip_label_expired_hides_missing_five_hour_but_keeps_the_marker() {
+    let mut u = usage("claude2", None, None, Some(12.0));
+    u.state = UsageState::Expired;
+
+    assert_eq!(chip_label(&u, false), "claude2  expired");
 }
 
 #[test]
@@ -133,9 +154,87 @@ fn widths_total_adds_gaps_and_compact_is_narrower() {
     assert!((widths.total(false, 1) - CHIP_FULL_ESTIMATE).abs() <= f32::EPSILON);
     assert!((widths.total(false, 3) - (3.0 * CHIP_FULL_ESTIMATE + 2.0 * CHIP_GAP)).abs() <= f32::EPSILON);
     assert!(widths.total(true, 3) < widths.total(false, 3));
-    assert!(full_chip_width(40.0, 40.0, None, true) <= 340.0);
-    assert!(compact_chip_width(40.0, 30.0, None) < full_chip_width(40.0, 40.0, None, true));
-    assert!(full_chip_width(40.0, 40.0, None, false) < full_chip_width(40.0, 40.0, None, true));
+    let both = ShownWindows::of(None);
+    assert!(full_chip_width(40.0, 40.0, None, both) <= 340.0);
+    assert!(compact_chip_width(40.0, 30.0, None, both) < full_chip_width(40.0, 40.0, None, both));
+}
+
+#[test]
+fn hidden_five_hour_window_frees_its_width() {
+    let both = ShownWindows::of(None);
+    let seven_only = ShownWindows {
+        five: false,
+        seven: true,
+    };
+    let none = ShownWindows {
+        five: false,
+        seven: false,
+    };
+
+    let freed = full_chip_width(40.0, 40.0, None, both) - full_chip_width(40.0, 40.0, None, seven_only);
+    assert!((freed - (SECTION_GAP + GROUP_WIDTH_FULL)).abs() <= f32::EPSILON);
+    // Compact never had a 5h group, so hiding it changes nothing there.
+    assert!(
+        (compact_chip_width(40.0, 30.0, None, both) - compact_chip_width(40.0, 30.0, None, seven_only)).abs()
+            <= f32::EPSILON
+    );
+    // A status pill takes the 7d slot whatever the windows say.
+    assert!(compact_chip_width(40.0, 30.0, Some(50.0), none) > compact_chip_width(40.0, 30.0, None, none));
+    assert!(
+        (full_chip_width(40.0, 0.0, None, none) - (CHIP_PAD * 2.0 + DOT_DIAMETER + DOT_GAP + 40.0)).abs()
+            <= f32::EPSILON
+    );
+}
+
+#[test]
+fn shown_windows_hide_a_window_without_percent_only_once_fetched() {
+    let never = ShownWindows::of(None);
+    assert!(never.five && never.seven);
+
+    let mut u = usage("a", None, None, Some(12.0));
+    assert_eq!(
+        ShownWindows::of(Some(&u)),
+        ShownWindows {
+            five: false,
+            seven: true
+        }
+    );
+    u.state = UsageState::Stale;
+    assert_eq!(
+        ShownWindows::of(Some(&u)),
+        ShownWindows {
+            five: false,
+            seven: true
+        }
+    );
+    u.fetched_at_ms = None;
+    assert_eq!(
+        ShownWindows::of(Some(&u)),
+        ShownWindows {
+            five: true,
+            seven: true
+        }
+    );
+    let full = usage("a", None, Some(1.0), Some(2.0));
+    assert!(ShownWindows::of(Some(&full)).shows(true) && ShownWindows::of(Some(&full)).shows(false));
+}
+
+#[test]
+fn measured_chip_without_five_hour_is_narrower_than_with_it() {
+    let ctx = egui::Context::default();
+    let entries = vec![
+        ChipEntry::build("a", Some(&usage("a", None, Some(37.0), Some(12.0))), Some(0)),
+        ChipEntry::build("a", Some(&usage("a", None, None, Some(12.0))), Some(0)),
+    ];
+    let mut cache = None;
+    let _ = ctx.run(egui::RawInput::default(), |ctx| {
+        let painter = ctx.layer_painter(LayerId::new(Order::Tooltip, Id::new("usage_chips_test_hidden")));
+        cache = Some(build_cache(&painter, &entries, &[0, 1], (1, 0)));
+    });
+    let cache = cache.expect("cache built inside the frame");
+
+    assert!(cache.widths.full[1] < cache.widths.full[0]);
+    assert!((cache.widths.compact[1] - cache.widths.compact[0]).abs() <= f32::EPSILON);
 }
 
 #[test]
@@ -386,14 +485,4 @@ fn a_snapshot_invalidates_launcher_rows_without_asking_for_another_profile_sync(
         Some((Some(10.0), Some(20.0)))
     );
     assert!(!hub.receive_usage_snapshot(), "no poller in tests: nothing to receive");
-}
-
-#[test]
-fn five_hour_is_hidden_only_when_the_api_sent_no_such_window() {
-    let with_five = usage("claude2", None, Some(37.0), Some(12.0));
-    let null_five = usage("claude2", None, None, Some(12.0));
-
-    assert!(has_five_hour(Some(&with_five)));
-    assert!(!has_five_hour(Some(&null_five)));
-    assert!(has_five_hour(None), "unknown usage keeps its placeholder");
 }

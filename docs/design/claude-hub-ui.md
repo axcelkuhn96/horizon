@@ -50,7 +50,7 @@ Chip cheio (largura calculada, máx ~330). **Pedido do usuário:** depois do nom
   - focus (Tab): anel de foco padrão.
   - stale (dado OK mas `fetched_at` > 15 min): dot vira anel (stroke 1.2, sem fill), percentuais `FG_DIM()`.
   - expired/missing: conteúdo todo a alpha 0.55; barras mostram o último valor conhecido a alpha 0.4; o grupo 7d é substituído por pílula `expired` (`PALETTE_YELLOW`) ou `no login` (`FG_DIM`); compacto: só a pílula.
-  - sem dado ainda (boot sem cache): barras vazias, pct `—`.
+  - sem dado ainda (boot sem cache, perfil nunca buscado): barras vazias, pct `—`; o `—` vale só para perfil nunca buscado. Janela que a conta não tem (perfil já buscado, sem percentual) fica oculta, sem grupo nem espaço.
   - erro de rede com dado antigo: tratado como stale; tooltip diz o erro (1 linha, `PALETTE_RED`).
 - Interação: clique esq = abre sessão do perfil (mesmo caminho do launcher); clique dir = menu de contexto com um único item `Refresh now` (durante fetch: item desabilitado `Refreshing…`).
 - Tooltip (`on_hover_ui_at_pointer`, largura fixa 280, margin 12, frame de popup do tema):
@@ -82,12 +82,12 @@ Modal central, largura 480 (ou viewport-48), topo a 18% da altura da viewport, s
 │               (selecionada)          7d ▰▱▱▱ 18%     │
 │  [2] ● conta2   outra@exemplo.com    5h ▰▰▰▰ 91%     │
 │               [expired]              7d ▰▰▰▱ 77%     │
-│  [3] ● pessoal  —                    5h —   7d —     │
+│  [3] ● pessoal  —                    5h —   7d —     │  perfil nunca buscado
 ├──────────────────────────────────────────────────────┤
 │ [↑↓] move  [Enter] open  [1–9] pick  [Esc] close     │  footer 36h, kbd_hint
 └──────────────────────────────────────────────────────┘
 ```
-- Linha: raio 8, padding horizontal 12. Esquerda: `key_badge` (20x20; só 1–9, a partir do 10º perfil o espaço fica vazio), gap 10, dot r=4 acento, gap 8, coluna de texto: nome 13 `FG()` strong (linha 1), e-mail 11 `FG_DIM()` (linha 2; `—` se desconhecido; ellipsis). Direita (largura 132): duas linhas empilhadas `5h` / `7d` com barra 56x4 + pct monospace 10.5 (mesma cor/regra de severidade). Estado `expired`/`missing`: pílula na linha 2 do texto, barras a alpha 0.4.
+- Linha: raio 8, padding horizontal 12. Janela que a conta não tem (perfil já buscado) não é desenhada; `5h —` aparece só em perfil nunca buscado. Esquerda: `key_badge` (20x20; só 1–9, a partir do 10º perfil o espaço fica vazio), gap 10, dot r=4 acento, gap 8, coluna de texto: nome 13 `FG()` strong (linha 1), e-mail 11 `FG_DIM()` (linha 2; `—` se desconhecido; ellipsis). Direita (largura 132): duas linhas empilhadas `5h` / `7d` com barra 56x4 + pct monospace 10.5 (mesma cor/regra de severidade). Estado `expired`/`missing`: pílula na linha 2 do texto, barras a alpha 0.4.
 - Selecionada: fill `blend(PANEL_BG_ALT(), accent, 0.22)`, stroke 1 `alpha(accent,150)`, barra esquerda 3x28 raio 2 em `accent`, badge ativo. Hover (mouse): fill `blend(PANEL_BG_ALT(), accent, 0.12)` e move a seleção junto (seleção única, sem estados concorrentes). Pressed: fill 0.30. Mouse sai da lista: seleção permanece.
 - Teclado: ↑/↓ circulam (wrap), Home/End, 1–9 abrem direto (sem Enter), Enter abre selecionado, Esc fecha. Foco inicial na 1ª linha (ou no último perfil usado, memorizado em `hub_state`).
 - Vazio (0 perfis): ícone (círculo r=14 stroke `BORDER_STRONG()` com ponto central), título 13 "No Claude profiles", texto 11 `FG_DIM` "Add one in Settings → Claude or run Detect accounts.", botão secundário `Open Settings → Claude` (foco inicial; Enter ativa). Altura total 220.

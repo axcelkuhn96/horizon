@@ -4,15 +4,18 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use horizon_core::WorkspaceId;
+use horizon_core::link::AskTable;
 
 use super::agent_status_ui::StatusUi;
 use super::claude_launcher::ClaudeLauncherState;
 use super::claude_quick_start::QuickStartUi;
+use super::hub_toast::HubToasts;
 use super::hub_ui;
-use super::link::LinkUiState;
+use super::link::{LinkUiState, LinkVisual};
 use super::minimap::MinimapAutoHide;
 use super::sidebar::{GitSidebarState, PanelLabelCache};
 use super::usage_chips::ClaudeUsageState;
+use super::worktree_dialog::WorktreeUi;
 
 /// Accent slots for the visible profile list, recomputed only when the list changes.
 #[derive(Default)]
@@ -49,6 +52,14 @@ pub(super) struct HubState {
     pub(super) quick_start: QuickStartUi,
     /// Agent status: the Claude found in each panel, its session name and the pending toasts.
     pub(super) status_ui: StatusUi,
+    /// Asks waiting for a reply; their connections are held by the link server.
+    pub(super) link_asks: AskTable,
+    /// Recent messages drawn as a line between the two panels.
+    pub(super) link_visuals: Vec<LinkVisual>,
+    /// Toasts of the hub features (link results, agent status, usage alerts).
+    pub(super) toasts: HubToasts,
+    /// New-worktree and cleanup dialogs, their worker channel and notice.
+    pub(super) worktree_ui: WorktreeUi,
 }
 
 impl HubState {

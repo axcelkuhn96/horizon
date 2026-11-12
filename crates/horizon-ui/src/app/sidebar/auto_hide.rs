@@ -18,6 +18,9 @@ pub(super) const SIDEBAR_STRIP_HOVER_WIDTH: f32 = 10.0;
 pub(in crate::app) struct SidebarAutoHideState {
     pub(super) last_hover: Option<Instant>,
     pub(super) revealed: bool,
+    /// The renamed workspace's canvas label is covered only by the revealed sidebar: the sidebar
+    /// row hosts the editor for now, without pinning the sidebar open.
+    pub(super) rename_label_under_sidebar: bool,
 }
 
 /// Visibility outcome for the auto-hiding sidebar. Pure, egui-free for testing.

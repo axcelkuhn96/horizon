@@ -178,7 +178,7 @@ fn cached_dirty(
 
 /// Branch name from the symbolic `HEAD` target, so an unborn branch still
 /// reports its name. A direct `HEAD` is a detached checkout.
-fn head_branch(repo: &Repository) -> (Option<String>, bool) {
+pub(super) fn head_branch(repo: &Repository) -> (Option<String>, bool) {
     let Ok(head) = repo.find_reference("HEAD") else {
         return (None, false);
     };
@@ -213,7 +213,7 @@ fn linked_head_short(main: &Repository, commondir: &Path, name: &str) -> Option<
 
 /// Branch of a linked worktree from `<commondir>/worktrees/<name>/HEAD`.
 /// Works even when the worktree directory is gone; a detached HEAD is `None`.
-fn linked_branch(commondir: &Path, name: &str) -> Option<String> {
+pub(super) fn linked_branch(commondir: &Path, name: &str) -> Option<String> {
     let head = std::fs::read_to_string(commondir.join("worktrees").join(name).join("HEAD")).ok()?;
     let target = head.trim().strip_prefix("ref:")?.trim();
     Some(target.strip_prefix("refs/heads/").unwrap_or(target).to_string())
@@ -246,7 +246,7 @@ fn upstream_state(repo: &Repository, branch: Option<&str>) -> (Option<String>, u
 /// are skipped: a worktree nested in this one is not an untracked change. With
 /// a non-recursive scan an untracked directory counts as one entry, except when
 /// it contains such worktrees, in which case its other content is counted.
-fn count_dirty(
+pub(super) fn count_dirty(
     repo: &Repository,
     recursive: bool,
     nested: &[PathBuf],

@@ -80,12 +80,18 @@ impl HorizonApp {
         let viewport = viewport_local_rect(ctx);
         let mut zones = Vec::new();
         let sidebar_width = self.reserved_sidebar_width(viewport.width());
+        let mut sidebar_zone = None;
 
         if sidebar_width > 0.0 {
-            zones.push(Rect::from_min_max(
+            let rect = Rect::from_min_max(
                 Pos2::new(viewport.min.x, viewport.min.y + TOOLBAR_HEIGHT),
                 Pos2::new(viewport.min.x + sidebar_width, viewport.max.y),
-            ));
+            );
+            if self.template_config.overlays.sidebar_auto_hide {
+                sidebar_zone = Some(rect);
+            } else {
+                zones.push(rect);
+            }
         }
 
         if let Some(rect) = self.settings_panel_rect(ctx, viewport) {
@@ -119,7 +125,11 @@ impl HorizonApp {
             zones.push(rect);
         }
 
-        OverlayExclusion::new(zones)
+        let exclusion = OverlayExclusion::new(zones);
+        match sidebar_zone {
+            Some(rect) => exclusion.with_auto_hide_sidebar(rect, self.sidebar_collapsed_to_strip()),
+            None => exclusion,
+        }
     }
 
     pub(in crate::app) fn sync_panel_focus_from_pointer_press(&mut self, ctx: &Context) {
