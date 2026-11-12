@@ -31,7 +31,9 @@ pub(super) fn render_scoped_minimap(
     };
     let minimap_height = model.outer_size.y;
     let Some(opacity) = minimap_opacity(app, ctx, overlay_id, model.outer_size) else {
-        return 0.0;
+        // Auto-hidden but manually visible: keep reserving the height so the
+        // attention feed does not jump when hover reveals the minimap.
+        return auto_hidden_reserved_height(app.minimap_visible, minimap_height);
     };
 
     let response = egui::Area::new(overlay_id)
@@ -84,6 +86,12 @@ pub(super) fn render_scoped_minimap(
     }
 
     minimap_height
+}
+
+/// Height the minimap reserves while not drawn: its full height when only
+/// auto-hidden (matches the overlay exclusion zone), none when manually hidden.
+fn auto_hidden_reserved_height(manual_visible: bool, outer_height: f32) -> f32 {
+    if manual_visible { outer_height } else { 0.0 }
 }
 
 /// Opacity to draw the minimap with, or `None` while it is hidden.
@@ -394,8 +402,8 @@ mod tests {
     use horizon_core::{Board, PanelKind, PanelOptions};
 
     use super::{
-        MinimapHitTarget, MinimapScope, last_hit, minimap_panel_source, minimap_widget_info,
-        restore_minimap_panel_focus,
+        MinimapHitTarget, MinimapScope, auto_hidden_reserved_height, last_hit, minimap_panel_source,
+        minimap_widget_info, restore_minimap_panel_focus,
     };
 
     /// The minimap is painted as a single surface, so its accessibility label
@@ -476,5 +484,11 @@ mod tests {
 
         assert_eq!(board.focused, Some(clicked_panel));
         assert_eq!(board.active_workspace, Some(workspace_id));
+    }
+
+    #[test]
+    fn auto_hidden_minimap_reserves_its_height_only_when_manually_visible() {
+        assert!((auto_hidden_reserved_height(true, 188.0) - 188.0).abs() < f32::EPSILON);
+        assert!(auto_hidden_reserved_height(false, 188.0).abs() < f32::EPSILON);
     }
 }

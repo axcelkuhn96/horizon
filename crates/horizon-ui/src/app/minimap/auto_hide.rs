@@ -24,6 +24,11 @@ pub(super) const MINIMAP_HINT_THICKNESS: f32 = 2.0;
 pub(in crate::app) struct MinimapAutoHide {
     revealed: bool,
     last_hover: Option<Instant>,
+    /// Whether the pointer was in the zone on the previous frame, so the exit
+    /// frame can stamp `last_hover` and start the grace period on departure.
+    was_in_zone: bool,
+    /// Manual visibility on the previous frame; `None` before the first frame.
+    was_manual_visible: Option<bool>,
 }
 
 impl MinimapAutoHide {
@@ -37,9 +42,19 @@ impl MinimapAutoHide {
     /// `pointer_in_zone` must already include "dragging or clicking inside the
     /// minimap" so interaction keeps it open.
     pub(super) fn observe(&mut self, manual_visible: bool, enabled: bool, pointer_in_zone: bool, now: Instant) -> bool {
-        if pointer_in_zone && manual_visible {
+        // Manually showing the minimap flashes it for the grace period so the
+        // user sees what the toggle did even with the pointer elsewhere.
+        if manual_visible && enabled && self.was_manual_visible == Some(false) {
+            self.revealed = true;
             self.last_hover = Some(now);
         }
+        self.was_manual_visible = Some(manual_visible);
+        // Stamp on the exit frame too: the grace period runs from the moment
+        // the pointer leaves, not from the last frame it was seen inside.
+        if (pointer_in_zone || self.was_in_zone) && manual_visible {
+            self.last_hover = Some(now);
+        }
+        self.was_in_zone = pointer_in_zone;
         let reveal = minimap_shown(manual_visible, enabled, self, pointer_in_zone, now);
         self.revealed = reveal;
         reveal
@@ -105,6 +120,7 @@ mod tests {
         MinimapAutoHide {
             revealed: true,
             last_hover: Some(last_hover),
+            ..MinimapAutoHide::default()
         }
     }
 
@@ -171,13 +187,53 @@ mod tests {
         assert!(state.revealed());
         assert_eq!(state.hide_in(true, start), None);
 
-        let later = start + Duration::from_millis(200);
-        assert!(state.observe(true, true, false, later));
-        assert_eq!(state.hide_in(false, later), Some(Duration::from_millis(400)));
+        // The exit frame stamps the hover, so the grace period starts here.
+        let left = start + Duration::from_millis(200);
+        assert!(state.observe(true, true, false, left));
+        assert_eq!(state.hide_in(false, left), Some(MINIMAP_AUTO_HIDE_DELAY));
 
-        let expired = start + Duration::from_millis(700);
+        let mid = left + Duration::from_millis(200);
+        assert!(state.observe(true, true, false, mid));
+        assert_eq!(state.hide_in(false, mid), Some(Duration::from_millis(400)));
+
+        let expired = left + Duration::from_millis(700);
         assert!(!state.observe(true, true, false, expired));
         assert_eq!(state.hide_in(false, expired), None);
+    }
+
+    #[test]
+    fn grace_period_starts_when_the_pointer_leaves_not_at_the_last_frame_inside() {
+        let start = Instant::now();
+        let mut state = MinimapAutoHide::default();
+
+        assert!(state.observe(true, true, true, start));
+        // A long frame gap while hovering must not eat into the grace period.
+        let left = start + Duration::from_millis(5000);
+        assert!(state.observe(true, true, false, left));
+        assert!(state.observe(true, true, false, left + Duration::from_millis(599)));
+        assert!(!state.observe(true, true, false, left + Duration::from_millis(600)));
+    }
+
+    #[test]
+    fn manual_show_flashes_the_minimap_for_the_grace_period() {
+        let start = Instant::now();
+        let mut state = MinimapAutoHide::default();
+
+        assert!(!state.observe(false, true, false, start));
+        let shown = start + Duration::from_millis(100);
+        assert!(state.observe(true, true, false, shown));
+        assert!(state.revealed());
+        assert_eq!(state.hide_in(false, shown), Some(MINIMAP_AUTO_HIDE_DELAY));
+        assert!(state.observe(true, true, false, shown + Duration::from_millis(599)));
+        assert!(!state.observe(true, true, false, shown + Duration::from_millis(600)));
+    }
+
+    #[test]
+    fn first_frame_with_a_visible_minimap_does_not_flash() {
+        let now = Instant::now();
+        let mut state = MinimapAutoHide::default();
+
+        assert!(!state.observe(true, true, false, now));
     }
 
     #[test]

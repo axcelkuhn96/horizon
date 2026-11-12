@@ -500,6 +500,11 @@ impl ShortcutsConfig {
     }
 }
 
+/// Serde predicate: keeps a default-off flag out of the serialized config.
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct OverlaysConfig {
@@ -508,6 +513,7 @@ pub struct OverlaysConfig {
     pub minimap_height: f32,
     pub minimap_width: f32,
     pub sidebar_auto_hide: bool,
+    #[serde(skip_serializing_if = "is_false")]
     pub minimap_auto_hide: bool,
 }
 
@@ -843,6 +849,20 @@ mod tests {
 
     use super::{Config, FeaturesConfig, PresetConfig, config_candidates_with_env};
     use crate::panel::PanelKind;
+
+    #[test]
+    fn minimap_auto_hide_is_serialized_only_when_enabled() {
+        let mut config = Config::default();
+
+        let yaml = config.to_yaml().expect("should serialize");
+        assert!(!yaml.contains("minimap_auto_hide"));
+
+        config.overlays.minimap_auto_hide = true;
+        let yaml = config.to_yaml().expect("should serialize");
+        let reloaded: Config = serde_yaml::from_str(&yaml).expect("should deserialize");
+        assert!(yaml.contains("minimap_auto_hide: true"));
+        assert!(reloaded.overlays.minimap_auto_hide);
+    }
 
     #[test]
     fn includes_horizon_config_candidates() {

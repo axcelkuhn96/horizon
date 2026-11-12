@@ -107,7 +107,10 @@ fn replace_if_changed(current: &mut bool, new: bool) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use horizon_core::{Config, RuntimeState};
+
     use super::*;
+    use crate::app::test_support::{test_app_in, test_app_with};
 
     #[test]
     fn toggle_minimap_marks_state_dirty() {
@@ -123,5 +126,42 @@ mod tests {
 
         assert!(!replace_if_changed(&mut visible, true));
         assert!(visible);
+    }
+
+    #[test]
+    fn toggle_minimap_marks_runtime_dirty() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut app = test_app_in(temp.path());
+        app.runtime_dirty_since = None;
+
+        app.toggle_minimap();
+
+        assert!(!app.minimap_visible);
+        assert!(app.runtime_dirty_since.is_some());
+    }
+
+    #[test]
+    fn toggle_hud_marks_runtime_dirty() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut app = test_app_in(temp.path());
+        app.runtime_dirty_since = None;
+
+        app.toggle_hud();
+
+        assert!(app.hud_visible);
+        assert!(app.runtime_dirty_since.is_some());
+    }
+
+    #[test]
+    fn persisted_ui_prefs_are_restored_on_activation() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = RuntimeState::default();
+        state.ui.minimap_visible = Some(false);
+        state.ui.hud_visible = Some(true);
+
+        let app = test_app_with(temp.path(), &Config::default(), state, None);
+
+        assert!(!app.minimap_visible);
+        assert!(app.hud_visible);
     }
 }
