@@ -500,6 +500,7 @@ impl HorizonApp {
             presets: &self.presets,
             template_target: self.workspace_template_target(workspace.id),
             can_delete: self.board.workspaces.len() > 1,
+            has_repo: self.hub.git.overview_for(workspace.id).is_some(),
         };
         Self::show_workspace_context_menu(&row_response, workspace, &menu_env, actions);
 

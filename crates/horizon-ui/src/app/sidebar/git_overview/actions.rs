@@ -15,6 +15,18 @@ impl HorizonApp {
     /// overview may have changed (worktree removed, rows reordered) since it
     /// was picked.
     pub(in crate::app) fn apply_git_action(&mut self, ctx: &Context, action: &GitAction) {
+        // Repository-level actions are not tied to a row.
+        match action.kind {
+            GitActionKind::NewWorktree => {
+                self.open_new_worktree(ctx, action.workspace, None);
+                return;
+            }
+            GitActionKind::CleanupWorktrees => {
+                self.open_worktree_cleanup(ctx, action.workspace, None);
+                return;
+            }
+            _ => {}
+        }
         let Some(row) = self.hub.git.row_for_path(action.workspace, &action.path) else {
             return;
         };
@@ -32,6 +44,7 @@ impl HorizonApp {
                 });
                 ctx.request_repaint();
             }
+            GitActionKind::RemoveWorktree => self.open_worktree_cleanup(ctx, action.workspace, Some(path)),
             _ if prunable => {}
             GitActionKind::OpenTerminal => {
                 let options = self.shell_options_at(path);
@@ -46,6 +59,7 @@ impl HorizonApp {
                 self.open_panel_in_worktree(action.workspace, options);
             }
             GitActionKind::NewWorkspace => self.new_workspace_from_worktree(ctx, &workspace_name, path),
+            GitActionKind::NewWorktree | GitActionKind::CleanupWorktrees => {}
         }
     }
 
@@ -68,7 +82,7 @@ impl HorizonApp {
     }
 
     /// Creates the panel (its explicit cwd wins over the workspace cwd) and focuses it.
-    fn open_panel_in_worktree(&mut self, workspace: WorkspaceId, options: PanelOptions) {
+    pub(in crate::app) fn open_panel_in_worktree(&mut self, workspace: WorkspaceId, options: PanelOptions) {
         match self.create_panel_with_options(options, workspace) {
             Ok(panel_id) => {
                 self.board.focus(panel_id);

@@ -11,6 +11,7 @@ use super::link::LinkUiState;
 use super::minimap::MinimapAutoHide;
 use super::sidebar::{GitSidebarState, PanelLabelCache};
 use super::usage_chips::ClaudeUsageState;
+use super::worktree_dialog::WorktreeUi;
 
 /// Accent slots for the visible profile list, recomputed only when the list changes.
 #[derive(Default)]
@@ -43,6 +44,8 @@ pub(super) struct HubState {
     pub(super) link: LinkUiState,
     /// Reveal state of each auto-hiding minimap overlay (root canvas and detached viewports).
     pub(super) minimap_auto_hide: HashMap<egui::Id, MinimapAutoHide>,
+    /// New-worktree and cleanup dialogs, their worker channel and notice.
+    pub(super) worktree_ui: WorktreeUi,
 }
 
 impl HubState {
