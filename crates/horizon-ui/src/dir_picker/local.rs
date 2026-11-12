@@ -22,6 +22,12 @@ pub enum DirPickerPurpose {
         preset: PresetConfig,
         canvas_pos: Option<[f32; 2]>,
     },
+    /// Browse for the cwd of a workspace template in Settings → Workspaces.
+    /// The name guards against the template list changing while the picker is open.
+    TemplateCwd {
+        template_index: usize,
+        template_name: String,
+    },
 }
 
 pub struct DirPicker {
@@ -102,6 +108,7 @@ impl DirPicker {
     fn heading(&self) -> &'static str {
         match &self.selected_purpose {
             Some(DirPickerPurpose::NewWorkspace { .. }) => "Select workspace directory",
+            Some(DirPickerPurpose::TemplateCwd { .. }) => "Select template directory",
             Some(DirPickerPurpose::AddPanel { .. }) | None => "Select terminal directory",
         }
     }

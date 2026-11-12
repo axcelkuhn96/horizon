@@ -16,6 +16,7 @@ use crate::panel::{PanelKind, PanelOptions, PanelResume};
 use crate::ssh::SshConnection;
 use crate::terminal::Terminal;
 use crate::view::CanvasViewState;
+use crate::workspace::workspace_color_hex;
 
 pub use agent_sessions::{AgentSessionCatalog, AgentSessionRecord, most_recent_unclaimed_session_for};
 pub use claude_live_sessions::{claude_config_dir_for_env, claude_transcript_exists_for_env, live_claude_session_ids};
@@ -288,6 +289,7 @@ impl RuntimeState {
                     layout: workspace.layout,
                     panels,
                     sidebar_collapsed: workspace.sidebar_collapsed,
+                    color: Some(workspace_color_hex(workspace.color_idx)),
                 }
             })
             .collect();
@@ -393,6 +395,10 @@ pub struct WorkspaceState {
     /// Sidebar-only: persists across relaunch, does not affect canvas panels.
     #[serde(default)]
     pub sidebar_collapsed: bool,
+    /// Accent color as `#rrggbb` of a `WORKSPACE_COLORS` entry. `None` keeps
+    /// the board's positional default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
 }
 
 fn deserialize_workspace_layout<'de, D>(deserializer: D) -> std::result::Result<Option<WorkspaceLayout>, D::Error>
@@ -458,6 +464,7 @@ impl WorkspaceState {
             layout,
             panels,
             sidebar_collapsed: workspace.sidebar_collapsed,
+            color: workspace.color.clone(),
         }
     }
 }
@@ -1087,6 +1094,40 @@ workspaces:
             saved.workspaces[0].sidebar_collapsed,
             "board Workspace.sidebar_collapsed must persist back to WorkspaceState"
         );
+    }
+
+    #[test]
+    fn workspaces_template_color_hydrates_board_and_round_trips() {
+        let config = WorkspaceConfig {
+            name: "tinted".to_string(),
+            color: Some("#F38BA8".to_string()),
+            cwd: None,
+            position: None,
+            terminals: Vec::new(),
+            sidebar_collapsed: false,
+        };
+        let state = RuntimeState {
+            workspaces: vec![
+                WorkspaceState::from_config(
+                    0,
+                    &WorkspaceConfig {
+                        color: None,
+                        ..config.clone()
+                    },
+                    [0.0, 0.0],
+                ),
+                WorkspaceState::from_config(1, &config, [800.0, 0.0]),
+            ],
+            ..RuntimeState::default()
+        };
+
+        let board = crate::board::Board::from_runtime_state(&state).expect("board");
+        assert_eq!(board.workspaces[0].color_idx, 0, "no color keeps the positional slot");
+        assert_eq!(board.workspaces[1].color_idx, 3, "#f38ba8 is palette slot 3");
+
+        let saved = RuntimeState::from_board(&board, WindowConfig::default(), CanvasViewState::default());
+        let reloaded = crate::board::Board::from_runtime_state(&saved).expect("board");
+        assert_eq!(reloaded.workspaces[1].color_idx, 3);
     }
 
     #[test]

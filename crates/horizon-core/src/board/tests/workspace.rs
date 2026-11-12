@@ -154,6 +154,11 @@ fn sync_workspace_metadata_updates_only_templated_workspaces() {
         workspace.cwd = Some(PathBuf::from("/tmp/manual"));
     }
 
+    board.seed_template_baseline(&Config {
+        workspaces: vec![named_template("template", "/tmp/old")],
+        ..Config::default()
+    });
+
     let config = Config {
         workspaces: vec![WorkspaceConfig {
             name: "synced".to_string(),
@@ -175,6 +180,227 @@ fn sync_workspace_metadata_updates_only_templated_workspaces() {
     let manual = board.workspace(manual_workspace).expect("manual workspace");
     assert_eq!(manual.name, "manual");
     assert_eq!(manual.cwd, Some(PathBuf::from("/tmp/manual")));
+}
+
+fn named_template(name: &str, cwd: &str) -> WorkspaceConfig {
+    WorkspaceConfig {
+        name: name.to_string(),
+        color: None,
+        cwd: Some(cwd.to_string()),
+        position: None,
+        terminals: Vec::new(),
+        sidebar_collapsed: false,
+    }
+}
+
+fn linked_board(templates: &[WorkspaceConfig]) -> (Board, Vec<WorkspaceId>) {
+    let mut board = Board::new();
+    let ids = templates
+        .iter()
+        .enumerate()
+        .map(|(index, template)| {
+            let id = board.create_workspace(&template.name);
+            let workspace = board.workspace_mut(id).expect("workspace");
+            workspace.template = Some(WorkspaceTemplateRef {
+                workspace_index: index,
+                workspace_name: template.name.clone(),
+            });
+            workspace.cwd = template.cwd.as_deref().map(Config::expand_tilde);
+            id
+        })
+        .collect();
+    board.seed_template_baseline(&Config {
+        workspaces: templates.to_vec(),
+        ..Config::default()
+    });
+    (board, ids)
+}
+
+#[test]
+fn sync_workspaces_metadata_follows_reordered_templates_by_name() {
+    let a = named_template("alpha", "/tmp/a");
+    let b = named_template("beta", "/tmp/b");
+    let (mut board, ids) = linked_board(&[a.clone(), b.clone()]);
+
+    let config = Config {
+        workspaces: vec![b, a],
+        ..Config::default()
+    };
+    board.sync_workspace_metadata(&config);
+
+    let alpha = board.workspace(ids[0]).expect("alpha");
+    assert_eq!(alpha.name, "alpha");
+    assert_eq!(alpha.cwd, Some(PathBuf::from("/tmp/a")));
+    assert_eq!(alpha.template.as_ref().map(|t| t.workspace_index), Some(1));
+    let beta = board.workspace(ids[1]).expect("beta");
+    assert_eq!(beta.name, "beta");
+    assert_eq!(beta.cwd, Some(PathBuf::from("/tmp/b")));
+    assert_eq!(beta.template.as_ref().map(|t| t.workspace_index), Some(0));
+}
+
+#[test]
+fn sync_workspaces_metadata_matches_names_case_insensitively() {
+    let (mut board, ids) = linked_board(&[named_template("alpha", "/tmp/a")]);
+
+    let config = Config {
+        workspaces: vec![named_template("other", "/tmp/o"), named_template("ALPHA", "/tmp/a2")],
+        ..Config::default()
+    };
+    board.sync_workspace_metadata(&config);
+
+    let alpha = board.workspace(ids[0]).expect("alpha");
+    assert_eq!(alpha.name, "ALPHA");
+    assert_eq!(alpha.cwd, Some(PathBuf::from("/tmp/a2")));
+    assert_eq!(
+        alpha.template.as_ref().map(|t| t.workspace_name.as_str()),
+        Some("ALPHA")
+    );
+}
+
+#[test]
+fn sync_workspaces_metadata_leaves_deleted_template_workspace_untouched() {
+    let a = named_template("alpha", "/tmp/a");
+    let b = named_template("beta", "/tmp/b");
+    let (mut board, ids) = linked_board(&[a, b.clone()]);
+
+    let config = Config {
+        workspaces: vec![b],
+        ..Config::default()
+    };
+    board.sync_workspace_metadata(&config);
+
+    let alpha = board.workspace(ids[0]).expect("alpha");
+    assert_eq!(
+        alpha.name, "alpha",
+        "deleted template must not rename its live workspace"
+    );
+    assert_eq!(alpha.cwd, Some(PathBuf::from("/tmp/a")));
+    let beta = board.workspace(ids[1]).expect("beta");
+    assert_eq!(beta.name, "beta");
+    assert_eq!(beta.cwd, Some(PathBuf::from("/tmp/b")));
+    assert_eq!(beta.template.as_ref().map(|t| t.workspace_index), Some(0));
+}
+
+#[test]
+fn sync_workspaces_metadata_rename_falls_back_to_index_and_updates_ref() {
+    let (mut board, ids) = linked_board(&[named_template("alpha", "/tmp/a"), named_template("beta", "/tmp/b")]);
+
+    let config = Config {
+        workspaces: vec![named_template("alpha", "/tmp/a"), named_template("gamma", "/tmp/g")],
+        ..Config::default()
+    };
+    board.sync_workspace_metadata(&config);
+
+    let renamed = board.workspace(ids[1]).expect("renamed");
+    assert_eq!(renamed.name, "gamma");
+    assert_eq!(renamed.cwd, Some(PathBuf::from("/tmp/g")));
+    assert_eq!(
+        renamed.template.as_ref().map(|t| t.workspace_name.as_str()),
+        Some("gamma")
+    );
+}
+
+#[test]
+fn sync_workspaces_metadata_delete_with_unlinked_neighbour_does_not_retarget() {
+    let a = named_template("alpha", "/tmp/a");
+    let b = named_template("beta", "/tmp/b");
+    let fresh = named_template("new", "/tmp/n");
+    let (mut board, ids) = linked_board(&[a.clone(), b]);
+    // The baseline is [alpha, beta]; a sync of the full list advances it.
+    let full = Config {
+        workspaces: vec![a.clone(), named_template("beta", "/tmp/b"), fresh.clone()],
+        ..Config::default()
+    };
+    board.sync_workspace_metadata(&full);
+
+    let after_delete = Config {
+        workspaces: vec![a, fresh],
+        ..Config::default()
+    };
+    // Run several frames: sync rewrites refs every frame in the app.
+    for _ in 0..3 {
+        board.sync_workspace_metadata(&after_delete);
+    }
+
+    let beta = board.workspace(ids[1]).expect("beta");
+    assert_eq!(beta.name, "beta", "deleted template must not rename its workspace");
+    assert_eq!(beta.cwd, Some(PathBuf::from("/tmp/b")));
+    let template = beta.template.as_ref().expect("template ref");
+    assert_eq!(template.workspace_name, "beta", "template ref must not be rewritten");
+    assert_eq!(template.workspace_index, 1);
+    let alpha = board.workspace(ids[0]).expect("alpha");
+    assert_eq!(alpha.name, "alpha");
+    assert_eq!(alpha.template.as_ref().map(|t| t.workspace_index), Some(0));
+}
+
+#[test]
+fn sync_workspaces_metadata_renaming_a_neighbour_after_delete_does_not_retarget() {
+    let a = named_template("alpha", "/tmp/a");
+    let b = named_template("beta", "/tmp/b");
+    let fresh = named_template("new", "/tmp/n");
+    let (mut board, ids) = linked_board(&[a.clone(), b.clone()]);
+    board.sync_workspace_metadata(&Config {
+        workspaces: vec![a.clone(), b, fresh.clone()],
+        ..Config::default()
+    });
+    board.sync_workspace_metadata(&Config {
+        workspaces: vec![a.clone(), fresh],
+        ..Config::default()
+    });
+    // The unlinked leftover template is then renamed in place.
+    board.sync_workspace_metadata(&Config {
+        workspaces: vec![a, named_template("renamed", "/tmp/r")],
+        ..Config::default()
+    });
+
+    let beta = board.workspace(ids[1]).expect("beta");
+    assert_eq!(beta.name, "beta");
+    assert_eq!(beta.cwd, Some(PathBuf::from("/tmp/b")));
+}
+
+#[test]
+fn sync_workspaces_metadata_without_baseline_never_falls_back_to_index() {
+    let mut board = Board::new();
+    let id = board.create_workspace("alpha");
+    let workspace = board.workspace_mut(id).expect("workspace");
+    workspace.template = Some(WorkspaceTemplateRef {
+        workspace_index: 0,
+        workspace_name: "alpha".to_string(),
+    });
+
+    board.sync_workspace_metadata(&Config {
+        workspaces: vec![named_template("gamma", "/tmp/g")],
+        ..Config::default()
+    });
+
+    assert_eq!(board.workspace(id).expect("workspace").name, "alpha");
+}
+
+#[test]
+fn sync_workspaces_metadata_revert_after_delete_restores_the_link() {
+    let a = named_template("alpha", "/tmp/a");
+    let b = named_template("beta", "/tmp/b");
+    let fresh = named_template("new", "/tmp/n");
+    let full = Config {
+        workspaces: vec![a.clone(), b.clone(), fresh.clone()],
+        ..Config::default()
+    };
+    let (mut board, ids) = linked_board(&[a.clone(), b]);
+    board.sync_workspace_metadata(&full);
+    board.sync_workspace_metadata(&Config {
+        workspaces: vec![a, fresh],
+        ..Config::default()
+    });
+
+    board.sync_workspace_metadata(&full);
+
+    let beta = board.workspace(ids[1]).expect("beta");
+    assert_eq!(beta.name, "beta");
+    assert_eq!(beta.cwd, Some(PathBuf::from("/tmp/b")));
+    let template = beta.template.as_ref().expect("template ref");
+    assert_eq!(template.workspace_name, "beta");
+    assert_eq!(template.workspace_index, 1);
+    assert_eq!(board.workspaces.len(), 2, "no workspace is created or removed");
 }
 
 #[test]
@@ -483,6 +709,7 @@ fn restored_empty_workspaces_are_removed_during_cleanup() {
                 template: None,
                 layout: None,
                 sidebar_collapsed: false,
+                color: None,
                 panels: Vec::new(),
             },
             WorkspaceState {
@@ -493,6 +720,7 @@ fn restored_empty_workspaces_are_removed_during_cleanup() {
                 template: None,
                 layout: None,
                 sidebar_collapsed: false,
+                color: None,
                 panels: vec![PanelState {
                     local_id: "panel".to_string(),
                     name: "notes".to_string(),
@@ -539,6 +767,7 @@ fn restored_workspace_layout_is_preserved_after_panel_recreation() {
             template: None,
             layout: Some(WorkspaceLayout::Grid),
             sidebar_collapsed: false,
+            color: None,
             panels: vec![
                 PanelState {
                     local_id: "panel-a".to_string(),
@@ -606,6 +835,7 @@ fn persisted_ssh_panels_restore_as_disconnected_snapshots() {
             template: None,
             layout: None,
             sidebar_collapsed: false,
+            color: None,
             panels: vec![PanelState {
                 local_id: "ssh-panel".to_string(),
                 name: "prod".to_string(),
@@ -659,6 +889,7 @@ fn runtime_restore_keeps_remaining_panels_when_one_spawn_fails() {
             template: None,
             layout: Some(WorkspaceLayout::Grid),
             sidebar_collapsed: false,
+            color: None,
             panels: vec![
                 PanelState {
                     local_id: "notes".to_string(),
