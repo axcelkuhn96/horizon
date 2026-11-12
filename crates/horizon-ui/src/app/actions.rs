@@ -1,10 +1,12 @@
 mod command_palette;
 mod interaction;
 mod layout;
+mod open_template;
 mod panels;
 mod pickers;
 mod search;
 mod support;
+mod workspace_templates;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;

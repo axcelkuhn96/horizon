@@ -1,11 +1,14 @@
 mod actions;
 mod attention_feed;
 mod canvas;
+mod claude_launcher;
 mod detached_viewports;
 mod file_drop;
 mod file_drop_highlight;
 mod frame_stats;
+mod hub_state;
 mod lifecycle;
+mod link;
 mod minimap;
 mod panel_chrome;
 mod panels;
@@ -22,6 +25,7 @@ pub(crate) mod speech;
 mod ssh_upload;
 mod startup_session;
 mod updates;
+mod usage_chips;
 pub(crate) mod util;
 mod view;
 mod workspace;
@@ -236,11 +240,12 @@ pub struct HorizonApp {
     fullscreen_panel: Option<PanelId>,
     sidebar_visible: bool,
     sidebar_drag_workspace: Option<WorkspaceId>,
-    sidebar_last_hover: Option<Instant>,
-    sidebar_auto_hide_revealed: bool,
+    sidebar_auto_hide: sidebar::SidebarAutoHideState,
     minimap_visible: bool,
     hud_visible: bool,
     renaming_workspace: Option<WorkspaceId>,
+    #[expect(dead_code, reason = "wired in Task 12")]
+    hub: hub_state::HubState,
     rename_buffer: String,
     renaming_panel: Option<PanelId>,
     panel_rename_buffer: String,
@@ -382,11 +387,11 @@ impl HorizonApp {
             fullscreen_panel: None,
             sidebar_visible: true,
             sidebar_drag_workspace: None,
-            sidebar_last_hover: None,
-            sidebar_auto_hide_revealed: false,
+            sidebar_auto_hide: sidebar::SidebarAutoHideState::default(),
             minimap_visible: true,
             hud_visible: false,
             renaming_workspace: None,
+            hub: hub_state::HubState::default(),
             rename_buffer: String::new(),
             renaming_panel: None,
             panel_rename_buffer: String::new(),

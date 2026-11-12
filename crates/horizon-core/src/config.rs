@@ -2,7 +2,9 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+mod claude_profiles;
 mod input;
+mod workspace_template;
 
 pub use input::{InputConfig, scroll_should_pan_canvas};
 

@@ -28,6 +28,13 @@ use auto_hide::{
     sidebar_reveal_state,
 };
 
+/// Auto-hide bookkeeping: last pointer hover and whether the sidebar was fully revealed.
+#[derive(Default)]
+pub(super) struct SidebarAutoHideState {
+    last_hover: Option<Instant>,
+    revealed: bool,
+}
+
 struct WorkspaceSidebarEntry {
     id: WorkspaceId,
     name: String,
@@ -103,7 +110,7 @@ impl HorizonApp {
         reserved_sidebar_width(
             self.sidebar_visible,
             self.template_config.overlays.sidebar_auto_hide,
-            self.sidebar_auto_hide_revealed,
+            self.sidebar_auto_hide.revealed,
             effective_sidebar_width(viewport_width),
         )
     }
@@ -146,11 +153,11 @@ impl HorizonApp {
 
         let now = Instant::now();
         if pointer_over {
-            self.sidebar_last_hover = Some(now);
+            self.sidebar_auto_hide.last_hover = Some(now);
         }
-        let since_left = self.sidebar_last_hover.map(|t| now.duration_since(t));
+        let since_left = self.sidebar_auto_hide.last_hover.map(|t| now.duration_since(t));
         let reveal = sidebar_reveal_state(true, pointer_over, since_left, SIDEBAR_AUTO_HIDE_DELAY);
-        self.sidebar_auto_hide_revealed = matches!(reveal, SidebarReveal::FullVisible);
+        self.sidebar_auto_hide.revealed = matches!(reveal, SidebarReveal::FullVisible);
 
         match reveal {
             SidebarReveal::FullVisible => {
@@ -175,7 +182,7 @@ impl HorizonApp {
 
     /// Whether the sidebar was rendered at full width on the previous frame.
     fn sidebar_revealed_last_frame(&self) -> bool {
-        self.sidebar_auto_hide_revealed
+        self.sidebar_auto_hide.revealed
     }
 
     fn render_sidebar_full(&mut self, ctx: &Context, sidebar_origin: Pos2, sidebar_size: Vec2, sidebar_width: f32) {

@@ -1,4 +1,5 @@
 mod bar;
+mod claude;
 mod general;
 mod presets;
 mod shortcuts;
@@ -7,6 +8,7 @@ mod speech;
 pub(in crate::app) use speech::ClipboardCapture;
 pub(in crate::app) use speech::PendingCapture;
 pub(in crate::app) use speech::SpeechModelInfoCache;
+mod workspaces;
 mod yaml_editor;
 
 use egui::{Color32, Context, Margin, Stroke, Vec2};
@@ -27,6 +29,8 @@ enum SettingsTab {
     General,
     Shortcuts,
     Presets,
+    Claude,
+    Workspaces,
     Yaml,
 }
 
@@ -36,11 +40,20 @@ impl SettingsTab {
             Self::General => "General",
             Self::Shortcuts => "Shortcuts",
             Self::Presets => "Presets",
+            Self::Claude => "Claude",
+            Self::Workspaces => "Workspaces",
             Self::Yaml => "YAML",
         }
     }
 
-    const ALL: [Self; 4] = [Self::General, Self::Shortcuts, Self::Presets, Self::Yaml];
+    const ALL: [Self; 6] = [
+        Self::General,
+        Self::Shortcuts,
+        Self::Presets,
+        Self::Claude,
+        Self::Workspaces,
+        Self::Yaml,
+    ];
 }
 
 pub(super) enum SettingsStatus {
@@ -56,6 +69,10 @@ pub(super) struct SettingsEditor {
     pub(super) status: SettingsStatus,
     active_tab: SettingsTab,
     editing_config: Option<Config>,
+    #[expect(dead_code, reason = "wired in Task 6")]
+    claude_tab: claude::ClaudeTabState,
+    #[expect(dead_code, reason = "wired in Task 11")]
+    workspaces_tab: workspaces::WorkspacesTabState,
 }
 
 #[derive(Clone, Copy)]
@@ -82,6 +99,8 @@ impl HorizonApp {
                 status: SettingsStatus::None,
                 active_tab: SettingsTab::General,
                 editing_config,
+                claude_tab: claude::ClaudeTabState::default(),
+                workspaces_tab: workspaces::WorkspacesTabState::default(),
             });
         }
     }
@@ -312,9 +331,23 @@ fn render_settings_panel(
                 SettingsTab::Yaml => {
                     yaml_editor::render(ui, config_path, &mut editor.buffer, available);
                 }
+                SettingsTab::Claude => render_editor_tab(ui, editor, available, claude::show),
+                SettingsTab::Workspaces => render_editor_tab(ui, editor, available, workspaces::show),
                 tab => render_gui_tab(ui, tab, editor, model_info_cache, available),
             }
         });
+}
+
+fn render_editor_tab(
+    ui: &mut egui::Ui,
+    editor: &mut SettingsEditor,
+    available: Vec2,
+    show: fn(&mut egui::Ui, &mut SettingsEditor),
+) {
+    egui::ScrollArea::vertical()
+        .max_height(available.y)
+        .auto_shrink([false, false])
+        .show(ui, |ui| show(ui, editor));
 }
 
 fn render_gui_tab(
@@ -341,8 +374,8 @@ fn render_gui_tab(
                 SettingsTab::General => general::render(ui, config, model_info_cache),
                 SettingsTab::Shortcuts => shortcuts::render(ui, config),
                 SettingsTab::Presets => presets::render(ui, config),
-                // Yaml is handled before this function is called.
-                SettingsTab::Yaml => return,
+                // Yaml, Claude and Workspaces are handled before this function is called.
+                SettingsTab::Yaml | SettingsTab::Claude | SettingsTab::Workspaces => return,
             };
             if changed && let Ok(yaml) = config.to_yaml() {
                 editor.buffer = yaml;
