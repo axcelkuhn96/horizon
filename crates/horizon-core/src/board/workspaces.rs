@@ -5,7 +5,7 @@ use crate::panel::{DEFAULT_PANEL_SIZE, Panel, PanelId, PanelOptions};
 use crate::runtime_state::{WorkspaceState, WorkspaceTemplateRef};
 use crate::workspace::{Workspace, WorkspaceId, workspace_color_index};
 
-use super::{Board, WorkspaceDockSide, vec2_eq};
+use super::{Board, RenameOutcome, WorkspaceDockSide, vec2_eq};
 
 impl Board {
     #[must_use]
@@ -273,6 +273,23 @@ impl Board {
     #[must_use]
     pub fn rename_panel(&mut self, id: PanelId, name: &str) -> bool {
         self.panel_mut(id).is_some_and(|panel| panel.rename(name))
+    }
+
+    /// Commits the inline panel-name editor. The editor is seeded with the current title, so
+    /// committing it untouched on a panel with no custom name must not turn that fallback
+    /// ("Terminal 3") into a stored custom name.
+    pub fn commit_panel_rename(&mut self, id: PanelId, input: &str) -> RenameOutcome {
+        let Some(panel) = self.panel_mut(id) else {
+            return RenameOutcome::Rejected;
+        };
+        if !panel.has_custom_name() && panel.title == input.trim() {
+            return RenameOutcome::Unchanged;
+        }
+        if panel.rename(input) {
+            RenameOutcome::Renamed
+        } else {
+            RenameOutcome::Rejected
+        }
     }
 
     /// Records the template names a later [`Self::sync_workspace_metadata`]

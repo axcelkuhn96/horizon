@@ -2,7 +2,7 @@
 
 /// Longest accepted panel name, in characters. A name travels in a titlebar, a sidebar row,
 /// `horizon link list` and the send dialog, so it has to stay short enough to read there.
-pub(super) const MAX_PANEL_NAME_CHARS: usize = 80;
+pub const MAX_PANEL_NAME_CHARS: usize = 80;
 
 /// The name to store for `input`: trimmed, or `None` when the input is blank, longer than
 /// [`MAX_PANEL_NAME_CHARS`] or carries a control character (a pasted newline or escape).

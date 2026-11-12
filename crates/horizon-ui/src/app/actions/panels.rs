@@ -1,6 +1,9 @@
 use crate::app::HorizonApp;
+use crate::app::hub_toast::{Toast, ToastKind};
 use crate::dir_picker::{DirPicker, DirPickerPurpose};
-use horizon_core::{PanelId, PanelOptions, PanelResume, PanelTranscript, PresetConfig, WorkspaceId};
+use horizon_core::{
+    MAX_PANEL_NAME_CHARS, PanelId, PanelOptions, PanelResume, PanelTranscript, PresetConfig, RenameOutcome, WorkspaceId,
+};
 
 use super::{add_panel_position, inherit_workspace_cwd, workspace_cwd};
 
@@ -114,6 +117,22 @@ impl HorizonApp {
         self.panel_rename_buffer = title;
         self.renaming_panel = Some(panel_id);
         true
+    }
+
+    /// Applies the inline editor's buffer to `panel_id` and closes the editor. A rejected name
+    /// keeps the old one and says so, instead of vanishing silently.
+    pub(in crate::app) fn commit_panel_rename(&mut self, panel_id: PanelId) {
+        let input = std::mem::take(&mut self.panel_rename_buffer);
+        match self.board.commit_panel_rename(panel_id, &input) {
+            RenameOutcome::Renamed => self.mark_runtime_dirty(),
+            RenameOutcome::Unchanged => {}
+            RenameOutcome::Rejected => self.hub.toasts.push(Toast {
+                kind: ToastKind::Warn,
+                text: format!("Name not changed\nUse 1 to {MAX_PANEL_NAME_CHARS} characters, without line breaks"),
+                panel: Some(panel_id),
+            }),
+        }
+        self.clear_panel_rename();
     }
 
     pub(in crate::app) fn clear_panel_rename(&mut self) {

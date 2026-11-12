@@ -882,11 +882,7 @@ impl HorizonApp {
         match outcome.rename_action {
             RenameEditAction::Commit => {
                 if self.renaming_panel == Some(panel_id) {
-                    let name = self.panel_rename_buffer.trim().to_string();
-                    if !name.is_empty() && self.board.rename_panel(panel_id, &name) {
-                        self.mark_runtime_dirty();
-                    }
-                    self.clear_panel_rename();
+                    self.commit_panel_rename(panel_id);
                 }
             }
             RenameEditAction::Cancel => {

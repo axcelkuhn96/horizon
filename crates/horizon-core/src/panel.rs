@@ -22,6 +22,7 @@ use crate::usage_dashboard::UsageDashboard;
 use crate::workspace::WorkspaceId;
 
 use self::env::{horizon_injected_env, merge_spawn_env};
+pub use self::naming::MAX_PANEL_NAME_CHARS;
 pub use self::spawn::current_unix_millis;
 #[cfg(test)]
 use self::spawn::platform_default_shell;

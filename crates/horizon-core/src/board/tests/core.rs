@@ -53,6 +53,28 @@ fn rename_panel_rejects_blank_names() {
 }
 
 #[test]
+fn committing_the_seeded_fallback_title_does_not_make_it_custom() {
+    let mut board = Board::new();
+    let workspace_id = board.create_workspace("frontend");
+    let panel_id = board
+        .create_panel(editor_panel_options(), workspace_id)
+        .expect("panel should spawn");
+    let seeded = board.panel(panel_id).expect("panel should exist").title.clone();
+
+    assert_eq!(
+        board.commit_panel_rename(panel_id, &format!("  {seeded} ")),
+        RenameOutcome::Unchanged
+    );
+    assert!(!board.panel(panel_id).expect("panel should exist").has_custom_name());
+
+    assert_eq!(board.commit_panel_rename(panel_id, "api"), RenameOutcome::Renamed);
+    assert_eq!(board.commit_panel_rename(panel_id, "api"), RenameOutcome::Renamed);
+    assert_eq!(board.commit_panel_rename(panel_id, "  "), RenameOutcome::Rejected);
+    let panel = board.panel(panel_id).expect("panel should exist");
+    assert_eq!(panel.custom_name(), Some("api"));
+}
+
+#[test]
 fn rename_panel_rejects_overlong_and_control_character_names() {
     let mut board = Board::new();
     let workspace_id = board.create_workspace("frontend");

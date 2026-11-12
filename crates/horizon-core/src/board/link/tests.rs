@@ -1101,7 +1101,7 @@ fn link_ambiguous_custom_name_is_typed_error() {
     assert!(board.rename_panel(first, "worker"));
     assert!(board.rename_panel(second, "Worker"));
 
-    match send(&mut board, "worker", "hi", true) {
+    match send(&mut board, "WORKER", "hi", true) {
         LinkResponse::Err { code, message } => {
             assert_eq!(code, LinkErrorCode::Ambiguous);
             assert!(message.contains(&panel_local_id(&board, first)), "{message}");

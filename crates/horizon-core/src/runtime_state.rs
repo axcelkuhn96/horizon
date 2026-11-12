@@ -176,7 +176,7 @@ impl RuntimeState {
                     panel.kind,
                     session_id.clone(),
                     panel.cwd.clone(),
-                    Some(panel.name.clone()),
+                    empty_to_none(&panel.name).map(str::to_owned),
                     None,
                 ));
             }
@@ -594,7 +594,7 @@ impl PanelState {
     #[must_use]
     pub fn to_panel_options(&self) -> PanelOptions {
         PanelOptions {
-            name: if self.name.is_empty() {
+            name: if self.name.is_empty() || is_fallback_terminal_name(&self.name) {
                 None
             } else {
                 Some(self.name.clone())
@@ -705,6 +705,14 @@ fn normalize_cwd(cwd: Option<&str>) -> Option<String> {
 
 fn empty_to_none(value: &str) -> Option<&str> {
     if value.is_empty() { None } else { Some(value) }
+}
+
+/// `true` for the auto-generated "Terminal N" title. Older state files stored it as if the
+/// user had chosen it; restoring it as a custom name would pin the fallback over the smart
+/// label, so it restores as unnamed.
+fn is_fallback_terminal_name(name: &str) -> bool {
+    name.strip_prefix("Terminal ")
+        .is_some_and(|rest| !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()))
 }
 
 #[cfg(test)]
@@ -1142,6 +1150,45 @@ workspaces:
         let saved = RuntimeState::from_board(&board, WindowConfig::default(), CanvasViewState::default());
         let reloaded = crate::board::Board::from_runtime_state(&saved).expect("board");
         assert_eq!(reloaded.workspaces[1].color_idx, 3);
+    }
+
+    #[test]
+    fn fallback_terminal_names_restore_as_unnamed() {
+        let named = |name: &str| PanelState {
+            name: name.to_string(),
+            ..PanelState::default()
+        };
+
+        assert_eq!(named("Terminal 12").to_panel_options().name, None);
+        assert_eq!(named("").to_panel_options().name, None);
+        assert_eq!(named("Backend").to_panel_options().name.as_deref(), Some("Backend"));
+        assert_eq!(
+            named("Terminal 1 logs").to_panel_options().name.as_deref(),
+            Some("Terminal 1 logs")
+        );
+        assert_eq!(named("Terminal ").to_panel_options().name.as_deref(), Some("Terminal "));
+    }
+
+    #[test]
+    fn unnamed_legacy_session_panel_gets_no_binding_label() {
+        let mut state = RuntimeState {
+            workspaces: vec![WorkspaceState {
+                panels: vec![PanelState {
+                    kind: PanelKind::Claude,
+                    resume: PanelResume::Session {
+                        session_id: "s1".to_string(),
+                    },
+                    ..PanelState::default()
+                }],
+                ..WorkspaceState::default()
+            }],
+            ..RuntimeState::default()
+        };
+
+        state.bootstrap_missing_agent_bindings(&AgentSessionCatalog::default(), &HashSet::new());
+
+        let binding = state.workspaces[0].panels[0].session_binding.as_ref().expect("binding");
+        assert_eq!(binding.label, None);
     }
 
     #[test]
