@@ -25,6 +25,8 @@ struct WorkspaceVisual {
     is_active: bool,
     is_empty: bool,
     label_hidden: bool,
+    /// Hidden by something other than the auto-hiding sidebar, which goes away on its own.
+    label_hidden_besides_sidebar: bool,
     panel_count: usize,
     layout: Option<WorkspaceLayout>,
 }
@@ -114,10 +116,13 @@ impl HorizonApp {
         let workspace_collision_ids = self.workspace_collision_scope(visible_detached_workspace);
         if visible_detached_workspace.is_none() {
             // A detached workspace edits its label in its own window.
-            let label_visible = self.renaming_workspace.map(|id| {
-                self.workspace_is_detached(id) || visuals.iter().any(|visual| visual.id == id && !visual.label_hidden)
+            let renamed_visual = self.renaming_workspace.and_then(|id| {
+                visuals
+                    .iter()
+                    .find(|visual| visual.id == id)
+                    .map(|visual| (visual.label_hidden, visual.label_hidden_besides_sidebar))
             });
-            self.track_workspace_rename_label(ctx, label_visible);
+            self.track_workspace_rename_label(ctx, renamed_visual);
         }
 
         self.workspace_screen_rects.clear();
@@ -202,6 +207,10 @@ impl HorizonApp {
                 }
                 None => {}
             }
+        }
+
+        if visible_detached_workspace.is_none() {
+            self.render_link_visuals(ctx, canvas_transform, canvas_clip_rect);
         }
 
         if let Some((workspace_id, current_name)) = start_rename_workspace {
@@ -355,7 +364,9 @@ impl HorizonApp {
                     toolbar_screen_rect,
                     is_active,
                     is_empty,
-                    label_hidden: overlay_zones.intersects(label_screen_rect),
+                    label_hidden: overlay_zones
+                        .blocks_label(label_screen_rect, self.renaming_workspace == Some(workspace.id)),
+                    label_hidden_besides_sidebar: overlay_zones.intersects_besides_sidebar(label_screen_rect),
                     panel_count: workspace.panels.len(),
                     layout: workspace.layout,
                 })
@@ -433,6 +444,7 @@ mod tests {
             is_active: false,
             is_empty: panel_count == 0,
             label_hidden: false,
+            label_hidden_besides_sidebar: false,
             panel_count,
             layout: None,
         }

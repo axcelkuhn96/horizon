@@ -4,11 +4,13 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use horizon_core::WorkspaceId;
+use horizon_core::link::AskTable;
 
 use super::claude_launcher::ClaudeLauncherState;
 use super::claude_quick_start::QuickStartUi;
+use super::hub_toast::HubToasts;
 use super::hub_ui;
-use super::link::LinkUiState;
+use super::link::{LinkUiState, LinkVisual};
 use super::minimap::MinimapAutoHide;
 use super::prompts::PromptsUi;
 use super::sidebar::{GitSidebarState, PanelLabelCache};
@@ -49,6 +51,12 @@ pub(super) struct HubState {
     pub(super) quick_start: QuickStartUi,
     /// Saved prompts: cached effective list, palette rows and the refusal notice.
     pub(super) prompts: PromptsUi,
+    /// Asks waiting for a reply; their connections are held by the link server.
+    pub(super) link_asks: AskTable,
+    /// Recent messages drawn as a line between the two panels.
+    pub(super) link_visuals: Vec<LinkVisual>,
+    /// Toasts of the hub features (link results, agent status, usage alerts).
+    pub(super) toasts: HubToasts,
 }
 
 impl HubState {

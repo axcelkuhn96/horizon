@@ -11,21 +11,50 @@ use crate::theme;
 /// Register any new fixed widget here so canvas-space content avoids it.
 pub(super) struct OverlayExclusion {
     zones: Vec<Rect>,
+    /// The auto-hiding sidebar's zone, kept apart because it goes away by itself.
+    sidebar: Option<SidebarZone>,
+}
+
+#[derive(Clone, Copy)]
+struct SidebarZone {
+    rect: Rect,
+    /// Collapsed to the edge strip, which never blocks the label being renamed.
+    collapsed: bool,
 }
 
 impl OverlayExclusion {
     pub(super) fn new(zones: Vec<Rect>) -> Self {
-        Self { zones }
+        Self { zones, sidebar: None }
+    }
+
+    /// Registers the auto-hiding sidebar zone.
+    pub(super) fn with_auto_hide_sidebar(mut self, rect: Rect, collapsed: bool) -> Self {
+        self.sidebar = Some(SidebarZone { rect, collapsed });
+        self
     }
 
     /// Returns `true` when a screen-space point belongs to a fixed overlay.
     pub(super) fn contains(&self, point: Pos2) -> bool {
-        self.zones.iter().any(|zone| zone.contains(point))
+        self.zones.iter().any(|zone| zone.contains(point)) || self.sidebar.is_some_and(|zone| zone.rect.contains(point))
     }
 
     /// Returns `true` if `rect` overlaps any exclusion zone.
     pub(super) fn intersects(&self, rect: Rect) -> bool {
+        self.intersects_besides_sidebar(rect) || self.sidebar.is_some_and(|zone| zone.rect.intersects(rect))
+    }
+
+    /// Like [`Self::intersects`], ignoring the auto-hiding sidebar zone.
+    pub(super) fn intersects_besides_sidebar(&self, rect: Rect) -> bool {
         self.zones.iter().any(|zone| zone.intersects(rect))
+    }
+
+    /// Whether a workspace label is blocked. The label being renamed ignores the collapsed
+    /// sidebar strip: nothing else would show its editor.
+    pub(super) fn blocks_label(&self, rect: Rect, renaming: bool) -> bool {
+        self.intersects_besides_sidebar(rect)
+            || self
+                .sidebar
+                .is_some_and(|zone| zone.rect.intersects(rect) && !(renaming && zone.collapsed))
     }
 }
 
@@ -252,6 +281,32 @@ mod tests {
         assert!(exclusion.contains(Pos2::new(200.0, 300.0)));
         assert!(!exclusion.contains(Pos2::new(99.0, 300.0)));
         assert!(!exclusion.contains(Pos2::new(301.0, 300.0)));
+    }
+
+    #[test]
+    fn overlay_exclusion_separates_the_auto_hide_sidebar_zone() {
+        let sidebar = Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(100.0, 100.0));
+        let other = Rect::from_min_max(Pos2::new(200.0, 0.0), Pos2::new(300.0, 100.0));
+        let under_sidebar = Rect::from_min_max(Pos2::new(10.0, 10.0), Pos2::new(50.0, 30.0));
+        let under_other = Rect::from_min_max(Pos2::new(210.0, 10.0), Pos2::new(250.0, 30.0));
+        let exclusion = OverlayExclusion::new(vec![other]).with_auto_hide_sidebar(sidebar, false);
+
+        assert!(exclusion.intersects(under_sidebar));
+        assert!(!exclusion.intersects_besides_sidebar(under_sidebar));
+        assert!(exclusion.intersects_besides_sidebar(under_other));
+        assert!(exclusion.contains(Pos2::new(50.0, 50.0)));
+        assert!(exclusion.blocks_label(under_sidebar, true));
+        assert!(exclusion.blocks_label(under_sidebar, false));
+    }
+
+    #[test]
+    fn collapsed_sidebar_strip_only_lets_the_renamed_label_through() {
+        let strip = Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(6.0, 100.0));
+        let label = Rect::from_min_max(Pos2::new(4.0, 10.0), Pos2::new(50.0, 30.0));
+        let exclusion = OverlayExclusion::new(Vec::new()).with_auto_hide_sidebar(strip, true);
+
+        assert!(exclusion.blocks_label(label, false));
+        assert!(!exclusion.blocks_label(label, true));
     }
 
     #[test]

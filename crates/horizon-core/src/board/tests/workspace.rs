@@ -435,6 +435,48 @@ fn explicit_position_overrides_default_tiling() {
 }
 
 #[test]
+fn new_panel_never_overlaps_a_resized_or_moved_panel_in_a_manual_workspace() {
+    let mut board = Board::new();
+    let workspace_id = board.create_workspace("manual");
+    assert!(board.clear_workspace_layout(workspace_id));
+    let first = board
+        .create_panel(editor_panel_options(), workspace_id)
+        .expect("first panel should spawn");
+    let first_position = board.panel(first).expect("first panel").layout.position;
+    // The user stretches the first panel over the next tiles and nudges it off the grid.
+    assert!(board.resize_panel(
+        first,
+        [DEFAULT_PANEL_SIZE[0] * 2.0 + TILE_GAP, DEFAULT_PANEL_SIZE[1] * 1.5]
+    ));
+    assert!(board.move_panel(first, [first_position[0] + 15.0, first_position[1] + 10.0]));
+
+    for _ in 0..3 {
+        board
+            .create_panel(editor_panel_options(), workspace_id)
+            .expect("panel should spawn");
+    }
+
+    let rects: Vec<_> = board
+        .workspace(workspace_id)
+        .expect("workspace")
+        .panels
+        .iter()
+        .filter_map(|id| board.panel(*id))
+        .map(|panel| (panel.layout.position, panel.layout.size))
+        .collect();
+    assert_eq!(rects.len(), 4);
+    for (index, (a_pos, a_size)) in rects.iter().enumerate() {
+        for (b_pos, b_size) in rects.iter().skip(index + 1) {
+            let overlap = a_pos[0] < b_pos[0] + b_size[0] - 1.0
+                && b_pos[0] < a_pos[0] + a_size[0] - 1.0
+                && a_pos[1] < b_pos[1] + b_size[1] - 1.0
+                && b_pos[1] < a_pos[1] + a_size[1] - 1.0;
+            assert!(!overlap, "panels overlap: {a_pos:?}/{a_size:?} vs {b_pos:?}/{b_size:?}");
+        }
+    }
+}
+
+#[test]
 fn close_panels_in_workspace_keeps_workspace_available() {
     let mut board = Board::new();
     let workspace_id = board.create_workspace("alpha");

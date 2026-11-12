@@ -1,13 +1,17 @@
 //! Board side of the panel link: answers `list`/`send`/`read` requests from the socket
-//! server. Called by the UI thread only.
+//! server. Called by the UI thread only. `ask`/`reply` and the workspace broadcast live in
+//! [`ask`].
+
+mod ask;
 
 use std::path::{Path, PathBuf};
 
 use alacritty_terminal::term::TermMode;
 
+use crate::agent_detect::detect_running_agent;
 use crate::link::{
-    LinkError, LinkOk, LinkRequest, LinkResponse, MAX_READ_LINES, MAX_REQUEST_BYTES, PanelInfo, resolve_target,
-    sanitize_send_text, strip_escapes,
+    LinkEffect, LinkEffectKind, LinkError, LinkOk, LinkRequest, LinkResponse, MAX_READ_LINES, MAX_REQUEST_BYTES,
+    PanelInfo, SendTarget, resolve_target, sanitize_send_text, strip_escapes,
 };
 use crate::panel::{Panel, PanelId, PanelKind};
 
@@ -50,6 +54,24 @@ fn paste_payload(text: &str, bracketed: bool) -> Vec<u8> {
 }
 
 impl Board {
+    /// Whether `panel` runs an agent right now: an agent panel (Claude, Codex, ...), or a
+    /// shell whose live process tree contains `claude` (started by hand or by a quick-start).
+    ///
+    /// Inspects the process tree each time (Linux `/proc`; other platforms see shells as
+    /// non-agents) and is never cached or inferred from the terminal title, so call it at
+    /// the moment of delivery: a stale "yes" would type text and Enter into a bare shell.
+    #[must_use]
+    pub fn panel_runs_agent(panel: &Panel) -> bool {
+        if panel.kind.is_agent() {
+            return true;
+        }
+        panel.kind == PanelKind::Shell
+            && !panel.child_exited()
+            && panel
+                .child_pid()
+                .is_some_and(|pid| detect_running_agent(pid, &[]).is_some())
+    }
+
     /// Stores the panel-link socket exposed to newly spawned and restarted panels as
     /// `HORIZON_SOCKET`.
     pub fn set_link_socket(&mut self, path: Option<PathBuf>) {
@@ -62,27 +84,43 @@ impl Board {
     }
 
     /// Executes one panel-link request. Never panics and never writes to a panel other
-    /// than the one the target resolved to.
+    /// than the one the target resolved to. `ask`/`reply` need the pending-ask table:
+    /// they go through [`Board::serve_link`].
     pub fn handle_link_request(&mut self, request: LinkRequest) -> LinkResponse {
+        self.handle_link_request_with_effect(request).0
+    }
+
+    /// Like [`Self::handle_link_request`], also naming the panels a delivered `send` touched.
+    pub fn handle_link_request_with_effect(&mut self, request: LinkRequest) -> (LinkResponse, Option<LinkEffect>) {
+        let mut effect = None;
         let result = match request {
-            LinkRequest::List => Ok(LinkOk::Panels(self.link_panels())),
+            LinkRequest::List => Ok(LinkOk::Panels(self.link_panels(true))),
             LinkRequest::Send {
-                target, text, enter, ..
-            } => self.link_send(&target, &text, enter),
+                target,
+                text,
+                enter,
+                from_id,
+                ..
+            } => self
+                .link_send(&target, &text, enter, from_id.as_deref())
+                .map(|(ok, touched)| {
+                    effect = Some(touched);
+                    ok
+                }),
             LinkRequest::Read { target, lines } => self.link_read(&target, lines),
+            LinkRequest::Ask { .. } | LinkRequest::Reply { .. } => Err(LinkError::BadRequest(
+                "ask and reply are only served together with the pending-ask table".to_owned(),
+            )),
         };
-        match result {
-            Ok(ok) => LinkResponse::Ok(ok),
-            Err(error) => LinkResponse::Err {
-                code: error.code(),
-                message: error.to_string(),
-            },
-        }
+        (response_of(result), effect)
     }
 
     /// Terminal-backed panels only; names are escape-stripped because they may carry
     /// terminal-controlled titles.
-    fn link_panels(&self) -> Vec<PanelInfo> {
+    ///
+    /// `is_agent` costs a `/proc` walk per shell, so it is only computed for `detect_agents`
+    /// (the `list` answer); target resolution does not read it.
+    fn link_panels(&self, detect_agents: bool) -> Vec<PanelInfo> {
         self.panels
             .iter()
             .filter(|panel| panel.terminal().is_some())
@@ -94,25 +132,44 @@ impl Board {
                     .map(|workspace| strip_escapes(&workspace.name))
                     .unwrap_or_default(),
                 kind: kind_label(panel.kind).to_owned(),
-                is_agent: panel.kind.is_agent(),
+                is_agent: detect_agents && Self::panel_runs_agent(panel),
             })
             .collect()
     }
 
     fn link_target(&self, target: &str) -> Result<PanelId, LinkError> {
-        let panels = self.link_panels();
+        let panels = self.link_panels(false);
         let info = resolve_target(&panels, target)?;
         self.panel_id_by_local_id(&info.id).ok_or(LinkError::Closed)
     }
 
-    fn link_send(&mut self, target: &str, text: &str, enter: bool) -> Result<LinkOk, LinkError> {
+    fn link_send(
+        &mut self,
+        target: &SendTarget,
+        text: &str,
+        enter: bool,
+        from_id: Option<&str>,
+    ) -> Result<(LinkOk, LinkEffect), LinkError> {
         // The socket server already caps the whole line; this keeps the board safe for any caller.
         if text.len() > MAX_REQUEST_BYTES {
             return Err(LinkError::TooLarge);
         }
-        let id = self.link_target(target)?;
-        self.deliver_text(id, text, enter)?;
-        Ok(LinkOk::Sent)
+        let sender = from_id.and_then(|local_id| self.panel_id_by_local_id(local_id));
+        match target {
+            SendTarget::Panel(target) => {
+                let id = self.link_target(target)?;
+                self.link_deliver(id, text, enter)?;
+                let local_id = self.panel(id).map(|panel| panel.local_id.clone()).unwrap_or_default();
+                let effect = LinkEffect {
+                    kind: LinkEffectKind::Send,
+                    from: sender,
+                    to: vec![id],
+                    skipped: 0,
+                };
+                Ok((LinkOk::sent_to(&local_id), effect))
+            }
+            SendTarget::AllInWorkspace => self.link_broadcast(sender, text, enter),
+        }
     }
 
     /// Types `text` into `panel` the way `link send` does: sanitised, wrapped in bracketed
@@ -127,7 +184,13 @@ impl Board {
         if text.len() > MAX_REQUEST_BYTES {
             return Err(LinkError::TooLarge);
         }
-        let panel = self.panel_mut(panel).ok_or(LinkError::Closed)?;
+        self.link_deliver(panel, text, enter)
+    }
+
+    /// Types `text` into one panel (bracketed paste when the terminal asked for it), then
+    /// Enter if requested.
+    fn link_deliver(&mut self, id: PanelId, text: &str, enter: bool) -> Result<(), LinkError> {
+        let panel = self.panel_mut(id).ok_or(LinkError::Closed)?;
         let bracketed = live_terminal_mode(panel)?.contains(TermMode::BRACKETED_PASTE);
         let text = sanitize_send_text(text);
         // Without bracketed paste a newline is a typed Enter: the lines would execute, which
@@ -168,6 +231,20 @@ impl Board {
             .collect::<Vec<_>>()
             .join("\n");
         Ok(LinkOk::Text(text))
+    }
+}
+
+fn response_of(result: Result<LinkOk, LinkError>) -> LinkResponse {
+    match result {
+        Ok(ok) => LinkResponse::Ok(ok),
+        Err(error) => error_response(&error),
+    }
+}
+
+fn error_response(error: &LinkError) -> LinkResponse {
+    LinkResponse::Err {
+        code: error.code(),
+        message: error.to_string(),
     }
 }
 
