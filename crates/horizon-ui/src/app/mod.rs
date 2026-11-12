@@ -1,6 +1,7 @@
 mod actions;
 mod attention_feed;
 mod canvas;
+mod claude_auto;
 mod claude_launcher;
 mod claude_quick_start;
 mod detached_viewports;
@@ -30,6 +31,7 @@ mod startup_session;
 #[cfg(test)]
 mod test_support;
 mod updates;
+mod usage_alerts;
 mod usage_chips;
 pub(crate) mod util;
 mod view;

@@ -1,7 +1,9 @@
 //! Claude usage domain: data model, credential reader, usage-response parser,
 //! HTTP client, on-disk cache and background poller.
 
+mod alerts;
 mod api;
+mod auto_pick;
 mod cache;
 mod credentials;
 mod model;
@@ -11,7 +13,9 @@ mod test_support;
 
 use thiserror::Error;
 
+pub use alerts::{AlertLevel, AlertTracker};
 pub use api::{USAGE_URL, fetch_usage, refresh_profile};
+pub use auto_pick::{AutoPick, AutoReason, ProfileUsageView, SkipReason, pick_auto};
 pub use cache::{load_cache, save_cache};
 pub use credentials::{AccessToken, Credentials, read_account, read_credentials, token_expired};
 pub use model::{

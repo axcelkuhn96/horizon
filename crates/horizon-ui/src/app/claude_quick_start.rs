@@ -126,6 +126,8 @@ pub(super) enum StartFailure {
     Unquotable,
     /// The link write into the panel failed.
     WriteFailed,
+    /// Auto found no profile with a usable login and weekly quota.
+    NoAccount,
 }
 
 impl StartFailure {
@@ -137,6 +139,7 @@ impl StartFailure {
             Self::Exited => "Shell exited \u{2014} nothing to type into",
             Self::Unquotable => "The profile command can't be typed safely",
             Self::WriteFailed => "Could not write to this terminal",
+            Self::NoAccount => "No Claude account available",
         }
     }
 }
@@ -340,6 +343,7 @@ mod tests {
             StartFailure::Exited,
             StartFailure::Unquotable,
             StartFailure::WriteFailed,
+            StartFailure::NoAccount,
         ];
         let mut messages: Vec<_> = all.iter().map(|failure| failure.message()).collect();
         messages.sort_unstable();

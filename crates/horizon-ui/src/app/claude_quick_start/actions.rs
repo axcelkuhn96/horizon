@@ -8,6 +8,7 @@ use horizon_core::link::{LinkRequest, LinkResponse};
 use horizon_core::{PanelId, PanelKind};
 
 use crate::app::HorizonApp;
+use crate::app::claude_auto::MIN_PROFILES_FOR_AUTO;
 use crate::app::claude_launcher::{RowUsage, claude_profile_names, find_profile_preset, is_profile_preset};
 use crate::app::hub_ui;
 
@@ -48,13 +49,14 @@ impl HorizonApp {
     }
 
     fn build_quick_rows(&mut self, names: Vec<String>) -> Vec<Row> {
+        let with_auto = names.len() >= MIN_PROFILES_FOR_AUTO;
         let accents: Vec<Color32> = self
             .hub
             .accent_slots(&names)
             .iter()
             .map(|slot| hub_ui::accent_color(*slot))
             .collect();
-        names
+        let mut rows: Vec<Row> = names
             .into_iter()
             .zip(accents)
             .map(|(name, accent)| {
@@ -62,7 +64,11 @@ impl HorizonApp {
                 let email = self.hub.usage.account_email(&name);
                 Row::new(name, accent, email, &usage)
             })
-            .collect()
+            .collect();
+        if with_auto {
+            rows.insert(0, Row::auto(&self.auto_choice()));
+        }
+        rows
     }
 
     fn open_quick_start_strip(&mut self, panel_id: PanelId) {
@@ -86,7 +92,7 @@ impl HorizonApp {
         {
             None => return,
             Some(expanded) => match expanded.stage {
-                Stage::Modes { profile } => expanded.rows.get(profile).map(|row| row.name.clone()),
+                Stage::Modes { profile } => expanded.rows.get(profile).map(|row| (row.name.clone(), row.auto)),
                 Stage::Collapsed | Stage::Profiles => None,
             },
         };
@@ -95,8 +101,9 @@ impl HorizonApp {
             self.hub.quick_start.expanded = None;
             return;
         }
-        let remembered = current.and_then(|current| names.iter().position(|name| *name == current));
         let rows = self.build_quick_rows(names);
+        let remembered =
+            current.and_then(|(name, auto)| rows.iter().position(|row| row.name == name && row.auto == auto));
         if let Some(expanded) = self.hub.quick_start.expanded.as_mut() {
             let stage = remembered.map_or(Stage::Profiles, |profile| Stage::Modes { profile });
             expanded.replace_rows(stage, rows, version);
@@ -125,18 +132,36 @@ impl HorizonApp {
         else {
             return;
         };
+        if let StripEvent::Pick(index) = event
+            && expanded.rows.get(index).is_some_and(|row| row.auto && row.dim)
+        {
+            // Auto with nothing to pick: say so now instead of after the mode page.
+            self.hub
+                .quick_start
+                .show_failure(panel_id, StartFailure::NoAccount, Instant::now());
+            return;
+        }
         let (next, request) = expanded.stage.apply(event, expanded.rows.len());
-        let started = request
-            .and_then(|StartRequest { profile, mode }| expanded.rows.get(profile).map(|row| (row.name.clone(), mode)));
+        let started = request.and_then(|StartRequest { profile, mode }| {
+            expanded.rows.get(profile).map(|row| (row.name.clone(), row.auto, mode))
+        });
         expanded.stage = next;
         if next == Stage::Collapsed {
             self.hub.quick_start.expanded = None;
         }
-        if let Some((name, mode)) = started
-            && let Err(failure) = self.run_claude_quick_start(ctx, panel_id, &name, mode)
-        {
-            tracing::warn!(profile = %name, ?failure, "quick start did not run");
-            self.hub.quick_start.show_failure(panel_id, failure, Instant::now());
+        if let Some((name, auto, mode)) = started {
+            // Auto is resolved now, from the usage as it is at this moment.
+            let target = if auto {
+                self.current_auto_pick()
+                    .map(|pick| pick.name)
+                    .ok_or(StartFailure::NoAccount)
+            } else {
+                Ok(name.clone())
+            };
+            if let Err(failure) = target.and_then(|target| self.run_claude_quick_start(ctx, panel_id, &target, mode)) {
+                tracing::warn!(profile = %name, ?failure, "quick start did not run");
+                self.hub.quick_start.show_failure(panel_id, failure, Instant::now());
+            }
         }
     }
 

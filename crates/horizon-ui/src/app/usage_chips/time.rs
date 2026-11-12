@@ -57,7 +57,7 @@ pub(super) fn format_clock(unix: i64, offset: Option<i64>, weekday: bool) -> Str
 
 /// Time until a reset: `45s`-level precision is noise, so `<1m`, `12m`, `1h 12m`, `3d 4h`.
 #[must_use]
-pub(super) fn format_relative(secs: i64) -> String {
+pub(in crate::app) fn format_relative(secs: i64) -> String {
     if secs <= 0 {
         "now".to_owned()
     } else if secs < MINUTE {

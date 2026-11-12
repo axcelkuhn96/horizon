@@ -28,10 +28,6 @@ const CLOSE_SIZE: f32 = 14.0;
 pub(super) enum ToastKind {
     Info,
     Warn,
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "raised by the status and usage toasts of later tasks")
-    )]
     Error,
 }
 

@@ -23,6 +23,7 @@ use super::hub_state::HubState;
 use super::hub_ui::{self, Severity};
 
 pub(super) use paint::{show_chips, show_overflow_rows};
+pub(super) use time::format_relative;
 
 const IDENT_MAX_FULL: usize = 10;
 const IDENT_MAX_COMPACT: usize = 5;
@@ -726,6 +727,7 @@ impl HubState {
 
     /// Applies a finished snapshot; the launcher shows the same data, so its rows rebuild once.
     fn apply_usage_snapshot(&mut self, snapshot: Vec<ProfileUsage>) {
+        self.observe_usage_alerts(&snapshot, SystemTime::now());
         self.usage.apply_snapshot(snapshot);
         self.invalidate_launcher_rows();
         self.usage.synced_rows_version = Some(self.rows_version);
