@@ -11,6 +11,9 @@ Patch aditivo sobre o upstream **v0.2.7**.
 ### Attention Feed
 - **Itens `claude-status` fecham**: "Go to panel" resolve o item; focar o painel (com a janela em foco) ou um novo prompt também; o × volta a funcionar (o clique do item inteiro engolia os botões) e não é re-levantado até a próxima transição ocupado→ocioso. Sem itens abertos o feed vira só uma pílula `Attention · 0`.
 
+### Terminal
+- **Mouse em apps com tracking** (Claude Code, vim, tmux): o clique esquerdo (press e release) agora vai para o app em formato SGR, inclusive o primeiro clique num painel ativo; antes só Alt/Ctrl+clique chegava. **Shift+clique/arrastar** continua selecionando localmente.
+
 ## [0.5.0] — 2026-11-12
 
 ### Claude Hub — contas, uso e sessões
