@@ -3,7 +3,7 @@
 Fork pessoal do [peters/horizon](https://github.com/peters/horizon) com melhorias de navegação e UX.
 Patch aditivo sobre o upstream **v0.2.7**.
 
-## [Unreleased]
+## [0.5.1] — 2026-11-13
 
 ### Claude Hub
 - **Chips de uso**: mostram só o nick da conta (início do e-mail; nome do perfil se o e-mail for desconhecido) e, depois do %, o tempo até o reset semanal (`4d`, `17h`, `35m`). No modo compacto o contador some.
