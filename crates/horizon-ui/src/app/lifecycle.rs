@@ -935,6 +935,9 @@ impl HorizonApp {
             for attention_id in feed_result.dismissed_ids {
                 let _ = self.board.dismiss_attention(attention_id);
             }
+            for attention_id in feed_result.resolved_ids {
+                let _ = self.board.resolve_attention(attention_id);
+            }
             if let Some(panel_id) = feed_result.focus_panel {
                 self.board.focus(panel_id);
                 if let Some(ws_id) = self.board.panel(panel_id).map(|p| p.workspace_id)

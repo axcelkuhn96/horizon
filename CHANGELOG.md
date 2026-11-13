@@ -8,6 +8,9 @@ Patch aditivo sobre o upstream **v0.2.7**.
 ### Claude Hub
 - **Chips de uso**: mostram só o nick da conta (início do e-mail; nome do perfil se o e-mail for desconhecido) e, depois do %, o tempo até o reset semanal (`4d`, `17h`, `35m`). No modo compacto o contador some.
 
+### Attention Feed
+- **Itens `claude-status` fecham**: "Go to panel" resolve o item; focar o painel (com a janela em foco) ou um novo prompt também; o × volta a funcionar (o clique do item inteiro engolia os botões) e não é re-levantado até a próxima transição ocupado→ocioso. Sem itens abertos o feed vira só uma pílula `Attention · 0`.
+
 ## [0.5.0] — 2026-11-12
 
 ### Claude Hub — contas, uso e sessões

@@ -1,4 +1,6 @@
-use egui::{Button, Color32, CornerRadius, Id, Order, Pos2, Rect, RichText, ScrollArea, Sense, Vec2};
+use egui::{
+    Align2, Button, Color32, CornerRadius, FontId, Id, Order, Pos2, Rect, RichText, ScrollArea, Sense, UiBuilder, Vec2,
+};
 use horizon_core::{AttentionId, AttentionItem, AttentionSeverity, Board, OverlaysConfig, PanelId};
 use std::time::SystemTime;
 
@@ -9,17 +11,72 @@ const FEED_MARGIN: f32 = 16.0;
 const FEED_ITEM_SPACING: f32 = 4.0;
 const FEED_HEADER_BLOCK_HEIGHT: f32 = 30.0;
 const FEED_ITEM_VIEWPORT_HEIGHT: f32 = 74.0;
+/// Size of the collapsed feed: a header pill shown while nothing is open.
+const FEED_PILL_WIDTH: f32 = 104.0;
+const FEED_PILL_HEIGHT: f32 = 22.0;
 
 #[derive(Default)]
 pub struct AttentionFeedResult {
     pub focus_panel: Option<PanelId>,
     pub dismissed_ids: Vec<AttentionId>,
+    /// Items the user went to: they are done with once the panel is focused.
+    pub resolved_ids: Vec<AttentionId>,
 }
 
 #[derive(Default)]
 struct FeedItemAction {
     focus_panel: Option<PanelId>,
     dismiss_id: Option<AttentionId>,
+    resolve_id: Option<AttentionId>,
+}
+
+impl FeedItemAction {
+    /// The user went to the item's panel.
+    fn go_to(item: &AttentionItem) -> Self {
+        Self {
+            focus_panel: item.panel_id,
+            resolve_id: Some(item.id),
+            ..Self::default()
+        }
+    }
+}
+
+/// The feed shows only its header pill while no item is open (resolved items linger in the
+/// list for a moment but are not worth a full-height panel).
+fn feed_collapsed(items: &[&AttentionItem]) -> bool {
+    !items.iter().any(|item| item.is_open())
+}
+
+fn feed_offset_y(minimap_height: f32) -> f32 {
+    FEED_MARGIN + minimap_height + if minimap_height > 0.0 { 8.0 } else { 0.0 }
+}
+
+fn render_collapsed_pill(ctx: &egui::Context, minimap_height: f32) {
+    egui::Area::new(Id::new("attention_feed"))
+        .anchor(
+            egui::Align2::RIGHT_BOTTOM,
+            Vec2::new(-FEED_MARGIN, -feed_offset_y(minimap_height)),
+        )
+        .order(Order::Foreground)
+        .interactable(false)
+        .show(ctx, |ui| {
+            let (rect, _) = ui.allocate_exact_size(Vec2::new(FEED_PILL_WIDTH, FEED_PILL_HEIGHT), Sense::hover());
+            let painter = ui.painter();
+            painter.rect(
+                rect,
+                CornerRadius::same(11),
+                theme::BG_ELEVATED(),
+                egui::Stroke::new(1.0_f32, theme::blend(theme::BG_ELEVATED(), theme::FG_DIM(), 0.15)),
+                egui::StrokeKind::Inside,
+            );
+            painter.text(
+                rect.center(),
+                Align2::CENTER_CENTER,
+                "Attention \u{b7} 0",
+                FontId::proportional(10.5),
+                theme::FG_DIM(),
+            );
+        });
 }
 
 /// Renders the attention feed overlay and returns any user actions.
@@ -31,12 +88,13 @@ pub fn render_attention_feed(
 ) -> AttentionFeedResult {
     let now = SystemTime::now();
     let items = visible_attention_items(&board.attention, now);
-    if items.is_empty() {
+    if feed_collapsed(&items) {
+        render_collapsed_pill(ctx, minimap_height);
         return AttentionFeedResult::default();
     }
 
     let feed_width = overlays.attention_feed_width.max(FEED_MIN_WIDTH);
-    let offset_y = FEED_MARGIN + minimap_height + if minimap_height > 0.0 { 8.0 } else { 0.0 };
+    let offset_y = feed_offset_y(minimap_height);
     let feed_target_height = overlays
         .attention_feed_height
         .max(FEED_HEADER_BLOCK_HEIGHT + FEED_ITEM_VIEWPORT_HEIGHT);
@@ -129,6 +187,9 @@ fn render_feed_list(
                 if let Some(id) = action.dismiss_id {
                     result.dismissed_ids.push(id);
                 }
+                if let Some(id) = action.resolve_id {
+                    result.resolved_ids.push(id);
+                }
                 ui.add_space(FEED_ITEM_SPACING);
             }
         });
@@ -152,41 +213,54 @@ fn render_feed_item(ui: &mut egui::Ui, item: &AttentionItem, feed_width: f32) ->
         .corner_radius(6.0)
         .inner_margin(egui::Margin::symmetric(8, 5));
 
-    let resp = frame
-        .show(ui, |ui| {
-            ui.set_width(feed_width - 16.0);
-            render_feed_item_header(ui, item, is_resolved, color);
-            let msg_color = if is_resolved {
-                theme::alpha(theme::FG_SOFT(), 100)
+    // The whole item is one click target. Its sense must be registered before the buttons
+    // inside it (a `UiBuilder` sense is), or it would sit on top of them and swallow their clicks.
+    let scope = ui.scope_builder(
+        UiBuilder::new()
+            .id_salt(("attn_item", item.id.0))
+            .sense(if item.panel_id.is_some() {
+                Sense::click()
             } else {
-                theme::FG_SOFT()
-            };
-            ui.label(RichText::new(&item.summary).size(11.0).color(msg_color));
+                Sense::hover()
+            }),
+        |ui| {
+            frame.show(ui, |ui| {
+                ui.set_width(feed_width - 16.0);
+                render_feed_item_header(ui, item, is_resolved, color);
+                let msg_color = if is_resolved {
+                    theme::alpha(theme::FG_SOFT(), 100)
+                } else {
+                    theme::FG_SOFT()
+                };
+                ui.label(RichText::new(&item.summary).size(11.0).color(msg_color));
 
-            ui.horizontal(|ui| {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if item.is_open() {
-                        let dismiss = ui.add(
-                            Button::new(RichText::new("\u{00D7}").size(11.0).color(theme::FG_DIM()))
-                                .fill(theme::alpha(theme::BG_ELEVATED(), 140))
-                                .corner_radius(CornerRadius::same(4))
-                                .stroke(egui::Stroke::NONE),
-                        );
-                        dismiss_clicked = dismiss.clicked();
-                    }
-                    if item.is_open() && item.panel_id.is_some() {
-                        let goto = ui.add(
-                            egui::Button::new(RichText::new("Go to panel \u{2192}").size(9.5).color(theme::ACCENT()))
+                ui.horizontal(|ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if item.is_open() {
+                            let dismiss = ui.add(
+                                Button::new(RichText::new("\u{00D7}").size(11.0).color(theme::FG_DIM()))
+                                    .fill(theme::alpha(theme::BG_ELEVATED(), 140))
+                                    .corner_radius(CornerRadius::same(4))
+                                    .stroke(egui::Stroke::NONE),
+                            );
+                            dismiss_clicked = dismiss.clicked();
+                        }
+                        if item.is_open() && item.panel_id.is_some() {
+                            let goto = ui.add(
+                                egui::Button::new(
+                                    RichText::new("Go to panel \u{2192}").size(9.5).color(theme::ACCENT()),
+                                )
                                 .fill(theme::alpha(theme::ACCENT(), 20))
                                 .corner_radius(CornerRadius::same(4))
                                 .stroke(egui::Stroke::NONE),
-                        );
-                        goto_clicked = goto.clicked();
-                    }
+                            );
+                            goto_clicked = goto.clicked();
+                        }
+                    });
                 });
-            });
-        })
-        .response;
+            })
+        },
+    );
 
     if dismiss_clicked {
         return FeedItemAction {
@@ -196,22 +270,15 @@ fn render_feed_item(ui: &mut egui::Ui, item: &AttentionItem, feed_width: f32) ->
     }
 
     if goto_clicked {
-        return FeedItemAction {
-            focus_panel: item.panel_id,
-            ..FeedItemAction::default()
-        };
+        return FeedItemAction::go_to(item);
     }
 
     // Make the whole item clickable to navigate
     if item.panel_id.is_some() {
-        let interact = ui.interact(resp.rect, Id::new(("attn_item", item.id.0)), Sense::click());
-        if interact.clicked() {
-            return FeedItemAction {
-                focus_panel: item.panel_id,
-                ..FeedItemAction::default()
-            };
+        if scope.response.clicked() {
+            return FeedItemAction::go_to(item);
         }
-        if interact.hovered() {
+        if scope.response.hovered() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         }
     }
@@ -290,7 +357,7 @@ fn format_elapsed(time: SystemTime) -> String {
     }
 }
 
-/// Estimated outer bounding rect of the attention feed overlay.  Used by
+/// Estimated outer bounding rect of the attention feed overlay (the pill while it is collapsed).  Used by
 /// overlay exclusion to prevent canvas-space elements from rendering behind
 /// this widget.
 pub(super) fn estimated_outer_rect(
@@ -298,10 +365,17 @@ pub(super) fn estimated_outer_rect(
     minimap_height: f32,
     overlays: &OverlaysConfig,
     board: &Board,
-) -> Option<Rect> {
+) -> Rect {
     let now = std::time::SystemTime::now();
-    if visible_attention_items(&board.attention, now).is_empty() {
-        return None;
+    let offset_y = feed_offset_y(minimap_height);
+    if feed_collapsed(&visible_attention_items(&board.attention, now)) {
+        return Rect::from_min_max(
+            Pos2::new(
+                viewport.max.x - FEED_MARGIN - FEED_PILL_WIDTH,
+                viewport.max.y - offset_y - FEED_PILL_HEIGHT,
+            ),
+            Pos2::new(viewport.max.x - FEED_MARGIN, viewport.max.y - offset_y),
+        );
     }
 
     let feed_w = overlays.attention_feed_width.max(FEED_MIN_WIDTH) + 18.0;
@@ -309,15 +383,14 @@ pub(super) fn estimated_outer_rect(
         .attention_feed_height
         .max(FEED_HEADER_BLOCK_HEIGHT + FEED_ITEM_VIEWPORT_HEIGHT)
         + 14.0;
-    let offset_y = FEED_MARGIN + minimap_height + if minimap_height > 0.0 { 8.0 } else { 0.0 };
 
-    Some(Rect::from_min_max(
+    Rect::from_min_max(
         Pos2::new(
             viewport.max.x - FEED_MARGIN - feed_w,
             viewport.max.y - offset_y - feed_h,
         ),
         Pos2::new(viewport.max.x - FEED_MARGIN, viewport.max.y - offset_y),
-    ))
+    )
 }
 
 fn snapped_feed_list_height(feed_target_height: f32) -> f32 {
@@ -358,7 +431,10 @@ mod tests {
         AttentionId, AttentionItem, AttentionSeverity, AttentionState, Board, OverlaysConfig, PanelId, WorkspaceId,
     };
 
-    use super::{estimated_outer_rect, snapped_feed_list_height, visible_attention_items};
+    use super::{
+        FeedItemAction, estimated_outer_rect, feed_collapsed, render_feed_item, snapped_feed_list_height,
+        visible_attention_items,
+    };
 
     fn test_attention_item(
         id: u64,
@@ -424,7 +500,84 @@ mod tests {
     }
 
     #[test]
-    fn estimated_outer_rect_hides_when_only_stale_items_remain() {
+    fn the_feed_collapses_unless_an_item_is_open() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1000);
+        let resolved = test_attention_item(
+            1,
+            now - Duration::from_secs(10),
+            AttentionState::Resolved,
+            Some(now - Duration::from_secs(5)),
+        );
+        let open = test_attention_item(2, now - Duration::from_secs(5), AttentionState::Open, None);
+
+        assert!(feed_collapsed(&[]));
+        assert!(feed_collapsed(&[&resolved]));
+        assert!(!feed_collapsed(&[&resolved, &open]));
+    }
+
+    /// Sweeps pointer clicks over a rendered open item and reports what each click did.
+    fn click_outcomes(item: &AttentionItem) -> Vec<FeedItemAction> {
+        let ctx = egui::Context::default();
+        let screen = Rect::from_min_size(Pos2::ZERO, egui::vec2(400.0, 200.0));
+        let run = |events: Vec<egui::Event>| {
+            let mut action = FeedItemAction::default();
+            let raw = egui::RawInput {
+                screen_rect: Some(screen),
+                events,
+                ..egui::RawInput::default()
+            };
+            let _ = ctx.run(raw, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    action = render_feed_item(ui, item, 300.0);
+                });
+            });
+            action
+        };
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let _ = run(Vec::new());
+        let mut outcomes = Vec::new();
+        for y in (0..110_u8).step_by(5) {
+            for x in (0..340_u16).step_by(5) {
+                let pos = Pos2::new(f32::from(x), f32::from(y));
+                let _ = run(vec![egui::Event::PointerMoved(pos)]);
+                let _ = run(vec![button(pos, true)]);
+                outcomes.push(run(vec![button(pos, false)]));
+            }
+        }
+        outcomes
+    }
+
+    #[test]
+    fn clicking_the_buttons_of_an_item_reaches_them_instead_of_the_whole_item() {
+        let item = test_attention_item(7, SystemTime::now(), AttentionState::Open, None);
+
+        let outcomes = click_outcomes(&item);
+
+        assert!(
+            outcomes.iter().any(|action| action.dismiss_id == Some(AttentionId(7))),
+            "the dismiss button must be clickable"
+        );
+        assert!(
+            outcomes
+                .iter()
+                .any(|action| action.focus_panel == Some(PanelId(7)) && action.resolve_id == Some(AttentionId(7))),
+            "going to the panel resolves the item"
+        );
+        assert!(
+            outcomes
+                .iter()
+                .all(|action| action.dismiss_id.is_none() || action.focus_panel.is_none()),
+            "one click never both dismisses and navigates"
+        );
+    }
+
+    #[test]
+    fn estimated_outer_rect_is_the_small_pill_when_only_stale_items_remain() {
         let now = SystemTime::now();
         let mut board = Board::new();
         board.attention.push(test_attention_item(
@@ -441,7 +594,8 @@ mod tests {
             &board,
         );
 
-        assert_eq!(rect, None);
+        assert!((rect.width() - super::FEED_PILL_WIDTH).abs() <= f32::EPSILON);
+        assert!((rect.height() - super::FEED_PILL_HEIGHT).abs() <= f32::EPSILON);
     }
 
     #[test]
@@ -468,8 +622,7 @@ mod tests {
                 minimap_auto_hide: false,
             },
             &board,
-        )
-        .expect("attention feed rect");
+        );
 
         assert_eq!(rect.max, Pos2::new(1184.0, 596.0));
         assert!((rect.width() - 258.0).abs() <= f32::EPSILON);
