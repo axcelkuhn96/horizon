@@ -226,14 +226,6 @@ fn paint_chip(painter: &egui::Painter, rect: Rect, entry: &ChipEntry, layout: &C
         theme::FG().gamma_multiply(fade),
     );
     x += name.size().x;
-    if let Some(id) = layout.id(look.compact) {
-        painter.galley(
-            Pos2::new(x, cy - id.size().y / 2.0),
-            Arc::clone(id),
-            theme::FG_DIM().gamma_multiply(fade),
-        );
-        x += id.size().x;
-    }
 
     let usage = entry.usage.as_ref();
     let shown = ShownWindows::of(usage);
@@ -256,6 +248,13 @@ fn paint_chip(painter: &egui::Painter, rect: Rect, entry: &ChipEntry, layout: &C
         _ if shown.seven => {
             x += SECTION_GAP;
             paint_group(painter, Pos2::new(x, cy), layout, usage, false, look);
+            if let Some(countdown) = layout.countdown.as_ref().filter(|_| !look.compact) {
+                painter.galley(
+                    Pos2::new(x + GROUP_WIDTH_FULL, cy - countdown.size().y / 2.0),
+                    Arc::clone(countdown),
+                    theme::FG_DIM().gamma_multiply(fade),
+                );
+            }
         }
         _ => {}
     }

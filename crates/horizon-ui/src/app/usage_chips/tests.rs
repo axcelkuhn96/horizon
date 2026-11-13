@@ -51,7 +51,8 @@ fn severity_api_critical_overrides() {
 fn chip_label_shows_email_local_part() {
     let u = usage("claude2", Some("gutosjc@example.com"), Some(37.0), Some(12.0));
 
-    assert_eq!(chip_label(&u, false), "claude2 \u{b7} gutosjc  5h 37%  7d 12%");
+    assert_eq!(chip_label(&u, false), "gutosjc  5h 37%  7d 12%");
+    assert!(!chip_label(&u, false).contains("claude2"));
 }
 
 #[test]
@@ -63,21 +64,35 @@ fn chip_label_truncates_identifier() {
         Some(12.0),
     );
 
-    assert_eq!(
-        chip_label(&u, false),
-        "claude2 \u{b7} averylonga\u{2026}  5h 37%  7d 12%"
-    );
-    assert_eq!(chip_label(&u, true), "claude2 \u{b7} avery\u{2026}  7d 12%");
+    assert_eq!(chip_label(&u, false), "averylongaccou\u{2026}  5h 37%  7d 12%");
+    assert_eq!(chip_label(&u, true), "averylon\u{2026}  7d 12%");
 }
 
 #[test]
-fn chip_label_without_email_omits_identifier() {
+fn chip_label_without_email_falls_back_to_the_profile_name() {
     let u = usage("claude2", None, Some(37.0), Some(12.0));
 
     assert_eq!(chip_label(&u, false), "claude2  5h 37%  7d 12%");
     assert_eq!(chip_label(&u, true), "claude2  7d 12%");
     let blank = usage("claude2", Some("@example.com"), Some(1.0), Some(2.0));
     assert_eq!(chip_label(&blank, true), "claude2  7d 2%");
+    let long = usage("a-very-long-profile", None, Some(1.0), Some(2.0));
+    assert_eq!(chip_label(&long, false), "a-very-long-pr\u{2026}  5h 1%  7d 2%");
+    assert_eq!(chip_label(&long, true), "a-very-l\u{2026}  7d 2%");
+}
+
+#[test]
+fn chip_entry_nick_is_the_email_local_part_or_the_profile_name() {
+    let with_email = ChipEntry::build(
+        "claude2",
+        Some(&usage("claude2", Some("gutosjc@example.com"), Some(1.0), Some(2.0))),
+        Some(0),
+    );
+    assert_eq!(with_email.nick(false), "gutosjc");
+    assert_eq!(with_email.nick(true), "gutosjc");
+    assert_eq!(with_email.name, "claude2");
+    let without = ChipEntry::build("claude2", None, Some(0));
+    assert_eq!(without.nick(false), "claude2");
 }
 
 #[test]
@@ -116,10 +131,10 @@ fn chip_label_expired_marker() {
     let mut u = usage("claude2", Some("gutosjc@example.com"), Some(37.0), Some(12.0));
     u.state = UsageState::Expired;
 
-    assert_eq!(chip_label(&u, false), "claude2 \u{b7} gutosjc  5h 37%  expired");
-    assert_eq!(chip_label(&u, true), "claude2 \u{b7} gutos\u{2026}  expired");
+    assert_eq!(chip_label(&u, false), "gutosjc  5h 37%  expired");
+    assert_eq!(chip_label(&u, true), "gutosjc  expired");
     u.state = UsageState::Missing;
-    assert_eq!(chip_label(&u, true), "claude2 \u{b7} gutos\u{2026}  no login");
+    assert_eq!(chip_label(&u, true), "gutosjc  no login");
 }
 
 #[test]
@@ -155,8 +170,8 @@ fn widths_total_adds_gaps_and_compact_is_narrower() {
     assert!((widths.total(false, 3) - (3.0 * CHIP_FULL_ESTIMATE + 2.0 * CHIP_GAP)).abs() <= f32::EPSILON);
     assert!(widths.total(true, 3) < widths.total(false, 3));
     let both = ShownWindows::of(None);
-    assert!(full_chip_width(40.0, 40.0, None, both) <= 340.0);
-    assert!(compact_chip_width(40.0, 30.0, None, both) < full_chip_width(40.0, 40.0, None, both));
+    assert!(full_chip_width(40.0, None, both, 24.0) <= 340.0);
+    assert!(compact_chip_width(40.0, None, both) < full_chip_width(40.0, None, both, 0.0));
 }
 
 #[test]
@@ -171,19 +186,18 @@ fn hidden_five_hour_window_frees_its_width() {
         seven: false,
     };
 
-    let freed = full_chip_width(40.0, 40.0, None, both) - full_chip_width(40.0, 40.0, None, seven_only);
+    let freed = full_chip_width(40.0, None, both, 0.0) - full_chip_width(40.0, None, seven_only, 0.0);
     assert!((freed - (SECTION_GAP + GROUP_WIDTH_FULL)).abs() <= f32::EPSILON);
     // Compact never had a 5h group, so hiding it changes nothing there.
-    assert!(
-        (compact_chip_width(40.0, 30.0, None, both) - compact_chip_width(40.0, 30.0, None, seven_only)).abs()
-            <= f32::EPSILON
-    );
+    assert!((compact_chip_width(40.0, None, both) - compact_chip_width(40.0, None, seven_only)).abs() <= f32::EPSILON);
     // A status pill takes the 7d slot whatever the windows say.
-    assert!(compact_chip_width(40.0, 30.0, Some(50.0), none) > compact_chip_width(40.0, 30.0, None, none));
+    assert!(compact_chip_width(40.0, Some(50.0), none) > compact_chip_width(40.0, None, none));
     assert!(
-        (full_chip_width(40.0, 0.0, None, none) - (CHIP_PAD * 2.0 + DOT_DIAMETER + DOT_GAP + 40.0)).abs()
+        (full_chip_width(40.0, None, none, 0.0) - (CHIP_PAD * 2.0 + DOT_DIAMETER + DOT_GAP + 40.0)).abs()
             <= f32::EPSILON
     );
+    // The countdown adds exactly its own width to a full chip.
+    assert!((full_chip_width(40.0, None, both, 24.0) - full_chip_width(40.0, None, both, 0.0) - 24.0).abs() <= 1e-3);
 }
 
 #[test]
@@ -229,7 +243,7 @@ fn measured_chip_without_five_hour_is_narrower_than_with_it() {
     let mut cache = None;
     let _ = ctx.run(egui::RawInput::default(), |ctx| {
         let painter = ctx.layer_painter(LayerId::new(Order::Tooltip, Id::new("usage_chips_test_hidden")));
-        cache = Some(build_cache(&painter, &entries, &[0, 1], (1, 0)));
+        cache = Some(build_cache(&painter, &entries, &[0, 1], (1, 0, 0), 0));
     });
     let cache = cache.expect("cache built inside the frame");
 
@@ -389,7 +403,7 @@ fn measured_cache_makes_compact_chips_narrower_than_full_ones() {
     let mut cache = None;
     let _ = ctx.run(egui::RawInput::default(), |ctx| {
         let painter = ctx.layer_painter(LayerId::new(Order::Tooltip, Id::new("usage_chips_test")));
-        cache = Some(build_cache(&painter, &entries, &[0], (1, 0)));
+        cache = Some(build_cache(&painter, &entries, &[0], (1, 0, 0), 0));
     });
     let cache = cache.expect("cache built inside the frame");
 
@@ -408,7 +422,7 @@ fn cache_holds_pre_laid_out_window_text() {
     let mut cache = None;
     let _ = ctx.run(egui::RawInput::default(), |ctx| {
         let painter = ctx.layer_painter(LayerId::new(Order::Tooltip, Id::new("usage_chips_test_text")));
-        cache = Some(build_cache(&painter, &entries, &[0, 1], (1, 0)));
+        cache = Some(build_cache(&painter, &entries, &[0, 1], (1, 0, 0), 0));
     });
     let cache = cache.expect("cache built inside the frame");
 
@@ -504,4 +518,110 @@ fn a_snapshot_crossing_a_weekly_threshold_queues_one_alert_toast() {
     let toasts = hub.toasts.drain_visible(Instant::now());
     assert_eq!(toasts.len(), 1);
     assert!(toasts[0].text.starts_with("a at 81% of the weekly limit"));
+}
+
+fn with_weekly_reset(mut u: ProfileUsage, resets_at: &str) -> ProfileUsage {
+    u.seven_day.resets_at = Some(resets_at.to_owned());
+    u
+}
+
+/// `2099-01-05T00:00:00Z` as Unix seconds, parsed the way the entries do.
+fn reset_unix() -> i64 {
+    parse_rfc3339_unix("2099-01-05T00:00:00Z").expect("valid timestamp")
+}
+
+fn countdown_of(entry: &ChipEntry, secs_before_reset: i64) -> Option<String> {
+    entry.countdown_text(reset_unix() - secs_before_reset)
+}
+
+#[test]
+fn countdown_text_follows_the_weekly_reset_with_unit_boundaries() {
+    let u = with_weekly_reset(usage("a", None, Some(1.0), Some(45.0)), "2099-01-05T00:00:00Z");
+    let entry = ChipEntry::build("a", Some(&u), Some(0));
+
+    assert_eq!(countdown_of(&entry, 59 * 60).as_deref(), Some("59m"));
+    assert_eq!(countdown_of(&entry, 60 * 60).as_deref(), Some("1h"));
+    assert_eq!(countdown_of(&entry, 23 * 3_600).as_deref(), Some("23h"));
+    assert_eq!(countdown_of(&entry, 86_400).as_deref(), Some("1d"));
+    assert_eq!(countdown_of(&entry, 4 * 86_400 + 5 * 3_600).as_deref(), Some("4d"));
+}
+
+#[test]
+fn countdown_is_hidden_when_the_reset_is_unknown_or_past() {
+    let known = with_weekly_reset(usage("a", None, Some(1.0), Some(45.0)), "2099-01-05T00:00:00Z");
+    let entry = ChipEntry::build("a", Some(&known), Some(0));
+    assert_eq!(countdown_of(&entry, 0), None);
+    assert_eq!(countdown_of(&entry, -60), None);
+
+    let unknown = ChipEntry::build("a", Some(&usage("a", None, Some(1.0), Some(45.0))), Some(0));
+    assert_eq!(unknown.countdown_text(0), None);
+    let no_data = ChipEntry::build("a", None, Some(0));
+    assert_eq!(no_data.countdown_text(0), None);
+}
+
+#[test]
+fn countdown_is_hidden_on_expired_or_missing_chips_and_without_a_weekly_window() {
+    let mut u = with_weekly_reset(usage("a", None, Some(1.0), Some(45.0)), "2099-01-05T00:00:00Z");
+    u.state = UsageState::Expired;
+    assert_eq!(countdown_of(&ChipEntry::build("a", Some(&u), Some(0)), 3_600), None);
+    u.state = UsageState::Missing;
+    assert_eq!(countdown_of(&ChipEntry::build("a", Some(&u), Some(0)), 3_600), None);
+
+    let mut no_weekly = with_weekly_reset(usage("a", None, Some(1.0), None), "2099-01-05T00:00:00Z");
+    no_weekly.seven_day.percent = None;
+    assert_eq!(
+        countdown_of(&ChipEntry::build("a", Some(&no_weekly), Some(0)), 3_600),
+        None
+    );
+}
+
+#[test]
+fn compact_chips_drop_the_countdown_and_full_chips_widen_by_it() {
+    let ctx = egui::Context::default();
+    let with = with_weekly_reset(
+        usage("a", Some("gutosjc@x.io"), Some(1.0), Some(45.0)),
+        "2099-01-05T00:00:00Z",
+    );
+    let without = usage("a", Some("gutosjc@x.io"), Some(1.0), Some(45.0));
+    let entries = vec![
+        ChipEntry::build("a", Some(&with), Some(0)),
+        ChipEntry::build("a", Some(&without), Some(0)),
+    ];
+    let now = reset_unix() - 4 * 86_400;
+    let mut cache = None;
+    let _ = ctx.run(egui::RawInput::default(), |ctx| {
+        let painter = ctx.layer_painter(LayerId::new(Order::Tooltip, Id::new("usage_chips_test_countdown")));
+        cache = Some(build_cache(&painter, &entries, &[0, 1], (1, 0, 0), now));
+    });
+    let cache = cache.expect("cache built inside the frame");
+
+    assert_eq!(
+        cache.chips[0]
+            .countdown
+            .as_ref()
+            .map(|g| g.text().to_owned())
+            .as_deref(),
+        Some(" \u{b7} 4d")
+    );
+    assert!(cache.chips[1].countdown.is_none());
+    assert!(cache.widths.full[0] > cache.widths.full[1]);
+    assert!((cache.widths.compact[0] - cache.widths.compact[1]).abs() <= f32::EPSILON);
+    assert!(cache.countdown_refresh_in.is_some_and(|secs| (1..=60).contains(&secs)));
+}
+
+#[test]
+fn the_cache_asks_for_a_minute_refresh_only_while_a_countdown_is_visible() {
+    let ctx = egui::Context::default();
+    let entries = vec![ChipEntry::build(
+        "a",
+        Some(&usage("a", None, Some(1.0), Some(45.0))),
+        Some(0),
+    )];
+    let mut cache = None;
+    let _ = ctx.run(egui::RawInput::default(), |ctx| {
+        let painter = ctx.layer_painter(LayerId::new(Order::Tooltip, Id::new("usage_chips_test_nocountdown")));
+        cache = Some(build_cache(&painter, &entries, &[0], (1, 0, 0), 0));
+    });
+
+    assert_eq!(cache.expect("cache built inside the frame").countdown_refresh_in, None);
 }

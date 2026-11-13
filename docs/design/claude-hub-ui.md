@@ -33,17 +33,17 @@ Tokens novos para `theme.rs` (única adição; tudo mais reusa):
 
 Posição: `ToolbarItem::UsageChips`, entre a busca e os botões de ação, mesma faixa de 46 px; chip centralizado verticalmente, altura 28 (fps meter = 24, botões = 30). Gap entre chips 6.
 
-Chip cheio (largura calculada, máx ~330). **Pedido do usuário:** depois do nome vem o identificador da conta = parte local do e-mail (antes do `@`), proportional 10.5 `FG_DIM()`, separado por ` · `, máx 10 chars + `…`; omitido se o e-mail é desconhecido. O mesmo identificador aparece no compacto (máx 5 chars) e nas linhas de overflow:
+Chip cheio (largura calculada, máx ~330). **Pedido do usuário:** o chip mostra só o nick da conta = parte local do e-mail (antes do `@`), proportional 11.5 `FG()`, máx 14 chars + `…`; sem e-mail, cai para o nome do perfil. Depois do 7d vem o tempo até o reset semanal (` · 4d`, proportional 10.5 `FG_DIM()`): `Nd` (≥1 dia, arredonda p/ baixo), `Nh` (<1 dia), `Nm` (<1 h); oculto se o reset é desconhecido/passado ou se o chip está expirado/sem login. O texto é cacheado com o layout e renovado no máximo uma vez por minuto (um `request_repaint_after` até a virada do minuto, só com contador visível). Nome do perfil, e-mail e reset exato ficam no tooltip:
 ```
- ┌────────────────────────────────────────────────────┐
- │ ● conta2 · gutosjc  5h ▰▰▰▰▱▱▱▱ 42%  7d ▰▰▱▱▱▱▱▱ 18% │   28h
- └────────────────────────────────────────────────────┘
-  8 6 dot  name(max 84, ellipsis)  8  grupo=label10+4+bar28x4+4+pct26  8 gap  grupo  8
+ ┌──────────────────────────────────────────────────────────┐
+ │ ● gutosjc  5h ▰▰▰▰▱▱▱▱ 42%  7d ▰▰▱▱▱▱▱▱ 18% · 4d │   28h
+ └──────────────────────────────────────────────────────────┘
+  8 6 dot  nick(max 104, ellipsis)  8  grupo=label10+4+bar28x4+4+pct26  8 gap  grupo  contador  8
 ```
 - Fill `alpha(blend(PANEL_BG_ALT(), accent, 0.10), 232)`, stroke 1 `alpha(blend(BORDER_SUBTLE(), accent, 0.36), 220)` (mesma receita do fps meter), raio 10.
 - Dot: círculo r=3, `accent` (acento do perfil). Nome: proportional 11.5 `FG()`. Rótulos `5h`/`7d`: proportional 8.5 `FG_DIM()` (mesmo tamanho do "fps"). Percentual: monospace 10.5, cor = `severity_color` quando ≥75, senão `FG_SOFT()`; largura fixa 26 (direita alinhada) para o chip não "dançar" entre 9% e 100%.
 - Barras 28x4, centralizadas; frac = pct/100 clamp.
-- Compacto (nome + identificador curto + 7d): dot, nome (máx 64), ` · ` + identificador (máx 5 chars + `…`, `FG_DIM`), barra 7d 20x4, pct. Largura ~185. Ativa para todos os chips ao mesmo tempo (nunca mistura cheio+compacto).
+- Compacto (nick + 7d, sem contador): dot, nick (máx 8 chars + `…`), barra 7d 20x4, pct. Largura ~150. Ativa para todos os chips ao mesmo tempo (nunca mistura cheio+compacto).
 - Prioridade de espaço: (1) busca encolhe até o mínimo atual; (2) todos compactam; (3) chips que não cabem vão para o menu de overflow existente como linhas `● nome  5h 42%  7d 18%` (mesmo layout da linha do launcher, sem badge); o `OverflowMenu` aparece se houver itens de ação OU chips excedentes.
 - Estados:
   - hover: fill `blend(PANEL_BG_ALT(), accent, 0.20)`, stroke `blend(BORDER_STRONG, accent, 0.45)`, cursor pointer; pressed: fill `blend(PANEL_BG_ALT(), accent, 0.30)`.
