@@ -25,8 +25,10 @@ use super::hub_ui::{self, Severity};
 pub(super) use paint::{show_chips, show_overflow_rows};
 pub(super) use time::{format_clock, format_relative, local_offset_secs};
 
-const IDENT_MAX_FULL: usize = 10;
-const IDENT_MAX_COMPACT: usize = 5;
+use time::{format_countdown, secs_to_next_minute};
+
+const NICK_MAX_FULL: usize = 14;
+const NICK_MAX_COMPACT: usize = 8;
 /// A fetch older than this makes an `Ok` profile read as stale.
 const STALE_AFTER_MS: i64 = 15 * 60 * 1000;
 const POLL_INTERVAL: Duration = Duration::from_secs(300);
@@ -43,8 +45,8 @@ const CHIP_PAD: f32 = 8.0;
 const DOT_DIAMETER: f32 = 6.0;
 const DOT_GAP: f32 = 6.0;
 const SECTION_GAP: f32 = 8.0;
-const NAME_MAX_FULL: f32 = 84.0;
-const NAME_MAX_COMPACT: f32 = 64.0;
+const NAME_MAX_FULL: f32 = 104.0;
+const NAME_MAX_COMPACT: f32 = 72.0;
 const LABEL_WIDTH: f32 = 10.0;
 const LABEL_GAP: f32 = 4.0;
 const PCT_WIDTH: f32 = 26.0;
@@ -77,7 +79,7 @@ pub(super) fn severity_for(percent: Option<f32>, api: Option<&str>) -> Severity 
     hub_ui::severity_for(percent, api)
 }
 
-/// Account identifier shown after the profile name: the e-mail's local part,
+/// Account identifier: the e-mail's local part,
 /// at most `max_chars` characters followed by `…` when cut. `None` when the
 /// e-mail is unknown or has no local part.
 #[must_use]
@@ -92,12 +94,24 @@ pub(super) fn account_id(email: Option<&str>, max_chars: usize) -> Option<String
     if local.is_empty() {
         return None;
     }
-    if local.chars().count() <= max_chars {
-        return Some(local);
+    Some(elide_chars(&local, max_chars))
+}
+
+/// `text` cut to `max_chars` characters followed by `…` when it is longer.
+fn elide_chars(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_owned();
     }
-    let mut cut: String = local.chars().take(max_chars).collect();
+    let mut cut: String = text.chars().take(max_chars).collect();
     cut.push('\u{2026}');
-    Some(cut)
+    cut
+}
+
+/// The only name a chip shows: the account nick (the e-mail's local part), or
+/// the profile name while the e-mail is unknown. Cut at `max_chars`.
+#[must_use]
+pub(super) fn chip_nick(name: &str, email: Option<&str>, max_chars: usize) -> String {
+    account_id(email, max_chars).unwrap_or_else(|| elide_chars(name, max_chars))
 }
 
 /// `42%`, or `—` when the window (or the whole profile) has no value yet.
@@ -140,15 +154,12 @@ impl ShownWindows {
     }
 }
 
-/// `("claude2 · gutosjc", "5h 37%  7d 12%")` — identity and usage halves of a chip label.
+/// `("gutosjc", "5h 37%  7d 12%")` — nick and usage halves of a chip label.
 /// The usage half is empty when the profile has no window to show.
 #[must_use]
 fn chip_label_parts(name: &str, usage: Option<&ProfileUsage>, compact: bool) -> (String, String) {
-    let id_max = if compact { IDENT_MAX_COMPACT } else { IDENT_MAX_FULL };
-    let head = match account_id(usage.and_then(|u| u.email.as_deref()), id_max) {
-        Some(id) => format!("{name} \u{b7} {id}"),
-        None => name.to_owned(),
-    };
+    let nick_max = if compact { NICK_MAX_COMPACT } else { NICK_MAX_FULL };
+    let head = chip_nick(name, usage.and_then(|u| u.email.as_deref()), nick_max);
     let shown = ShownWindows::of(usage);
     let mut parts: Vec<String> = Vec::new();
     if !compact && shown.five {
@@ -164,7 +175,7 @@ fn chip_label_parts(name: &str, usage: Option<&ProfileUsage>, compact: bool) -> 
 }
 
 /// One-line chip text, for accessibility and the overflow menu:
-/// `claude2 · gutosjc  5h 37%  7d 12%` (compact: `claude2 · gutos…  7d 12%`).
+/// `gutosjc  5h 37%  7d 12%` (compact: `gutosjc  7d 12%`, nick cut at 8 characters).
 /// An expired or missing login replaces the 7d part by `expired` / `no login`.
 #[must_use]
 pub(super) fn chip_label(usage: &ProfileUsage, compact: bool) -> String {
@@ -226,11 +237,11 @@ fn count_as_f32(count: usize) -> f32 {
     f32::from(u16::try_from(count).unwrap_or(u16::MAX))
 }
 
-/// Full chip: dot, name, id, 5h group and 7d group (or a status pill in place of 7d).
-/// A hidden window takes no space.
+/// Full chip: dot, nick, 5h group and 7d group (or a status pill in place of 7d), then the
+/// reset countdown (`countdown_w`, zero when hidden). A hidden window takes no space.
 #[must_use]
-fn full_chip_width(name_w: f32, id_w: f32, pill_w: Option<f32>, shown: ShownWindows) -> f32 {
-    let mut width = CHIP_PAD + DOT_DIAMETER + DOT_GAP + name_w + id_w + CHIP_PAD;
+fn full_chip_width(nick_w: f32, pill_w: Option<f32>, shown: ShownWindows, countdown_w: f32) -> f32 {
+    let mut width = CHIP_PAD + DOT_DIAMETER + DOT_GAP + nick_w + countdown_w + CHIP_PAD;
     if shown.five {
         width += SECTION_GAP + GROUP_WIDTH_FULL;
     }
@@ -240,10 +251,10 @@ fn full_chip_width(name_w: f32, id_w: f32, pill_w: Option<f32>, shown: ShownWind
     width
 }
 
-/// Compact chip: dot, name, id, then only the 7d group (or the status pill).
+/// Compact chip: dot, nick, then only the 7d group (or the status pill); no countdown.
 #[must_use]
-fn compact_chip_width(name_w: f32, id_w: f32, pill_w: Option<f32>, shown: ShownWindows) -> f32 {
-    let mut width = CHIP_PAD + DOT_DIAMETER + DOT_GAP + name_w + id_w + CHIP_PAD;
+fn compact_chip_width(nick_w: f32, pill_w: Option<f32>, shown: ShownWindows) -> f32 {
+    let mut width = CHIP_PAD + DOT_DIAMETER + DOT_GAP + nick_w + CHIP_PAD;
     if pill_w.is_some() || shown.seven {
         width += SECTION_GAP + pill_w.unwrap_or(GROUP_WIDTH_COMPACT);
     }
@@ -329,8 +340,8 @@ pub(super) struct ResetInfo {
 pub(super) struct ChipEntry {
     pub(super) name: String,
     pub(super) usage: Option<ProfileUsage>,
-    id_full: Option<String>,
-    id_compact: Option<String>,
+    nick_full: String,
+    nick_compact: String,
     /// `Fulano Silva · fulano@exemplo.com`, whichever parts are known.
     pub(super) identity: Option<String>,
     pub(super) reset_five: Option<ResetInfo>,
@@ -362,21 +373,26 @@ impl ChipEntry {
         Self {
             name: name.to_owned(),
             usage: usage.cloned(),
-            id_full: account_id(email, IDENT_MAX_FULL),
-            id_compact: account_id(email, IDENT_MAX_COMPACT),
+            nick_full: chip_nick(name, email, NICK_MAX_FULL),
+            nick_compact: chip_nick(name, email, NICK_MAX_COMPACT),
             identity: usage.and_then(identity_line),
             reset_five: usage.and_then(|u| reset_info(&u.five_hour, offset, false)),
             reset_seven: usage.and_then(|u| reset_info(&u.seven_day, offset, true)),
         }
     }
 
-    /// Identifier text for the active presentation.
-    fn id(&self, compact: bool) -> Option<&str> {
-        if compact {
-            self.id_compact.as_deref()
-        } else {
-            self.id_full.as_deref()
+    /// Nick text for the active presentation.
+    fn nick(&self, compact: bool) -> &str {
+        if compact { &self.nick_compact } else { &self.nick_full }
+    }
+
+    /// Short time until the weekly window resets (`4d`, `17h`, `35m`); `None` when the reset is
+    /// unknown or past, when the weekly window is hidden or when a status pill takes its place.
+    fn countdown_text(&self, now_secs: i64) -> Option<String> {
+        if self.pill_text().is_some() || !ShownWindows::of(self.usage.as_ref()).seven {
+            return None;
         }
+        format_countdown(self.reset_seven.as_ref()?.unix.saturating_sub(now_secs))
     }
 
     /// Text of the status pill replacing the 7d group, if the login is unusable.
@@ -393,8 +409,8 @@ impl ChipEntry {
 pub(super) struct ChipLayout {
     name_full: Arc<Galley>,
     name_compact: Arc<Galley>,
-    id_full: Option<Arc<Galley>>,
-    id_compact: Option<Arc<Galley>>,
+    /// ` · 4d` after the 7d group, laid out with `Color32::PLACEHOLDER`; full chips only.
+    countdown: Option<Arc<Galley>>,
     pill_width: Option<f32>,
     /// `5h` / `7d` captions and their percentages, laid out with
     /// `Color32::PLACEHOLDER`; the paint call supplies the colour.
@@ -410,14 +426,6 @@ impl ChipLayout {
         if compact { &self.name_compact } else { &self.name_full }
     }
 
-    fn id(&self, compact: bool) -> Option<&Arc<Galley>> {
-        if compact {
-            self.id_compact.as_ref()
-        } else {
-            self.id_full.as_ref()
-        }
-    }
-
     /// Caption and percentage galleys of the 5h or 7d window.
     fn window(&self, five_hour: bool) -> (&Arc<Galley>, &Arc<Galley>) {
         if five_hour {
@@ -429,16 +437,25 @@ impl ChipLayout {
 }
 
 /// Galleys and widths of every chip. Rebuilt only when the snapshot, the
-/// profile list or `pixels_per_point` change — never per frame.
+/// profile list or `pixels_per_point` change, and once per minute while a reset
+/// countdown is visible — never per frame.
 #[derive(Default)]
 pub(super) struct UsageChipsCache {
-    key: Option<(u64, u32)>,
+    /// `(usage version, pixels_per_point bits, countdown minute)`; the minute is 0 when no
+    /// countdown is shown.
+    key: Option<(u64, u32, i64)>,
+    /// Seconds until the next minute boundary when a countdown is visible.
+    countdown_refresh_in: Option<i64>,
     pub(super) widths: ChipWidths,
     pub(super) chips: Vec<ChipLayout>,
 }
 
-fn id_galley(painter: &Painter, id: Option<&str>) -> Option<Arc<Galley>> {
-    id.map(|id| hub_ui::elided(painter, &format!(" \u{b7} {id}"), FontId::proportional(10.5), 120.0))
+fn countdown_galley(painter: &Painter, text: &str) -> Arc<Galley> {
+    painter.layout_no_wrap(
+        format!(" \u{b7} {text}"),
+        FontId::proportional(10.5),
+        Color32::PLACEHOLDER,
+    )
 }
 
 fn window_galleys(painter: &Painter, caption: &str, window: Option<&UsageWindow>) -> (Arc<Galley>, Arc<Galley>) {
@@ -448,40 +465,46 @@ fn window_galleys(painter: &Painter, caption: &str, window: Option<&UsageWindow>
     )
 }
 
-fn build_cache(painter: &Painter, entries: &[ChipEntry], slots: &[usize], key: (u64, u32)) -> UsageChipsCache {
+fn build_cache(
+    painter: &Painter,
+    entries: &[ChipEntry],
+    slots: &[usize],
+    key: (u64, u32, i64),
+    now_secs: i64,
+) -> UsageChipsCache {
     let mut cache = UsageChipsCache {
         key: Some(key),
         ..UsageChipsCache::default()
     };
     for (index, entry) in entries.iter().enumerate() {
         let name_font = FontId::proportional(11.5);
-        let name_full = hub_ui::elided(painter, &entry.name, name_font.clone(), NAME_MAX_FULL);
-        let name_compact = hub_ui::elided(painter, &entry.name, name_font, NAME_MAX_COMPACT);
-        let id_full = id_galley(painter, entry.id(false));
-        let id_compact = id_galley(painter, entry.id(true));
+        let name_full = hub_ui::elided(painter, entry.nick(false), name_font.clone(), NAME_MAX_FULL);
+        let name_compact = hub_ui::elided(painter, entry.nick(true), name_font, NAME_MAX_COMPACT);
         let pill_width = entry.pill_text().map(|text| hub_ui::pill_width(painter, text));
-        let width_of = |galley: &Option<Arc<Galley>>| galley.as_ref().map_or(0.0, |g| g.size().x);
+        let countdown = entry
+            .countdown_text(now_secs)
+            .map(|text| countdown_galley(painter, &text));
         let usage = entry.usage.as_ref();
         let shown = ShownWindows::of(usage);
         cache.widths.full.push(full_chip_width(
             name_full.size().x,
-            width_of(&id_full),
             pill_width,
             shown,
+            countdown.as_ref().map_or(0.0, |g| g.size().x),
         ));
-        cache.widths.compact.push(compact_chip_width(
-            name_compact.size().x,
-            width_of(&id_compact),
-            pill_width,
-            shown,
-        ));
+        cache
+            .widths
+            .compact
+            .push(compact_chip_width(name_compact.size().x, pill_width, shown));
+        if countdown.is_some() {
+            cache.countdown_refresh_in = Some(secs_to_next_minute(now_secs));
+        }
         let (label_five, pct_five) = window_galleys(painter, "5h", usage.map(|u| &u.five_hour));
         let (label_seven, pct_seven) = window_galleys(painter, "7d", usage.map(|u| &u.seven_day));
         cache.chips.push(ChipLayout {
             name_full,
             name_compact,
-            id_full,
-            id_compact,
+            countdown,
             pill_width,
             label_five,
             label_seven,
@@ -687,17 +710,33 @@ pub(super) fn now_unix_ms() -> i64 {
 }
 
 impl HubState {
-    /// Rebuilds the chip layout cache when the snapshot, the profile list or
-    /// the scale changed since it was built.
+    /// Rebuilds the chip layout cache when the snapshot, the profile list, the
+    /// scale or (while a reset countdown is visible) the minute changed since it
+    /// was built. A visible countdown schedules one repaint at the next minute.
     pub(super) fn ensure_usage_chip_cache(&mut self, ctx: &Context) {
-        let key = (self.usage.version, ctx.pixels_per_point().to_bits());
+        let now_secs = now_unix_ms() / 1000;
+        let minute = if self.usage.cache.countdown_refresh_in.is_some() {
+            now_secs.div_euclid(60)
+        } else {
+            0
+        };
+        let key = (self.usage.version, ctx.pixels_per_point().to_bits(), minute);
         if self.usage.cache.key == Some(key) {
             return;
         }
         let names: Vec<String> = self.usage.entries.iter().map(|entry| entry.name.clone()).collect();
         let slots = self.accent_slots(&names).to_vec();
         let painter = ctx.layer_painter(LayerId::new(Order::Tooltip, Id::new("usage_chips_measure")));
-        self.usage.cache = build_cache(&painter, &self.usage.entries, &slots, key);
+        let mut cache = build_cache(&painter, &self.usage.entries, &slots, key, now_secs);
+        if let Some(wait) = cache.countdown_refresh_in {
+            // The countdown only changes on the minute: wake the UI exactly then. The key
+            // follows the minute so the rebuild happens (and re-arms this) once per minute.
+            cache.key = Some((key.0, key.1, now_secs.div_euclid(60)));
+            ctx.request_repaint_after(Duration::from_secs(u64::try_from(wait).unwrap_or(60)));
+        } else {
+            cache.key = Some((key.0, key.1, 0));
+        }
+        self.usage.cache = cache;
     }
 }
 

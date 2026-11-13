@@ -14,17 +14,14 @@ pub(super) fn pointer_button_checks_clickable_target(
     (modifiers.ctrl || modifiers.command) && button == egui::PointerButton::Primary && pressed
 }
 
-pub(super) fn local_primary_selection_allowed(modifiers: egui::Modifiers) -> bool {
-    !modifiers.alt && !modifiers.ctrl && !modifiers.command
-}
-
 pub(super) fn pointer_button_uses_local_selection(
     terminal_mode: TermMode,
     button: egui::PointerButton,
     modifiers: egui::Modifiers,
 ) -> bool {
-    button == egui::PointerButton::Primary
-        && (!pty_mouse_reporting_enabled(terminal_mode, modifiers) || local_primary_selection_allowed(modifiers))
+    // With mouse tracking on, the app owns the left button; Shift is the escape hatch for
+    // selecting text locally (as in other terminals).
+    button == egui::PointerButton::Primary && !pty_mouse_reporting_enabled(terminal_mode, modifiers)
 }
 
 pub(super) fn pointer_button_starts_local_selection(
@@ -41,8 +38,7 @@ pub(super) fn pointer_drag_updates_local_selection(
     buttons: input::PointerButtons,
     modifiers: egui::Modifiers,
 ) -> bool {
-    buttons.primary
-        && (!pty_mouse_reporting_enabled(terminal_mode, modifiers) || local_primary_selection_allowed(modifiers))
+    buttons.primary && !pty_mouse_reporting_enabled(terminal_mode, modifiers)
 }
 
 pub(super) fn pointer_button_routes_to_pty_mouse(

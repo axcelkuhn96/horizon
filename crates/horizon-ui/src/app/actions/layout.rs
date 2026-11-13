@@ -117,12 +117,13 @@ impl HorizonApp {
             0.0
         };
 
-        if self.fixed_overlays_visible()
-            && self.template_config.features.attention_feed
-            && let Some(rect) =
-                estimated_outer_rect(viewport, minimap_height, &self.template_config.overlays, &self.board)
-        {
-            zones.push(rect);
+        if self.fixed_overlays_visible() && self.template_config.features.attention_feed {
+            zones.push(estimated_outer_rect(
+                viewport,
+                minimap_height,
+                &self.template_config.overlays,
+                &self.board,
+            ));
         }
 
         let exclusion = OverlayExclusion::new(zones);

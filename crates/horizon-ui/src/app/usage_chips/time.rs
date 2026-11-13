@@ -71,6 +71,29 @@ pub(in crate::app) fn format_relative(secs: i64) -> String {
     }
 }
 
+/// Reset countdown shown on a chip: `4d`, `17h`, `35m` (days only from a day on, hours only from
+/// an hour on, rounding down). `None` once the reset has passed.
+#[must_use]
+pub(super) fn format_countdown(secs: i64) -> Option<String> {
+    if secs <= 0 {
+        None
+    } else if secs < MINUTE {
+        Some("<1m".to_owned())
+    } else if secs < HOUR {
+        Some(format!("{}m", secs / MINUTE))
+    } else if secs < DAY {
+        Some(format!("{}h", secs / HOUR))
+    } else {
+        Some(format!("{}d", secs / DAY))
+    }
+}
+
+/// Seconds from `now_secs` to the next minute boundary (1..=60).
+#[must_use]
+pub(super) fn secs_to_next_minute(now_secs: i64) -> i64 {
+    MINUTE - now_secs.rem_euclid(MINUTE)
+}
+
 /// Age of a snapshot: `just now`, `3 min ago`, `2 h ago`, `1 d ago`.
 #[must_use]
 pub(super) fn format_age(secs: i64) -> String {
@@ -122,6 +145,27 @@ mod tests {
         assert_eq!(format_relative(12 * MINUTE), "12m");
         assert_eq!(format_relative(HOUR + 12 * MINUTE), "1h 12m");
         assert_eq!(format_relative(3 * DAY + 4 * HOUR), "3d 4h");
+    }
+
+    #[test]
+    fn countdown_rounds_down_to_one_unit() {
+        assert_eq!(format_countdown(0), None);
+        assert_eq!(format_countdown(-30), None);
+        assert_eq!(format_countdown(30).as_deref(), Some("<1m"));
+        assert_eq!(format_countdown(35 * MINUTE + 59).as_deref(), Some("35m"));
+        assert_eq!(format_countdown(59 * MINUTE + 59).as_deref(), Some("59m"));
+        assert_eq!(format_countdown(HOUR).as_deref(), Some("1h"));
+        assert_eq!(format_countdown(17 * HOUR + 30 * MINUTE).as_deref(), Some("17h"));
+        assert_eq!(format_countdown(23 * HOUR + 59 * MINUTE).as_deref(), Some("23h"));
+        assert_eq!(format_countdown(DAY).as_deref(), Some("1d"));
+        assert_eq!(format_countdown(4 * DAY + 23 * HOUR).as_deref(), Some("4d"));
+    }
+
+    #[test]
+    fn next_minute_boundary_is_between_one_and_sixty_seconds() {
+        assert_eq!(secs_to_next_minute(0), 60);
+        assert_eq!(secs_to_next_minute(59), 1);
+        assert_eq!(secs_to_next_minute(61), 59);
     }
 
     #[test]

@@ -34,7 +34,8 @@ impl Board {
     /// Applies `event` to `panel_id`: the panel's state moves, and when the change asks for
     /// attention (see [`crate::agent_status::attention_policy`]) an attention entry
     /// (source [`STATUS_ATTENTION_SOURCE`]) and a [`StatusNotice`] are raised. Entries of this
-    /// source resolve when the agent is `Working` again or gone. Unknown panels are ignored.
+    /// source resolve when the agent is `Working` again or gone, or once the panel is focused
+    /// in a focused window (`process_agent_status`). Unknown panels are ignored.
     pub fn apply_agent_status(&mut self, panel_id: PanelId, event: StatusEvent) {
         self.apply_agent_status_from(panel_id, event, StatusSource::Hook);
     }
@@ -96,9 +97,13 @@ impl Board {
             self.apply_agent_status(panel_id, event);
         }
         if self.window_focused
-            && let Some(panel) = self.focused.and_then(|id| self.panel_mut(id))
+            && let Some(panel_id) = self.focused
+            && let Some(panel) = self.panel_mut(panel_id)
         {
             panel.mark_agent_status_seen();
+            // Looking at the panel answers its status entry. Entries are only raised for a panel
+            // that is not being looked at, so this never drops a fresh one.
+            self.resolve_status_attention(panel_id);
         }
     }
 
@@ -346,6 +351,98 @@ mod tests {
         board.reconcile_agent_attention_signal(panel_id, workspace_id, "Ready for input");
         board.reconcile_agent_attention_signal(panel_id, workspace_id, "");
 
+        assert_eq!(open_status_entries(&board, panel_id), 1);
+    }
+
+    #[test]
+    fn focusing_the_panel_in_a_focused_window_resolves_its_status_entry() {
+        let (mut board, panel_id, other_id) = editor_board();
+        board.focused = Some(other_id);
+        board.attention_enabled = true;
+        board.apply_agent_status(panel_id, event(AgentStatus::Working));
+        board.apply_agent_status(panel_id, event(AgentStatus::Done));
+
+        // Not looked at yet: the entry survives the per-frame pass.
+        board.process_agent_status();
+        assert_eq!(open_status_entries(&board, panel_id), 1);
+
+        board.focus(panel_id);
+        board.process_agent_status();
+        assert_eq!(open_status_entries(&board, panel_id), 0);
+    }
+
+    #[test]
+    fn a_focused_panel_in_an_unfocused_window_keeps_its_status_entry_until_the_window_is_focused() {
+        let (mut board, panel_id, _) = editor_board();
+        board.focused = Some(panel_id);
+        board.attention_enabled = true;
+        board.set_window_focused(false);
+        board.apply_agent_status(panel_id, event(AgentStatus::Working));
+        board.apply_agent_status(panel_id, event(AgentStatus::Done));
+
+        board.process_agent_status();
+        assert_eq!(
+            open_status_entries(&board, panel_id),
+            1,
+            "not resolved right after creation"
+        );
+
+        board.set_window_focused(true);
+        board.process_agent_status();
+        assert_eq!(open_status_entries(&board, panel_id), 0);
+    }
+
+    #[test]
+    fn a_new_working_status_resolves_the_entry() {
+        let (mut board, panel_id, other_id) = editor_board();
+        board.focused = Some(other_id);
+        board.attention_enabled = true;
+        board.apply_agent_status(panel_id, event(AgentStatus::Working));
+        board.apply_agent_status(panel_id, event(AgentStatus::Done));
+        assert_eq!(open_status_entries(&board, panel_id), 1);
+
+        board.apply_agent_status(panel_id, event(AgentStatus::Working));
+
+        assert_eq!(open_status_entries(&board, panel_id), 0);
+    }
+
+    #[test]
+    fn going_to_the_panel_resolves_only_its_entry_through_the_feed_action() {
+        let (mut board, panel_id, other_id) = editor_board();
+        board.focused = Some(other_id);
+        board.attention_enabled = true;
+        board.apply_agent_status(panel_id, event(AgentStatus::Working));
+        board.apply_agent_status(panel_id, event(AgentStatus::Done));
+        let id = board.unresolved_attention().next().expect("status entry").id;
+
+        assert!(board.resolve_attention(id));
+        board.focus(panel_id);
+
+        assert_eq!(board.unresolved_attention().count(), 0);
+    }
+
+    #[test]
+    fn a_dismissed_status_entry_is_not_raised_again_until_the_next_busy_to_idle_change() {
+        let (mut board, panel_id, other_id) = editor_board();
+        board.focused = Some(other_id);
+        board.attention_enabled = true;
+        board.apply_agent_status(panel_id, event(AgentStatus::Working));
+        board.apply_agent_status(panel_id, event(AgentStatus::Done));
+        let id = board.unresolved_attention().next().expect("status entry").id;
+
+        assert!(board.dismiss_attention(id));
+        assert_eq!(open_status_entries(&board, panel_id), 0);
+
+        // The session-file poller repeats the unchanged state on every poll.
+        for _ in 0..3 {
+            board.apply_agent_status_from(panel_id, event(AgentStatus::Done), StatusSource::SessionFile);
+            board.apply_agent_status(panel_id, event(AgentStatus::Done));
+            board.process_agent_status();
+        }
+        assert_eq!(open_status_entries(&board, panel_id), 0);
+
+        board.apply_agent_status(panel_id, event(AgentStatus::Working));
+        board.apply_agent_status(panel_id, event(AgentStatus::Done));
         assert_eq!(open_status_entries(&board, panel_id), 1);
     }
 
